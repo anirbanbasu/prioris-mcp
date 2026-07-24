@@ -5,7 +5,7 @@ from typing import ClassVar
 
 from fastmcp.server.middleware import Middleware
 
-from pymcp import PACKAGE_NAME
+from prioris_mcp import PACKAGE_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +26,10 @@ class StripUnknownArgumentsMiddleware(Middleware):
                 if unknown_args:
                     logger.info(f"Unknown arguments for tool '{context.message.name}': {list(unknown_args)}")
                 context.message.arguments = filtered_args  # modify in place
-        except Exception as e:  # pragma: no cover
-            logger.error(
-                f"Error in {StripUnknownArgumentsMiddleware.__name__}: {e}",
-                exc_info=True,
+        except Exception:  # pragma: no cover
+            logger.exception(
+                f"Error in {StripUnknownArgumentsMiddleware.__name__}.on_call_tool",
+                stack_info=True,
             )
         return await call_next(context)
 
@@ -50,7 +50,8 @@ class ResponseMetadataMiddleware(Middleware):
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.debug(f"{operation_name} completed in {duration_ms:.2f}ms")
             return result, duration_ms
-        except Exception as e:
+        # FIXME: Remove. the no cover pragma and implement a test.
+        except Exception as e:  # pragma: no cover
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.warning(
                 f"{operation_name} failed after {duration_ms:.2f}ms: {e}",

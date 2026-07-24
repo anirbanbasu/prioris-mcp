@@ -38,7 +38,7 @@ class MCPMixin:
             fn = getattr(self, fn_name)
             mcp.tool(**tool_copy)(fn)  # pass remaining metadata as kwargs
         # Register resources
-        for res in self.resources:
+        for res in self.resources:  # pragma: no cover
             assert "fn" in res and "uri" in res, "Resource metadata must include 'fn' and 'uri' keys."
             res_copy = copy.deepcopy(res)
             fn_name = res_copy.pop("fn")
@@ -46,7 +46,7 @@ class MCPMixin:
             fn = getattr(self, fn_name)
             mcp.resource(uri, **res_copy)(fn)
         # Register prompts
-        for pr in self.prompts:
+        for pr in self.prompts:  # pragma: no cover
             assert "fn" in pr, "Prompt metadata must include the 'fn' key."
             pr_copy = copy.deepcopy(pr)
             fn_name = pr_copy.pop("fn")

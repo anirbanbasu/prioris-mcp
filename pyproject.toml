@@ -1,41 +1,32 @@
 [project]
-name = "pymcp-template"
-version = "0.2.4"
-description = "A template for developing MCP servers in Python"
+name = "prioris-mcp"
+version = "0.1.0"
+description = "A MCP server to facilitate looking up prior art."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
 authors = [
     { name = "Anirban Basu", email = "anirbanbasu@users.noreply.github.com" }
 ]
-keywords = ["python3", "example", "server", "model-context-protocol-server", "mcp-server"]
-requires-python = ">=3.12"
+keywords = ["python3", "prior-art", "server", "model-context-protocol-server", "mcp-server"]
+requires-python = ">=3.13"
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-    "ddgs>=9.5.4",
-    "environs>=14.3.0",
-    "fastmcp",
-    "pydantic-monty>=0.0.4",
+    "environs>=15.0.1",
+    "fastmcp>=3.4.4",
 ]
 
 [project.scripts]
-pymcp = "pymcp.server:main"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/pymcp"]
-
-[tool.uv.sources]
-fastmcp = { git = "https://github.com/jlowin/fastmcp.git" }
+prioris-mcp = "prioris_mcp.server:main"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["uv_build>=0.11.29,<0.12.0"]
+build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
@@ -53,13 +44,13 @@ possibly-unresolved-reference = "warn"
 invalid-argument-type = "ignore"
 
 [tool.ty.environment]
-python-version = "3.12"
+python-version = "3.13"
 
 [tool.ruff]
 line-length = 120
-target-version = "py312"
+target-version = "py313"
 include = [
-    "src/pymcp/**/*.py",
+    "src/prioris_mcp/**/*.py",
     "tests/**/*.py",
     "docs/**/*.py",
 ]
@@ -87,7 +78,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["pymcp"]
+known-first-party = ["prioris-mcp"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

@@ -1,12 +1,12 @@
 # Contributing
 
-Thank you for your interest in contributing to PyMCP. Pull requests are welcome. However, please open an issue first to discuss what you would like to change.
+Thank you for your interest in contributing to PriorisMCP. Pull requests are welcome. However, please open an issue first to discuss what you would like to change.
 
 ## Prerequisites
 
 Follow the [installation instructions in the README](README.md#installation).
 
-Install [`prek`](https://prek.j178.dev/installation/) and install all dependencies using `just install-all` for the installation of PyMCP.
+Install [`prek`](https://prek.j178.dev/installation/) and install all dependencies using `just install-all` for the installation of PriorisMCP.
 
 Then enable `pre-commit` hooks by running the following in the _WD_.
 

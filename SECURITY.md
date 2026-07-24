@@ -1,6 +1,6 @@
 # Security Policy
 
-The PyMCP project and its maintainers take security vulnerabilities seriously.
+The PriorisMCP project and its maintainers take security vulnerabilities seriously.
 
 ## Reporting a Vulnerability
 
@@ -22,7 +22,7 @@ What separates a security vulnerability from other unwanted behavior (a non-secu
 
 ### How to Report a Security Vulnerability
 
-If you think you have identified a security issue with the PyMCP project, _do not open a public issue_. To responsibly report a security issue, please navigate to the "Security" tab for the repository, and click "[Report a vulnerability](https://github.com/anirbanbasu/pymcp/security/advisories/new)".
+If you think you have identified a security issue with the PriorisMCP project, _do not open a public issue_. To responsibly report a security issue, please navigate to the "Security" tab for the repository, and click "[Report a vulnerability](https://github.com/anirbanbasu/prioris-mcp/security/advisories/new)".
 
 Be sure to include as much detail as necessary in your report. As with reporting normal issues, a minimal reproducible example will help the maintainers address the issue faster.
 
@@ -38,7 +38,7 @@ The following are generally **not** considered security vulnerabilities:
 
 ## Security Best Practices for Users
 
-While using PyMCP, we recommend:
+While using PriorisMCP, we recommend:
 
 - Always use the latest stable version.
 - Keep all dependencies up to date.

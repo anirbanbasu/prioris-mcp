@@ -1,12 +1,11 @@
 import asyncio
 import logging
-import string
 
 import pytest
 from fastmcp import Client, FastMCP
 
-from pymcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
-from pymcp.server import PyMCP
+from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
+from prioris_mcp.server import PriorisMCP
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +18,7 @@ class TestStripUnknownArgumentsMiddleware:
     def mcp_server(cls):
         """Fixture to create an MCP server instance with the middleware."""
         server = FastMCP()
-        mcp_obj = PyMCP()
+        mcp_obj = PriorisMCP()
         server_with_features = mcp_obj.register_features(server)
         server_with_features.add_middleware(StripUnknownArgumentsMiddleware())
         return server_with_features
@@ -173,7 +172,7 @@ class TestResponseMetadataMiddleware:
     def mcp_server(cls):
         """Fixture to create an MCP server instance with the middleware."""
         server = FastMCP()
-        mcp_obj = PyMCP()
+        mcp_obj = PriorisMCP()
         server_with_features = mcp_obj.register_features(server)
         server_with_features.add_middleware(ResponseMetadataMiddleware())
         return server_with_features
@@ -228,129 +227,13 @@ class TestResponseMetadataMiddleware:
         assert "version" in results.meta[ResponseMetadataMiddleware.PACKAGE_METADATA_KEY], (
             "Expected 'version' in package metadata"
         )
-        assert results.meta[ResponseMetadataMiddleware.PACKAGE_METADATA_KEY]["name"] == "pymcp-template"
+        assert results.meta[ResponseMetadataMiddleware.PACKAGE_METADATA_KEY]["name"] == "prioris-mcp"
         assert "tool_response_time_ms" in results.meta[ResponseMetadataMiddleware.TIMING_METADATA_KEY], (
             "Expected 'tool_response_time_ms' in timing metadata"
         )
         assert isinstance(
             results.meta[ResponseMetadataMiddleware.TIMING_METADATA_KEY]["tool_response_time_ms"], float
         ), "Expected 'tool_response_time_ms' to be a float"
-
-        # Verify logging occurred for metadata addition
-        assert any("Added package metadata to tool response" in record.message for record in caplog.records), (
-            "Expected debug logging of package metadata addition"
-        )
-
-    def test_call_tool_no_response(self, mcp_client: Client, caplog):
-        """Test that the middleware passes up exceptions."""
-        tool_name = "permutations"
-
-        with caplog.at_level(logging.DEBUG):
-            try:
-                results = asyncio.run(
-                    self.call_tool(
-                        tool_name,
-                        mcp_client,
-                        n=5,
-                        k=6,  # k > n to force exception
-                    )
-                )
-            except Exception as e:
-                logger.error(f"Exception during tool call. {e}", exc_info=True)
-                results = None
-
-        # Verify the tool call returns None because an exception was raised (k > n is invalid)
-        assert results is None, "Expected results to be None because of exception in tool"
-
-        # Verify error logging occurred
-        assert any(
-            record.levelno == logging.ERROR and "cannot be greater" in record.message for record in caplog.records
-        ), "Expected error logging due to exception in tool call"
-
-        assert any("failed after" in record.message for record in caplog.records), (
-            "Expected warning logging of operation failure"
-        )
-
-        # Verify no logging occurred for metadata addition since result is None
-        assert not any("Added package metadata to tool response" in record.message for record in caplog.records), (
-            "Did not expect debug logging of package metadata addition when exceptions occur"
-        )
-
-    def test_call_tool_with_specific_metadata(self, mcp_client: Client, caplog):
-        """Test that existing metadata is preserved and package metadata is added."""
-        tool_name = "generate_password"
-        expected_password_length = 12
-
-        with caplog.at_level(logging.DEBUG):
-            results = asyncio.run(
-                self.call_tool(
-                    tool_name,
-                    mcp_client,
-                    use_special_chars=True,
-                    length=expected_password_length,
-                )
-            )
-
-        # Verify the tool call succeeded with valid argument
-        assert hasattr(results, "content"), "Expected results to have 'content' attribute"
-        assert hasattr(results, "structured_content"), "Expected results to have 'structured_content' attribute"
-        assert "result" in results.structured_content, "Expected 'structured_content' to have 'result' key"
-
-        # Verify the generated password has the expected length
-        generated_password = results.structured_content["result"]
-        assert len(generated_password) == expected_password_length, (
-            f"Expected generated password to be of length {expected_password_length}, got {len(generated_password)}"
-        )
-
-        assert getattr(results, "meta", None) is not None, "Expected results to have a valid 'meta' attribute"
-        assert ResponseMetadataMiddleware.PACKAGE_METADATA_KEY in results.meta, (
-            f"Expected '{ResponseMetadataMiddleware.PACKAGE_METADATA_KEY}' in meta"
-        )
-        assert ResponseMetadataMiddleware.TIMING_METADATA_KEY in results.meta, (
-            f"Expected '{ResponseMetadataMiddleware.TIMING_METADATA_KEY}' in meta"
-        )
-        assert "name" in results.meta[ResponseMetadataMiddleware.PACKAGE_METADATA_KEY], (
-            "Expected 'name' in package metadata"
-        )
-        assert "version" in results.meta[ResponseMetadataMiddleware.PACKAGE_METADATA_KEY], (
-            "Expected 'version' in package metadata"
-        )
-        assert results.meta[ResponseMetadataMiddleware.PACKAGE_METADATA_KEY]["name"] == "pymcp-template"
-        assert "tool_response_time_ms" in results.meta[ResponseMetadataMiddleware.TIMING_METADATA_KEY], (
-            "Expected 'tool_response_time_ms' in timing metadata"
-        )
-        assert isinstance(
-            results.meta[ResponseMetadataMiddleware.TIMING_METADATA_KEY]["tool_response_time_ms"], float
-        ), "Expected 'tool_response_time_ms' to be a float"
-
-        # Verify tool specific metadata is still present and values make sense
-        assert "length_satisfied" in results.meta[tool_name], (
-            "Expected tool specific metadata key 'length_satisfied' to be present"
-        )
-        assert results.meta[tool_name]["length_satisfied"] is True, (
-            "Expected 'length_satisfied' to be True since password matches requested length"
-        )
-        assert "generation_attempts" in results.meta[tool_name], (
-            "Expected tool specific metadata key 'generation_attempts' to be present"
-        )
-        assert results.meta[tool_name]["generation_attempts"] >= 1, "Expected 'generation_attempts' to be at least 1"
-        assert "character_set" in results.meta[tool_name], (
-            "Expected tool specific metadata key 'character_set' to be present"
-        )
-        assert isinstance(results.meta[tool_name]["character_set"], str), "Expected 'character_set' to be a string"
-        # Verify character_set contains expected character types when use_special_chars=True
-        # The character_set should be the pool of available characters for password generation
-        character_set = results.meta[tool_name]["character_set"]
-        assert any(c in character_set for c in string.ascii_lowercase), (
-            "Expected character_set to contain lowercase letters"
-        )
-        assert any(c in character_set for c in string.ascii_uppercase), (
-            "Expected character_set to contain uppercase letters"
-        )
-        assert any(c in character_set for c in string.digits), "Expected character_set to contain digits"
-        assert any(c in character_set for c in string.punctuation), (
-            "Expected character_set to contain punctuation when use_special_chars=True"
-        )
 
         # Verify logging occurred for metadata addition
         assert any("Added package metadata to tool response" in record.message for record in caplog.records), (
