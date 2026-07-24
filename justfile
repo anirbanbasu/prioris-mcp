@@ -67,6 +67,12 @@ launch-inspector:
     fi
     . ~/.nvm/nvm.sh && nvm use --lts && npx @modelcontextprotocol/inspector
 
+# Start the documentation server
+start-documentation-server docs_host="0.0.0.0" docs_port="8888":
+    @echo "Launching documentation server at http://{{ docs_host }}:{{ docs_port }}..."
+    @uv run zensical serve -a {{ docs_host }}:{{ docs_port }}
+    @echo "Documentation server shut down."
+
 # Run the Open Source Vulnerability scanner
 vulnerability-scan:
     @echo "Running Open Source Vulnerability scanner..."

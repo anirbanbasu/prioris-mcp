@@ -18,7 +18,9 @@ class EnvVars:
     )
 
     PRIORIS_MCP_HOST = env.str("PRIORIS_MCP_HOST", default="localhost")
-    PRIORIS_MCP_PORT = env.int("PRIORIS_MCP_PORT", default=8000)
+    PRIORIS_MCP_PORT = env.int(
+        "PRIORIS_MCP_PORT", default=8000, validate=Range(min=1024, max=49151)
+    )  # Valid port range is 1024-49151 for non-privileged ports
 
     PRIORIS_MCP_LOG_LEVEL = env.str(
         "PRIORIS_MCP_LOG_LEVEL",

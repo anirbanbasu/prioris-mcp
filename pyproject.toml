@@ -33,6 +33,9 @@ dev = [
     "icecream>=2.1.8",
     "ty>=0.0.1a29",
 ]
+docs = [
+    "zensical>=0.0.51",
+]
 test = [
     "coverage>=7.9.1",
     "pytest>=8.4.1",
