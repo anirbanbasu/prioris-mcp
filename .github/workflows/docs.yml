@@ -1,15 +1,40 @@
 name: Documentation
 on:
   push:
-    branches:
-      - master
-      - main
+    branches: ["master"]
+    paths:
+      - "docs/**"
+  pull_request:
+    branches: ["master"]
+    paths:
+      - "docs/**"
 permissions:
   contents: read
-  pages: write
-  id-token: write
 jobs:
+  build:
+    name: Build (preview)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 #v7.0.0
+        with:
+          python-version: 3.x
+      - run: pip install zensical
+      - run: zensical build --clean
+      - name: Upload build artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: docs-site-preview
+          path: site
+          retention-days: 5
+
   deploy:
+    name: Deploy
+    needs: build
+    if: github.event_name == 'push'
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
