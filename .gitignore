@@ -193,4 +193,5 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+docs/zensical-reference
 docs/superpowers
