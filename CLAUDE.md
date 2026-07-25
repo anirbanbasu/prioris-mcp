@@ -66,4 +66,4 @@ Tests exercise the server in-process via FastMCP's `Client`/`FastMCP` pair (no n
 
 `docs/` uses [Zensical](https://zensical.org) (config in `zensical.toml`, served locally with `just start-documentation-server`, published at https://docs-prioris-mcp.anirbanbasu.com). It holds the project's user-facing documentation — `README.md` is intentionally minimal (badges, license, contributing) and points there instead of duplicating content.
 
-`docs/srs` (planned) will hold user- and Claude-readable Software Requirement Specifications in Zensical form, tracked in git. Keep it distinct from `docs/superpowers`, which holds Superpowers-plugin-generated intermediate artifacts and is git-ignored — never treat it as committed project documentation.
+`docs/requirement-specification` holds user- and Claude-readable Software Requirement Specifications in Zensical form, tracked in git. Keep it distinct from `docs/superpowers`, which holds Superpowers-plugin-generated intermediate artifacts and is git-ignored — never treat it as committed project documentation.
