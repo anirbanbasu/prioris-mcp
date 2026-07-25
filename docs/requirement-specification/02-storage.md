@@ -61,6 +61,13 @@ The default — and, for v1, only implemented — backend persists to a director
 
 Explicitly out of scope for v1 (see the out-of-scope list in the [SRS overview](index.md)), but the `exists`/`write`/`read` contract above is designed so an S3-backed implementation is a second implementation of the same interface, selected by configuration — not a different code path through the providers or tools.
 
+## Future: retention and redistribution-aware persistence
+
+Two further concerns are explicitly deferred beyond v1 (see [SRS overview → Out of scope for v1](index.md#out-of-scope-for-v1)), and kept distinct from each other despite both bearing on "how long persisted content sticks around":
+
+- **Retention/eviction.** v1's local filesystem backend never evicts anything — persisted full text and Markdown accumulate indefinitely. Because storage keys are content-addressed from immutable canonical identifiers (see [Identifier canonicalisation](#identifier-canonicalisation)), nothing ever becomes *incorrect* by staying persisted — the only concern is unbounded disk growth, not staleness. The intended future direction is a size-based cap with LRU eviction (evicting least-recently-*read* entries once a configured disk quota is reached), using an extended sidecar/manifest entry (see [Storage keys are hashed](#storage-keys-are-hashed-not-built-from-the-raw-identifier)) tracking last-read time alongside the existing fetch timestamp. A simpler time-based TTL could be offered as a secondary option, but LRU-by-size is the primary direction since a TTL alone doesn't bound disk usage under heavy recent use, and can evict content that's still being actively reused simply for being old.
+- **Redistribution-policy-aware persistence.** Whether persisted content may ever be shared beyond the MCP client that originally fetched it is a licensing question, not a disk-management one, and v1 does not have full visibility into per-article licences to make that decision safely — Europe PMC's metadata already carries a `license` field (see [Interface specification](06-interface-specification.md)), but arXiv's Export API exposes none; only the already-deferred OAI-PMH `arXiv` format does. This is future work gated on that visibility, not on the eviction mechanism above.
+
 ## Next pages
 
 - [Functional requirements](03-functional-requirements.md) — the concrete arXiv and Europe PMC tools/resources built on this interface for v1.

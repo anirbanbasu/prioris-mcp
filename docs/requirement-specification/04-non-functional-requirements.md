@@ -8,13 +8,25 @@ This page covers cross-cutting qualities that apply across capabilities and prov
 
 ## Concurrency
 
-An MCP client (an LLM) may legitimately invoke variations of the same tool in parallel — for example, several `research_arxiv_search` calls with different keywords, or several `research_europepmc_fetch_metadata` calls for different identifiers, issued together rather than one at a time. v1 must support this without corrupting state or silently violating a source's terms of use.
+An MCP client (an LLM) may legitimately invoke variations of the same tool in parallel — for example, several `research_arxiv_search` calls with different keywords, or several `research_arxiv_fetch_full_text` calls for different items, issued together rather than one at a time. (Batch `fetch_metadata` — see [Functional requirements](03-functional-requirements.md) — exists precisely so that fetching metadata for several identifiers is one call, not several concurrent ones; it is deliberately not the driving example here.) v1 must support this without corrupting state or silently violating a source's terms of use.
 
 ### Rate limiting must serialise, not just gate
 
 [Architecture → Caching and rate limiting](01-architecture.md#caching-and-rate-limiting) states each provider's outbound rate limit (arXiv: documented 1 request per 3 seconds; Europe PMC: the same, self-imposed — see [Functional requirements](03-functional-requirements.md)). A check that only asks "has 3 seconds passed since the last request?" is correct for sequential calls but insufficient under concurrency: several parallel tool invocations against the same provider can each see "yes, enough time has passed" and fire together, breaching the limit.
 
 Each provider must therefore serialise its own outbound requests through a single queue (or equivalent), so that concurrent tool invocations against that provider are admitted to the network one at a time, spaced according to its rate limit, rather than racing against a shared check. This applies within a provider; it does not require coordinating across providers, since the rate limit itself is per-source.
+
+### Rate-limit breaches are handled inside the provider's queue, not by the caller
+
+The serialised queue above is designed so that a rate-limit breach (an HTTP 429 from arXiv or Europe PMC) should not happen at all under normal operation with a single PriorisMCP instance — it's prevented by construction, not detected after the fact. A 429 arriving despite the queue therefore indicates something outside this SRS's control: clock drift in the spacing, a second PriorisMCP instance sharing the same outbound IP without coordinating, or the source tightening its limits unilaterally.
+
+When a 429 does occur, the provider's queue must handle it with an adaptive backoff, not surface it to the MCP caller as an immediate failure: on a 429, the queue doubles its wait before retrying that single request — **3s, 6s, 12s, 24s, 48s, ...**, starting from the documented base spacing — transparent to the tool call that triggered it; spacing decays back toward that 3-second base after a sustained run of successful requests. This keeps rate limiting a provider concern end-to-end, consistent with [Architecture → Caching and rate limiting](01-architecture.md#caching-and-rate-limiting), rather than leaking upstream HTTP failure handling into the MCP tool contract.
+
+The total backoff time within a single tool call is bounded, not indefinite, and deliberately short: MCP tool calls are synchronous, and most MCP clients enforce their own tool-call timeout well under a minute, so a long internal retry buys nothing once the client has already given up on the call. The default total backoff budget is **60 seconds** — once the doubling sequence would exceed the remaining budget, the provider gives up and returns a distinct `rate_limited` error rather than retrying further or hanging the call, the same bounded, typed-failure principle [Security](05-security.md#fetched-content-is-untrusted-input-to-parse_full_text) already applies to `parse_full_text` on pathological input. This budget should be a configurable `EnvVars` entry (per `src/prioris_mcp/__init__.py`'s existing pattern), not a hardcoded constant, since the right value depends on the actual MCP client's own timeout, which this SRS cannot assume.
+
+### `provider_unavailable` failures are not retried
+
+A non-429 upstream failure — a timeout, a connection error, or a 5xx response from arXiv or Europe PMC — is a different kind of failure from a 429 and is handled differently: it surfaces immediately as `provider_unavailable` (see [Interface specification](06-interface-specification.md)), with no retry inside the queue. Unlike a 429, which has a clear, well-understood recovery signal (wait, then the fixed-rate window reopens), a timeout or 5xx carries no such guarantee — retrying it blindly risks compounding delay on top of the rate-limit queue's own backoff for no known benefit, so the queue reports it immediately and lets the caller decide whether and when to retry.
 
 ### Storage must de-duplicate in-flight work, not just completed work
 
@@ -24,4 +36,4 @@ Each provider must therefore serialise its own outbound requests through a singl
 
 ## Next
 
-[Security](05-security.md) covers the other cross-cutting requirements category for v1. [Interface specification](06-interface-specification.md) and [test specification](07-test-specification.md) exist as pages but are deliberately deferred.
+[Security](05-security.md) covers the other cross-cutting requirements category for v1. [Interface specification](06-interface-specification.md) and [test specification](07-test-specification.md) state the concrete schemas and acceptance criteria this page's concurrency requirements are tested against.

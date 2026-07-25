@@ -47,7 +47,7 @@ type-check:
     @uv run ty check
     @echo "Type checking complete."
 
-export MCP_SERVER_TRANSPORT := "streamable-http"
+export PRIORIS_MCP_TRANSPORT := "streamable-http"
 
 # Run tests with coverage reporting
 test-coverage:

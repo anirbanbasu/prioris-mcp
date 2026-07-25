@@ -10,7 +10,7 @@ This page states **behavioural requirements** — what each tool must accept con
 
 ## Tool surface: per-provider, domain-prefixed
 
-`search`, `list_top_n`, `fetch_metadata`, `fetch_full_text`, and `parse_full_text` are each exposed as **per-provider** tools, not one generic tool parameterised by provider: `research_arxiv_*` and `research_europepmc_*`. Two reasons, both about keeping an MCP client's (an LLM's) job easier and its mistakes fewer:
+`search`, `fetch_metadata`, `fetch_full_text`, and `parse_full_text` are each exposed as **per-provider** tools, not one generic tool parameterised by provider: `research_arxiv_*` and `research_europepmc_*`. (`list_top_n` follows the same per-provider naming convention but is arXiv-only in v1 — see below.) Two reasons, both about keeping an MCP client's (an LLM's) job easier and its mistakes fewer:
 
 - **Schema tightness.** Identifier patterns (an arXiv ID vs. a Europe PMC identifier) and valid `format` values (which formats a given provider/item actually offers) genuinely differ per provider. A generic tool would need either a loose, unvalidated identifier field, or a `format` enum whose valid values secretly depend on whatever provider value was also passed — neither is expressible cleanly as a JSON schema, and both push validation into runtime code instead of the tool's own contract.
 - **Grouping without collision.** The `research_` prefix isn't there to disambiguate — `arxiv_fetch_metadata` is already unambiguous on its own — it's a scanability convention for a flat MCP tool list, so all research-publication tools sort and group together regardless of source, and won't collide with a future `patent_*` domain's tools of the same shape (e.g. `patent_uspto_fetch_metadata`).
@@ -35,7 +35,7 @@ The per-provider native resolution this delegates to (what would have been `rese
 
 ## Search and listing results carry full metadata
 
-Both arXiv's and Europe PMC's search/listing responses already include full record metadata (title, authors, abstract, identifiers, ...) per hit — neither API returns bare IDs that would need a follow-up call to resolve. `research_arxiv_search`, `research_arxiv_list_top_n`, `research_europepmc_search`, and `research_europepmc_list_top_n` therefore all return the **same metadata shape as `fetch_metadata`**, one entry per result, so a caller doesn't pay a second round-trip just to see what a search already returned. `fetch_metadata` remains useful on its own for the case where a caller already has one specific identifier (e.g. from a citation) and wants its metadata without searching for it.
+Both arXiv's and Europe PMC's search responses already include full record metadata (title, authors, abstract, identifiers, ...) per hit — neither API returns bare IDs that would need a follow-up call to resolve. `research_arxiv_search`, `research_arxiv_list_top_n`, and `research_europepmc_search` therefore all return the **same metadata shape as `fetch_metadata`**, one entry per result, so a caller doesn't pay a second round-trip just to see what a search already returned. `fetch_metadata` remains useful on its own for the case where a caller already has one specific identifier (e.g. from a citation) and wants its metadata without searching for it.
 
 ## arXiv tools
 
@@ -43,7 +43,7 @@ Both arXiv's and Europe PMC's search/listing responses already include full reco
 |---|---|---|
 | `research_arxiv_search` | Must accept a free-text query and a way to bound the number of results returned; returns metadata records, one per hit. | Light |
 | `research_arxiv_list_top_n` | Must accept an arXiv subject category and a count N; returns metadata records for the top N items in that category. | Light |
-| `research_arxiv_fetch_metadata` | Must accept a single arXiv identifier; returns one metadata record; must fail with a not-found error for an identifier arXiv doesn't recognise. | Light |
+| `research_arxiv_fetch_metadata` | Must accept **one or more** arXiv identifiers in a single call (arXiv's own API accepts a comma-delimited ID list, making batched lookup a single rate-limited request instead of one per identifier); returns one metadata record per identifier arXiv recognises, plus which of the requested identifiers were not found — it must not fail the whole call just because some requested identifiers don't exist. | Light |
 | `research_arxiv_fetch_full_text` | Must accept an arXiv identifier and a format valid for that item (arXiv exposes both PDF and HTML); returns a reference to the persisted content (location, format, size), whether it was served from storage or freshly downloaded, and the resource URI for direct re-reads. | Heavy on a storage miss; light on a storage hit |
 | `research_arxiv_parse_full_text` | Must accept an arXiv identifier and the source format to parse; returns Markdown plus the resource URI for direct re-reads; fails with the single "not found" error (see [Architecture → `parse_full_text`](01-architecture.md)) if the source format isn't already persisted — it never triggers a fetch itself. | Heavy (CPU) on a first parse; light if already persisted |
 
@@ -54,10 +54,11 @@ All arXiv tools are subject to arXiv's documented rate limit — max **1 request
 | Tool | Requirement | Cost |
 |---|---|---|
 | `research_europepmc_search` | Must accept a free-text query and pagination appropriate to the Europe PMC REST API; returns metadata records, one per hit. | Light |
-| `research_europepmc_list_top_n` | Must accept a category (Europe PMC's equivalent grouping — exact taxonomy to pin down at implementation time, since Europe PMC doesn't have a single fixed classification scheme equivalent to arXiv's) and a count N; returns metadata records. | Light |
-| `research_europepmc_fetch_metadata` | Must accept a single Europe PMC identifier; returns one metadata record; must fail with a not-found error for an identifier Europe PMC doesn't recognise. | Light |
-| `research_europepmc_fetch_full_text` | Same requirement shape as the arXiv equivalent. | Heavy on a storage miss; light on a storage hit |
-| `research_europepmc_parse_full_text` | Same requirement shape as the arXiv equivalent. | Heavy (CPU) on a first parse; light if already persisted |
+| `research_europepmc_fetch_metadata` | Must accept **one or more** Europe PMC identifiers in a single call (Europe PMC has no dedicated batch parameter like arXiv's, but its query syntax can `OR` several identifier lookups into one request — a different mechanism achieving the same batching goal); returns one metadata record per identifier Europe PMC recognises, plus which of the requested identifiers were not found. | Light |
+| `research_europepmc_fetch_full_text` | Must accept a Europe PMC identifier. Unlike the arXiv equivalent, `format` is **not** a caller-supplied parameter — Europe PMC's only directly-servable full-text format is JATS XML (see [Interface specification](06-interface-specification.md)), so there is no choice to expose. Fails with a not-found error for an unrecognised identifier, or `format_unavailable` if Europe PMC doesn't host full text for that item itself. | Heavy on a storage miss; light on a storage hit |
+| `research_europepmc_parse_full_text` | Must accept a Europe PMC identifier (no `format` parameter, for the same reason as above — the persisted source is always XML); returns Markdown plus the resource URI; fails with the single "not found" error if the XML hasn't already been fetched. | Heavy (CPU) on a first parse; light if already persisted |
+
+There is no `research_europepmc_list_top_n` — Europe PMC has no single classification field equivalent to arXiv's subject categories, only several parallel multi-valued tagging schemes (keywords, Gene Ontology terms, disease/organism/method tags); see [SRS overview → Out of scope for v1](index.md#out-of-scope-for-v1) for the full list and why v1 doesn't force a mismatched mapping onto one of them.
 
 Europe PMC's [RESTful Web Service documentation](https://europepmc.org/RestfulWebService) does not publish a specific numeric rate limit. In its absence, **the Europe PMC provider self-imposes the same limit as arXiv — max 1 request per 3 seconds** — as a conservative, externally-justified default rather than an arbitrary invented figure, documented here so it isn't a silent implementation choice. This should be revisited if EBI publishes explicit guidance of its own.
 
@@ -78,4 +79,5 @@ Metadata is **not** exposed as a resource: it's only ever response-cached (TTL-b
 
 - [Non-functional requirements](04-non-functional-requirements.md) — concurrency and other cross-cutting qualities not tied to a single tool.
 - [Security](05-security.md) — untrusted-identifier and untrusted-content requirements that apply to `research_resolve_identifier` and `parse_full_text` above.
-- [Interface specification](06-interface-specification.md) and [test specification](07-test-specification.md) exist as pages but are deliberately deferred (see each page) until the provider APIs are better understood.
+- [Interface specification](06-interface-specification.md) — exact wire-level schemas for every tool above, grounded in the live arXiv and Europe PMC APIs.
+- [Test specification](07-test-specification.md) — acceptance criteria per capability, verified against those schemas.

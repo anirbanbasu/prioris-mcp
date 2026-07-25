@@ -14,7 +14,10 @@ class EnvVars:
 
     PRIORIS_MCP_ASGI_CORS_ALLOWED_ORIGINS = env.list(
         "PRIORIS_MCP_ASGI_CORS_ALLOWED_ORIGINS",
-        default=["*"],
+        # Default is restricted to localhost, not a wildcard: a wildcard origin lets any webpage's
+        # JavaScript read this server's responses, not just tools actually served from localhost.
+        # Override explicitly (e.g. to "*") for tools that need it, such as the MCP Inspector.
+        default=["http://localhost", "http://127.0.0.1"],
     )
 
     PRIORIS_MCP_HOST = env.str("PRIORIS_MCP_HOST", default="localhost")

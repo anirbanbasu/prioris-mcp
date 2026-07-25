@@ -22,15 +22,15 @@ The capability names below (`search`, `fetch_metadata`, ...) name the shared int
 | Capability | Description | Relative cost |
 |---|---|---|
 | `search` | Search items by keyword/query. | Light |
-| `list_top_n` | List the top-N items for a category, where "category" is a provider-defined grouping (e.g. an arXiv subject class). | Light |
-| `fetch_metadata` | Fetch metadata (title, authors, abstract, identifiers, category, dates, links, ...) for a single item. | Light |
+| `list_top_n` | List the top-N items for a category, where "category" is a provider-defined grouping (e.g. an arXiv subject class). v1 implements this for arXiv only — see below. | Light |
+| `fetch_metadata` | Fetch metadata (title, authors, abstract, identifiers, category, dates, links, ...) for one or more items in a single call — batching is worthwhile precisely because rate limiting (see below) makes N separate single-item calls costlier than one call for N identifiers. | Light |
 | `resolve_identifier` | Given an identifier already known to belong to this provider, resolve it to a fetchable URL in the target format (e.g. HTML, PDF), pinning a canonical version where the provider's identifiers are mutable. This is an internal, provider-native capability — see below. | Light |
 | `fetch_full_text` | Fetch the full text of a single item, in a given format, from its resolved URL. | Heavy (network I/O) |
 | `parse_full_text` | Convert previously-fetched full text into Markdown. | Heavy (CPU-bound) |
 
 `fetch_metadata` and `fetch_full_text` are deliberately separate operations, not two modes of one call. Metadata is small and cheap; full text means downloading and persisting a document (through the [storage abstraction](02-storage.md)), which is a materially heavier operation. Keeping them separate lets a client (or the MCP tool surface) request metadata without paying the cost of a full-text fetch it doesn't need.
 
-Not every provider necessarily implements every capability at full strength — e.g. what counts as a "category" for `list_top_n` is provider-defined (arXiv subject classification vs. Europe PMC's equivalent grouping), and a provider that can't sensibly support a capability should say so rather than fake it.
+Not every provider necessarily implements every capability at full strength — a provider that can't sensibly support a capability should say so rather than fake it. `list_top_n` is the concrete v1 example: it's provider-defined ("category" means an arXiv subject class), and Europe PMC has no equivalent single classification field, only several parallel multi-valued tagging schemes (see [Functional requirements → Europe PMC tools](03-functional-requirements.md#europe-pmc-tools)), so v1 simply doesn't implement `list_top_n` for Europe PMC rather than force a mismatched mapping.
 
 ### `resolve_identifier`
 
@@ -76,4 +76,5 @@ Rate limiting **is** a provider concern, and a distinct one from caching: it exi
 - [Functional requirements](03-functional-requirements.md) — the concrete arXiv and Europe PMC tools/resources built on this interface for v1.
 - [Non-functional requirements](04-non-functional-requirements.md) — concurrency and other cross-cutting qualities.
 - [Security](05-security.md) — untrusted-identifier and untrusted-content requirements.
-- [Interface specification](06-interface-specification.md) and [Test specification](07-test-specification.md) — deferred until the provider APIs and functional requirements are further along.
+- [Interface specification](06-interface-specification.md) — exact MCP wire-level schemas for every v1 tool.
+- [Test specification](07-test-specification.md) — acceptance criteria per capability.
