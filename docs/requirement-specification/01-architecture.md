@@ -75,4 +75,5 @@ Rate limiting **is** a provider concern, and a distinct one from caching: it exi
 - [Storage](02-storage.md) — how `fetch_full_text` results are persisted (local filesystem default, optional S3).
 - [Functional requirements](03-functional-requirements.md) — the concrete arXiv and Europe PMC tools/resources built on this interface for v1.
 - [Non-functional requirements](04-non-functional-requirements.md) — concurrency and other cross-cutting qualities.
-- [Interface specification](05-interface-specification.md) and [Test specification](06-test-specification.md) — deferred until the provider APIs and functional requirements are further along.
+- [Security](05-security.md) — untrusted-identifier and untrusted-content requirements.
+- [Interface specification](06-interface-specification.md) and [Test specification](07-test-specification.md) — deferred until the provider APIs and functional requirements are further along.

@@ -36,6 +36,12 @@ Two open-access, unauthenticated providers are deliberately chosen for v1 so tha
 - **Authenticated sources** (e.g. Semantic Scholar, or any source requiring an API key or OAuth). v1 targets unauthenticated, open-access sources only; authenticated sources are future work once credential handling and per-source rate/quota policies are designed.
 - **S3 (or other remote/object) storage backend.** The storage abstraction is designed for it from the start (see [Storage](02-storage.md)), but v1 implements the local filesystem backend only.
 
+## Assumptions and dependencies
+
+- **Provider availability.** PriorisMCP depends on arXiv's and Europe PMC's APIs remaining available and stable in shape; an outage or breaking API change in either is an external dependency, not something this SRS specifies behaviour for beyond the error semantics already described per-capability (see [Functional requirements](03-functional-requirements.md)).
+- **Consent for heavier operations rests with the MCP client.** PriorisMCP assumes the calling MCP client (the LLM, or the human behind it) is the point where consent for a heavier operation is decided — e.g. `parse_full_text` failing explicitly rather than silently triggering `fetch_full_text` (see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text)) exists specifically so that decision point remains with the caller, not PriorisMCP.
+- **Content licensing is separate from rate-limit terms of use.** The rate limits documented in [References](#references) govern *how often* PriorisMCP may call arXiv/Europe PMC; they say nothing about the licensing terms attached to the content itself once fetched. arXiv and Europe PMC articles carry their own (often per-article) licences — some permissive, some not — governing redistribution of full text. v1 persists fetched full text indefinitely via the [storage abstraction](02-storage.md) as a caching/de-duplication mechanism for the same MCP client that already fetched it; this SRS does not currently address longer-term redistribution of persisted content beyond that use, and this should be revisited before any feature that shares persisted content beyond the fetching client is considered.
+
 ## Definitions and acronyms
 
 | Term | Meaning |
@@ -56,5 +62,6 @@ Two open-access, unauthenticated providers are deliberately chosen for v1 so tha
 - [Storage](02-storage.md) — the `StorageBackend` abstraction and its local-filesystem and (future) S3 implementations.
 - [Functional requirements](03-functional-requirements.md) — the concrete tools/resources exposed for arXiv and Europe PMC in v1, in behavioural terms.
 - [Non-functional requirements](04-non-functional-requirements.md) — cross-cutting qualities, currently concurrency.
-- [Interface specification](05-interface-specification.md) — exact MCP wire-level input/output schemas (placeholder, deferred until the provider APIs are read).
-- [Test specification](06-test-specification.md) — verification/acceptance criteria per capability (placeholder, deferred until the interface specification exists).
+- [Security](05-security.md) — untrusted-identifier and untrusted-content requirements.
+- [Interface specification](06-interface-specification.md) — exact MCP wire-level input/output schemas (placeholder, deferred until the provider APIs are read).
+- [Test specification](07-test-specification.md) — verification/acceptance criteria per capability (placeholder, deferred until the interface specification exists).

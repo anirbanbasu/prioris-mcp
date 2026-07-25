@@ -24,4 +24,4 @@ Each provider must therefore serialise its own outbound requests through a singl
 
 ## Next
 
-This is the last SRS page with substantive content planned for now. [Interface specification](05-interface-specification.md) and [test specification](06-test-specification.md) exist as pages but are deliberately deferred.
+[Security](05-security.md) covers the other cross-cutting requirements category for v1. [Interface specification](06-interface-specification.md) and [test specification](07-test-specification.md) exist as pages but are deliberately deferred.

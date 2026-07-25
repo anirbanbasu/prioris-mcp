@@ -6,7 +6,7 @@ icon: lucide/wrench
 
 This page maps the `ResearchPublicationProvider` capabilities defined in [Architecture](01-architecture.md) onto the concrete MCP tools and resources exposed for the two v1 providers, arXiv and Europe PMC, per the [storage](02-storage.md) semantics already established.
 
-This page states **behavioural requirements** — what each tool must accept conceptually, and what guarantees it makes (error semantics, cost tier, persistence side effects) — not literal wire-level parameter names or JSON schemas. Exact input/output schemas belong in the [interface specification](05-interface-specification.md), written once the arXiv and Europe PMC APIs have actually been read during implementation; pinning them down here risks the SRS being wrong in a way implementation would then have to chase.
+This page states **behavioural requirements** — what each tool must accept conceptually, and what guarantees it makes (error semantics, cost tier, persistence side effects) — not literal wire-level parameter names or JSON schemas. Exact input/output schemas belong in the [interface specification](06-interface-specification.md), written once the arXiv and Europe PMC APIs have actually been read during implementation; pinning them down here risks the SRS being wrong in a way implementation would then have to chase.
 
 ## Tool surface: per-provider, domain-prefixed
 
@@ -77,4 +77,5 @@ Metadata is **not** exposed as a resource: it's only ever response-cached (TTL-b
 ## Next
 
 - [Non-functional requirements](04-non-functional-requirements.md) — concurrency and other cross-cutting qualities not tied to a single tool.
-- [Interface specification](05-interface-specification.md) and [test specification](06-test-specification.md) exist as pages but are deliberately deferred (see each page) until the provider APIs are better understood.
+- [Security](05-security.md) — untrusted-identifier and untrusted-content requirements that apply to `research_resolve_identifier` and `parse_full_text` above.
+- [Interface specification](06-interface-specification.md) and [test specification](07-test-specification.md) exist as pages but are deliberately deferred (see each page) until the provider APIs are better understood.

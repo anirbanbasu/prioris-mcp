@@ -18,4 +18,4 @@ Exact parameter names and enum values depend on details only the real arXiv and 
 
 ## Next
 
-- [Test specification](06-test-specification.md) — depends on this page existing, since test cases need concrete input/output shapes to assert against.
+- [Test specification](07-test-specification.md) — depends on this page existing, since test cases need concrete input/output shapes to assert against.
