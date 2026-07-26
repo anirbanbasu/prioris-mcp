@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+import httpx
 import pytest
 from fastmcp import Client, FastMCP
 
@@ -8,6 +9,39 @@ from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgum
 from prioris_mcp.server import PriorisMCP
 
 logger = logging.getLogger(__name__)
+
+# A single-result arXiv Atom feed used to stub the arXiv HTTP API for these tests. `greet` used
+# to be the vehicle for exercising these generic middlewares; now that it's been removed (see
+# CLAUDE.md - it was scaffolding, not a pattern to preserve), `research_arxiv_search` fills the
+# same role, with its one outbound HTTP call stubbed so these tests stay hermetic.
+_FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/2106.09685v2</id>
+    <published>2021-06-17T17:59:33Z</published>
+    <updated>2021-10-16T13:56:12Z</updated>
+    <title>A Paper</title>
+    <summary>An abstract.</summary>
+    <author><name>Jane Doe</name></author>
+    <arxiv:primary_category term="cs.CL"/>
+    <link href="http://arxiv.org/pdf/2106.09685v2" rel="related" type="application/pdf"/>
+  </entry>
+</feed>"""
+
+
+def _stubbed_mcp_obj() -> PriorisMCP:
+    """A `PriorisMCP` instance whose arXiv HTTP calls are stubbed, for exercising middleware generically."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_FEED_XML)
+
+    mcp_obj = PriorisMCP()
+    mcp_obj._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    mcp_obj._arxiv_provider._http_client = mcp_obj._http_client
+    return mcp_obj
 
 
 class TestStripUnknownArgumentsMiddleware:
@@ -18,7 +52,7 @@ class TestStripUnknownArgumentsMiddleware:
     def mcp_server(cls):
         """Fixture to create an MCP server instance with the middleware."""
         server = FastMCP()
-        mcp_obj = PriorisMCP()
+        mcp_obj = _stubbed_mcp_obj()
         server_with_features = mcp_obj.register_features(server)
         server_with_features.add_middleware(StripUnknownArgumentsMiddleware())
         return server_with_features
@@ -39,8 +73,8 @@ class TestStripUnknownArgumentsMiddleware:
 
     def test_strip_unknown_arguments(self, mcp_client: Client, caplog):
         """Test that unknown arguments are stripped from tool calls and logged."""
-        tool_name = "greet"
-        valid_name = "Test User"
+        tool_name = "research_arxiv_search"
+        valid_query = "cat:cs.CL"
         unknown_arg_value = "This should be stripped"
 
         with caplog.at_level(logging.INFO):
@@ -48,22 +82,18 @@ class TestStripUnknownArgumentsMiddleware:
                 self.call_tool(
                     tool_name,
                     mcp_client,
-                    name=valid_name,
+                    query=valid_query,
                     unknown_argument=unknown_arg_value,
                 )
             )
 
-        # Verify the tool call succeeded with valid argument
+        # Verify the tool call succeeded with the valid argument passed through
         assert hasattr(results, "content"), "Expected results to have 'content' attribute"
         assert hasattr(results, "structured_content"), "Expected results to have 'structured_content' attribute"
-        assert "result" in results.structured_content, "Expected 'structured_content' to have 'result' key"
-
-        # Verify the greeting contains the valid name (proving valid args passed through)
-        greeting = results.structured_content["result"]
-        assert valid_name in greeting, f"Expected greeting to contain '{valid_name}'"
+        assert results.structured_content["total_results"] == 1, "Expected the stubbed feed's single result"
 
         # Verify logging occurred for unknown arguments
-        assert any("Unknown arguments for tool 'greet'" in record.message for record in caplog.records), (
+        assert any(f"Unknown arguments for tool '{tool_name}'" in record.message for record in caplog.records), (
             "Expected logging of unknown arguments"
         )
 
@@ -73,39 +103,36 @@ class TestStripUnknownArgumentsMiddleware:
         )
 
     def test_all_arguments_unknown(self, mcp_client: Client, caplog):
-        """Test behavior when all provided arguments are unknown."""
-        tool_name = "greet"
+        """Test behaviour when every argument besides the required one is unknown."""
+        tool_name = "research_arxiv_search"
 
         with caplog.at_level(logging.INFO):
             results = asyncio.run(
                 self.call_tool(
                     tool_name,
                     mcp_client,
+                    query="cat:cs.CL",
                     completely_unknown_arg="value1",
                     another_unknown_arg="value2",
                 )
             )
 
-        # Verify the tool call still succeeds (using defaults)
+        # Verify the tool call still succeeds (unknown args stripped, defaults used for the rest)
         assert hasattr(results, "content"), "Expected results to have 'content' attribute"
         assert hasattr(results, "structured_content"), "Expected results to have 'structured_content' attribute"
-        assert "result" in results.structured_content, "Expected 'structured_content' to have 'result' key"
-
-        # Verify default greeting (no name provided)
-        greeting = results.structured_content["result"]
-        assert "World" in greeting, "Expected default greeting with 'World'"
+        assert results.structured_content["total_results"] == 1
 
         # Verify logging occurred
-        assert any("Unknown arguments for tool 'greet'" in record.message for record in caplog.records), (
+        assert any(f"Unknown arguments for tool '{tool_name}'" in record.message for record in caplog.records), (
             "Expected logging of unknown arguments"
         )
 
     def test_no_arguments_provided(self, mcp_client: Client, caplog):
-        """Test that middleware handles tools called with no arguments correctly."""
-        tool_name = "greet"
+        """Test that middleware handles a call with only the required argument, and no unknown ones."""
+        tool_name = "research_arxiv_search"
 
         with caplog.at_level(logging.INFO):
-            results = asyncio.run(self.call_tool(tool_name, mcp_client))
+            results = asyncio.run(self.call_tool(tool_name, mcp_client, query="cat:cs.CL"))
 
         # Verify the tool call succeeds
         assert hasattr(results, "content"), "Expected results to have 'content' attribute"
@@ -113,20 +140,18 @@ class TestStripUnknownArgumentsMiddleware:
 
         # Verify no middleware logging for this case (no args to strip)
         middleware_logs = [record for record in caplog.records if "Unknown arguments" in record.message]
-        assert len(middleware_logs) == 0, "Expected no middleware logging when no arguments provided"
+        assert len(middleware_logs) == 0, "Expected no middleware logging when no unknown arguments are provided"
 
     def test_only_valid_arguments(self, mcp_client: Client, caplog):
         """Test that middleware doesn't interfere when only valid arguments are provided."""
-        tool_name = "greet"
-        valid_name = "Valid User"
+        tool_name = "research_arxiv_search"
 
         with caplog.at_level(logging.INFO):
-            results = asyncio.run(self.call_tool(tool_name, mcp_client, name=valid_name))
+            results = asyncio.run(self.call_tool(tool_name, mcp_client, query="cat:cs.CL", max_results=5))
 
-        # Verify the tool call succeeds with the valid argument
+        # Verify the tool call succeeds with the valid arguments
         assert hasattr(results, "content"), "Expected results to have 'content' attribute"
-        greeting = results.structured_content["result"]
-        assert valid_name in greeting, f"Expected greeting to contain '{valid_name}'"
+        assert results.structured_content["total_results"] == 1
 
         # Verify no unknown argument logging
         unknown_arg_logs = [record for record in caplog.records if "Unknown arguments" in record.message]
@@ -134,15 +159,14 @@ class TestStripUnknownArgumentsMiddleware:
 
     def test_mixed_valid_and_unknown_arguments(self, mcp_client: Client, caplog):
         """Test middleware behavior with a mix of valid and unknown arguments."""
-        tool_name = "greet"
-        valid_name = "Mixed Test"
+        tool_name = "research_arxiv_search"
 
         with caplog.at_level(logging.INFO):
             results = asyncio.run(
                 self.call_tool(
                     tool_name,
                     mcp_client,
-                    name=valid_name,
+                    query="cat:cs.CL",
                     unknown1="value1",
                     unknown2={"key": "value2"},
                     unknown3=3.14,
@@ -150,11 +174,12 @@ class TestStripUnknownArgumentsMiddleware:
             )
 
         # Verify valid argument was used
-        greeting = results.structured_content["result"]
-        assert valid_name in greeting, f"Expected greeting to contain '{valid_name}'"
+        assert results.structured_content["total_results"] == 1
 
         # Verify multiple unknown arguments are logged
-        unknown_logs = [record for record in caplog.records if "Unknown arguments for tool 'greet'" in record.message]
+        unknown_logs = [
+            record for record in caplog.records if f"Unknown arguments for tool '{tool_name}'" in record.message
+        ]
         assert len(unknown_logs) > 0, "Expected logging for unknown arguments"
 
         # Verify all three unknown arguments are mentioned
@@ -172,7 +197,7 @@ class TestResponseMetadataMiddleware:
     def mcp_server(cls):
         """Fixture to create an MCP server instance with the middleware."""
         server = FastMCP()
-        mcp_obj = PriorisMCP()
+        mcp_obj = _stubbed_mcp_obj()
         server_with_features = mcp_obj.register_features(server)
         server_with_features.add_middleware(ResponseMetadataMiddleware())
         return server_with_features
@@ -193,26 +218,15 @@ class TestResponseMetadataMiddleware:
 
     def test_call_for_package_metadata(self, mcp_client: Client, caplog):
         """Test that metadata is added to tool responses and appropriate logging occurs."""
-        tool_name = "greet"
-        valid_name = "Test User"
+        tool_name = "research_arxiv_search"
 
         with caplog.at_level(logging.DEBUG):
-            results = asyncio.run(
-                self.call_tool(
-                    tool_name,
-                    mcp_client,
-                    name=valid_name,
-                )
-            )
+            results = asyncio.run(self.call_tool(tool_name, mcp_client, query="cat:cs.CL"))
 
-        # Verify the tool call succeeded with valid argument
+        # Verify the tool call succeeded with the valid argument
         assert hasattr(results, "content"), "Expected results to have 'content' attribute"
         assert hasattr(results, "structured_content"), "Expected results to have 'structured_content' attribute"
-        assert "result" in results.structured_content, "Expected 'structured_content' to have 'result' key"
-
-        # Verify the greeting contains the valid name (proving valid args passed through)
-        greeting = results.structured_content["result"]
-        assert valid_name in greeting, f"Expected greeting to contain '{valid_name}'"
+        assert results.structured_content["total_results"] == 1
 
         assert getattr(results, "meta", None) is not None, "Expected results to have a valid 'meta' attribute"
         assert ResponseMetadataMiddleware.PACKAGE_METADATA_KEY in results.meta, (

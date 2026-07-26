@@ -1,15 +1,12 @@
 import asyncio
 import logging
-import re
-from datetime import datetime
 
+import httpx
 import pytest
 from fastmcp import Client, FastMCP
 
-from prioris_mcp.server import (
-    PriorisMCP,
-    package_version,
-)
+from prioris_mcp import EnvVars
+from prioris_mcp.server import PriorisMCP
 
 logger = logging.getLogger(__name__)
 
@@ -57,70 +54,106 @@ class TestMCPServer:
             await mcp_client.close()
         return result
 
-    def test_tool_greet(self, mcp_client: Client):
-        """Test to call the greet tool on the MCP server."""
-        tool_name = "greet"
-        name_to_be_greeted = "Sherlock Holmes"
-        results = asyncio.run(
-            self.call_tool(
-                tool_name,
-                mcp_client,
-                name=name_to_be_greeted,
-            )
-        )
-        assert hasattr(results, "content"), "Expected the results to have a 'content' attribute."
-        assert len(results.content) == 1, f"Expected one result for the {tool_name} tool."
-        assert getattr(results, "structured_content", None) is not None, (
-            "Expected the results to have a 'structured_content' attribute."
-        )
-        assert "result" in results.structured_content, "Expected the 'structured_content' to have a 'result' key."
-        pattern = r"Hello(,?) (.+)! Welcome to the prioris-mcp (\d+\.\d+\.\d+(\.?[a-zA-Z]+\.?\d+)?) server! The current date time in UTC is ([\d\-T:.+]+). This response may be cached."
-        result = results.structured_content["result"]
-        match = re.match(pattern, result)
-        assert match, (
-            f"Expected the response to be a greeting in a specific format. The obtained response does not match the expected format: {result}"
-        )
-        name = match.group(2)  # Extracted name
-        assert name == name_to_be_greeted if name_to_be_greeted else "World", (
-            f"Expected the name in the greeting to be '{name_to_be_greeted}', but got '{name}'."
-        )
-        version = match.group(3)  # Extracted version
-        assert version == package_version, (
-            f"Expected the version in the greeting to be '{package_version}', but got '{version}'."
-        )
-        datetime_str = match.group(5)  # Extracted date-time
-        extracted_datetime = datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%S.%f%z")
-        assert isinstance(extracted_datetime, datetime), (
-            f"Expected the date-time to be a valid datetime object in the format %Y-%m-%dT%H:%M:%S.%f%z but obtained {datetime_str}"
-        )
 
-        # Try by explicitly passing name=None
-        results = asyncio.run(
-            self.call_tool(
-                tool_name,
-                mcp_client,
-                name=None,
-            )
-        )
-        assert hasattr(results, "content"), "Expected the results to have a 'content' attribute."
-        assert len(results.content) == 1, f"Expected one result for the {tool_name} tool."
-        assert getattr(results, "structured_content", None) is not None, (
-            "Expected the results to have a 'structured_content' attribute."
-        )
-        assert "result" in results.structured_content, "Expected the 'structured_content' to have a 'result' key."
-        result = results.structured_content["result"]
-        match = re.match(pattern, result)
-        assert match, (
-            f"Expected the response to be a greeting in a specific format. The obtained response does not match the expected format: {result}"
-        )
-        name = match.group(2)  # Extracted name
-        assert name == "World", f"Expected the name in the greeting to be 'World', but got '{name}'."
-        version = match.group(3)  # Extracted version
-        assert version == package_version, (
-            f"Expected the version in the greeting to be '{package_version}', but got '{version}'."
-        )
-        datetime_str = match.group(5)  # Extracted date-time
-        extracted_datetime = datetime.strptime(datetime_str, "%Y-%m-%dT%H:%M:%S.%f%z")
-        assert isinstance(extracted_datetime, datetime), (
-            f"Expected the date-time to be a valid datetime object in the format %Y-%m-%dT%H:%M:%S.%f%z but obtained {datetime_str}"
-        )
+class TestArxivTools:
+    """End-to-end MCP tool tests for the arXiv provider, stubbing arXiv's HTTP API."""
+
+    def _feed(self, arxiv_id: str = "2106.09685v2") -> bytes:
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:opensearch="http://a9.com/-/spec/opensearch/1.1/"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <opensearch:totalResults>1</opensearch:totalResults>
+  <entry>
+    <id>http://arxiv.org/abs/{arxiv_id}</id>
+    <published>2021-06-17T17:59:33Z</published>
+    <updated>2021-10-16T13:56:12Z</updated>
+    <title>A Paper</title>
+    <summary>An abstract.</summary>
+    <author><name>Jane Doe</name></author>
+    <arxiv:primary_category term="cs.CL"/>
+    <link href="http://arxiv.org/pdf/{arxiv_id}" rel="related" type="application/pdf"/>
+  </entry>
+</feed>""".encode()
+
+    def _server_and_client(self, handler, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        # `monkeypatch.setattr` (not `setenv` + `importlib.reload`) is the pattern already used
+        # by tests/test_storage.py for the same problem: `PRIORIS_MCP_STORAGE_DIR` is resolved
+        # into an `EnvVars` class attribute once, at process-import time, not re-read from the
+        # environment per call - a `setenv` alone would not affect it. Patching the attribute
+        # directly avoids that, and avoids `importlib.reload`, which mutates the live
+        # `prioris_mcp`/`prioris_mcp.storage` module objects for the rest of the test session
+        # and leaks into unrelated test files (confirmed: it broke tests/test_storage.py when
+        # tried).
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path)
+        mcp_obj = PriorisMCP()
+        mcp_obj._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        mcp_obj._arxiv_provider._http_client = mcp_obj._http_client
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_research_arxiv_search_returns_results(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._feed())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_arxiv_search", arguments={"query": "cat:cs.CL"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["total_results"] == 1
+
+    def test_research_arxiv_fetch_full_text_then_read_resource(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("id_list"):
+                return httpx.Response(200, content=self._feed())
+            return httpx.Response(200, content=b"%PDF-1.4 fake bytes")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_arxiv_fetch_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "pdf"}
+                )
+                resource_result = await client.read_resource("research://arxiv/2106.09685v2/pdf/fulltext")
+                return fetch_result, resource_result
+
+        fetch_result, resource_result = asyncio.run(scenario())
+        assert fetch_result.structured_content["served_from_storage"] is False
+        assert len(resource_result) == 1
+
+    def test_research_arxiv_parse_full_text_not_found_returns_error_envelope(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_arxiv_parse_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "pdf"}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["error"] == "not_found"
+
+    def test_greet_tool_no_longer_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._feed())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                tools = await client.list_tools()
+                return {t.name for t in tools}
+
+        names = asyncio.run(scenario())
+        assert "greet" not in names
+        assert "research_arxiv_search" in names

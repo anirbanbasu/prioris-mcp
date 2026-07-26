@@ -1,8 +1,8 @@
 import sys
-from datetime import UTC, datetime
 from importlib.metadata import version
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, Literal
 
+import httpx
 import uvicorn
 from fastmcp import Context, FastMCP
 from fastmcp.server.middleware.caching import (
@@ -19,45 +19,125 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 from prioris_mcp import PACKAGE_NAME, EnvVars
+from prioris_mcp.errors import call_returning_envelope
 from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
 from prioris_mcp.mixin import MCPMixin
+from prioris_mcp.parsers.html_markdownify import MarkdownifyHtmlBackend
+from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
+from prioris_mcp.providers.arxiv import ARXIV_BASE_SPACING_SECONDS, ArxivProvider
+from prioris_mcp.rate_limit import ProviderRequestQueue
+from prioris_mcp.storage import FilesystemStorageBackend
 
 package_version = version(PACKAGE_NAME)
 
 
 class PriorisMCP(MCPMixin):
-    """A simple MCP server implementation demonstrating various features."""
+    """PriorisMCP: MCP tools/resources for looking up prior art."""
 
     tools: ClassVar[list[dict]] = [
+        {"fn": "research_arxiv_search", "tags": ["research", "arxiv"], "annotations": {"readOnlyHint": True}},
+        {"fn": "research_arxiv_list_top_n", "tags": ["research", "arxiv"], "annotations": {"readOnlyHint": True}},
         {
-            "fn": "greet",
-            "tags": ["greeting", "example"],
+            "fn": "research_arxiv_fetch_metadata",
+            "tags": ["research", "arxiv"],
+            "annotations": {"readOnlyHint": True},
+        },
+        {
+            "fn": "research_arxiv_fetch_full_text",
+            "tags": ["research", "arxiv"],
+            "annotations": {"readOnlyHint": True},
+        },
+        {
+            "fn": "research_arxiv_parse_full_text",
+            "tags": ["research", "arxiv"],
             "annotations": {"readOnlyHint": True},
         },
     ]
 
-    async def greet(
+    resources: ClassVar[list[dict]] = [
+        {"fn": "read_fulltext_resource", "uri": "research://{provider}/{identifier}/{format}/fulltext"},
+        {"fn": "read_markdown_resource", "uri": "research://{provider}/{identifier}/{format}/markdown"},
+    ]
+
+    def __init__(self) -> None:
+        self._storage = FilesystemStorageBackend()
+        self._http_client = httpx.AsyncClient()
+        arxiv_queue = ProviderRequestQueue(
+            base_spacing_seconds=ARXIV_BASE_SPACING_SECONDS,
+            max_total_backoff_seconds=EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS,
+        )
+        pdf_backend = LiteParsePdfBackend()
+        html_backend = MarkdownifyHtmlBackend()
+        self._arxiv_provider = ArxivProvider(
+            storage=self._storage,
+            queue=arxiv_queue,
+            http_client=self._http_client,
+            pdf_backend=pdf_backend,
+            html_backend=html_backend,
+        )
+
+    async def research_arxiv_search(
         self,
         ctx: Context,
-        name: Annotated[
-            str | None,
-            Field(
-                default=None,
-                description="The optional name to be greeted.",
-                validate_default=False,
-            ),
-        ] = None,
-    ) -> str:
-        """Greet the caller with a quintessential Hello World message."""
-        welcome_message = f"Welcome to the {PACKAGE_NAME} {package_version} server! The current date time in UTC is {datetime.now(UTC).isoformat()}. This response may be cached."
-        response: str = ""
-        if name is None or name.strip() == "":
-            await ctx.warning("No name provided, using default greeting.")
-            response = f"Hello World! {welcome_message}"
-        else:
-            await ctx.info(f"Greeting {name}.")
-            response = f"Hello, {name}! {welcome_message}"
-        return response
+        query: Annotated[str, Field(description="arXiv search_query syntax, e.g. 'cat:cs.CL AND ti:transformers'")],
+        max_results: Annotated[
+            int, Field(default=10, description="Maximum results to return (arXiv caps at 2000)")
+        ] = 10,
+        start: Annotated[int, Field(default=0, description="Zero-based offset into the result set")] = 0,
+        sort_by: Annotated[
+            Literal["relevance", "lastUpdatedDate", "submittedDate"], Field(default="relevance")
+        ] = "relevance",
+        sort_order: Annotated[Literal["ascending", "descending"], Field(default="descending")] = "descending",
+    ) -> dict:
+        """Search arXiv by keyword/query, returning metadata records."""
+        return await call_returning_envelope(
+            self._arxiv_provider.search(
+                query, max_results=max_results, start=start, sort_by=sort_by, sort_order=sort_order
+            )
+        )
+
+    async def research_arxiv_list_top_n(
+        self,
+        ctx: Context,
+        category: Annotated[str, Field(description="arXiv subject class, e.g. 'cs.CL'")],
+        n: Annotated[int, Field(description="Number of most-recently-submitted items to return")],
+    ) -> dict:
+        """List the N most recently submitted arXiv items in a subject category."""
+        return await call_returning_envelope(self._arxiv_provider.list_top_n(category, n))
+
+    async def research_arxiv_fetch_metadata(
+        self,
+        ctx: Context,
+        arxiv_ids: Annotated[list[str], Field(description="One or more arXiv identifiers, version suffix optional")],
+    ) -> dict:
+        """Fetch metadata for one or more arXiv identifiers in a single call."""
+        return await call_returning_envelope(self._arxiv_provider.fetch_metadata(arxiv_ids))
+
+    async def research_arxiv_fetch_full_text(
+        self,
+        ctx: Context,
+        arxiv_id: Annotated[str, Field(description="An arXiv identifier, version suffix optional")],
+        format: Annotated[Literal["pdf", "html"], Field(description="Full-text format to fetch")],
+    ) -> dict:
+        """Fetch (or return the already-persisted) full text for an arXiv item."""
+        return await call_returning_envelope(self._arxiv_provider.fetch_full_text(arxiv_id, format))
+
+    async def research_arxiv_parse_full_text(
+        self,
+        ctx: Context,
+        arxiv_id: Annotated[str, Field(description="An arXiv identifier, version suffix optional")],
+        format: Annotated[Literal["pdf", "html"], Field(description="Already-persisted source format to parse")],
+    ) -> dict:
+        """Convert already-fetched arXiv full text into Markdown."""
+        return await call_returning_envelope(self._arxiv_provider.parse_full_text(arxiv_id, format))
+
+    async def read_fulltext_resource(self, provider: str, identifier: str, format: str) -> bytes:
+        """Read persisted full text for (provider, identifier, format); a plain not-found if absent."""
+        return await self._storage.read(provider, identifier, format)
+
+    async def read_markdown_resource(self, provider: str, identifier: str, format: str) -> bytes:
+        """Read persisted parsed Markdown for (provider, identifier, format); a plain not-found if absent."""
+        return await self._storage.read(provider, identifier, f"{format}-markdown")
 
 
 def app() -> FastMCP:  # pragma: no cover
@@ -86,7 +166,13 @@ def app() -> FastMCP:  # pragma: no cover
                 enabled=EnvVars.PRIORIS_MCP_RESPONSE_CACHE_TTL > 0,
             ),
             call_tool_settings=CallToolSettings(
-                included_tools=["greet"],
+                included_tools=[
+                    "research_arxiv_search",
+                    "research_arxiv_list_top_n",
+                    "research_arxiv_fetch_metadata",
+                    "research_arxiv_fetch_full_text",
+                    "research_arxiv_parse_full_text",
+                ],
                 ttl=EnvVars.PRIORIS_MCP_RESPONSE_CACHE_TTL,
                 enabled=EnvVars.PRIORIS_MCP_RESPONSE_CACHE_TTL > 0,
             ),
