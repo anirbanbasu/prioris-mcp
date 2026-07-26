@@ -80,7 +80,13 @@ class JatsXsltMarkdownBackend(ParserBackend):
 
         try:
             with anyio.fail_after(JATS_PARSE_TIMEOUT_SECONDS):
-                html_bytes = await to_thread.run_sync(_transform_to_html)
+                # abandon_on_cancel=True: anyio's default (False) defers cancellation until the
+                # worker thread finishes on its own, so a CPU-bound pathological transform would
+                # run past fail_after's deadline instead of surfacing ParseError at the bound. The
+                # abandoned thread keeps running in the background after this call returns, which
+                # is acceptable here - each call gets its own isolated parser/thread, sharing no
+                # state with the caller.
+                html_bytes = await to_thread.run_sync(_transform_to_html, abandon_on_cancel=True)
         except TimeoutError as exc:
             raise ParseError(f"JATS XSLT transform exceeded {JATS_PARSE_TIMEOUT_SECONDS}s bound") from exc
         except etree.XMLSyntaxError as exc:

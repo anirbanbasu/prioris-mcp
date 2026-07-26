@@ -1,5 +1,6 @@
 # tests/test_parsers_jats_xslt.py
 import asyncio
+import time
 
 import pytest
 
@@ -86,3 +87,35 @@ class TestJatsXsltMarkdownBackend:
             asyncio.run(scenario())
         except ParseError:
             pass
+
+    def test_slow_transform_deterministically_raises_parse_error(self, monkeypatch: pytest.MonkeyPatch):
+        """A transform that genuinely blocks past the bound must raise ParseError at that bound.
+
+        Unlike the lenient smoke test above, this stubs out the transform step itself with a
+        deliberate `time.sleep()` well past a tiny timeout, so the `anyio.fail_after` +
+        `to_thread.run_sync(..., abandon_on_cancel=True)` timeout path is deterministically
+        exercised rather than merely possible.
+        """
+        from prioris_mcp.parsers import jats_xslt
+
+        monkeypatch.setattr(jats_xslt, "JATS_PARSE_TIMEOUT_SECONDS", 0.05)
+
+        backend = JatsXsltMarkdownBackend(_RecordingHtmlBackend())
+
+        def _slow_transform(source_doc):
+            time.sleep(0.5)
+            return source_doc
+
+        monkeypatch.setattr(backend, "_get_transform", lambda: _slow_transform)
+
+        async def scenario():
+            await backend.to_markdown(_MINIMAL_JATS)
+
+        start = time.monotonic()
+        with pytest.raises(ParseError):
+            asyncio.run(scenario())
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.5, (
+            f"expected ParseError near the {jats_xslt.JATS_PARSE_TIMEOUT_SECONDS}s bound, "
+            f"not after waiting out the full 0.5s sleep (took {elapsed:.3f}s)"
+        )
