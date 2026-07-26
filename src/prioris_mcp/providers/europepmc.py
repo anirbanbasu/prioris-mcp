@@ -173,4 +173,23 @@ class EuropePmcProvider(ResearchPublicationProvider):
         }
 
     async def parse_full_text(self, identifier: str, format: str = "xml") -> dict:
-        raise NotImplementedError  # implemented in Task 4
+        """See docs/requirement-specification/06-interface-specification.md#research_europepmc_parse_full_text.
+
+        Uses `StorageBackend.get_or_create` for the same in-flight de-duplication reason as
+        `ArxivProvider.parse_full_text` - see
+        docs/requirement-specification/04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work.
+        """
+        markdown_format = "xml-markdown"
+
+        async def factory() -> bytes:
+            if not await self._storage.exists("europepmc", identifier, "xml"):
+                raise NotFoundError(f"Europe PMC full text not fetched yet: identifier={identifier}")
+            source_content = await self._storage.read("europepmc", identifier, "xml")
+            markdown = await self._xml_backend.to_markdown(source_content)
+            return markdown.encode("utf-8")
+
+        markdown_bytes, _ = await self._storage.get_or_create("europepmc", identifier, markdown_format, factory)
+        return {
+            "markdown": markdown_bytes.decode("utf-8"),
+            "resource_uri": f"research://europepmc/{identifier}/xml/markdown",
+        }

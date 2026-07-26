@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from prioris_mcp.errors import FormatUnavailableError, NotFoundError
+from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers.europepmc import EuropePmcProvider
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
@@ -253,3 +254,59 @@ class TestEuropePmcProviderFetchFullText:
 
         with pytest.raises(FormatUnavailableError):
             asyncio.run(scenario())
+
+
+class _StubXmlBackend(ParserBackend):
+    def __init__(self, markdown: str = "# parsed") -> None:
+        self.markdown = markdown
+        self.call_count = 0
+
+    async def to_markdown(self, content: bytes) -> str:
+        self.call_count += 1
+        return self.markdown
+
+
+class TestEuropePmcProviderParseFullText:
+    """Tests for EuropePmcProvider.parse_full_text()."""
+
+    def test_not_found_when_source_never_fetched(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        async def scenario():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+            storage = FilesystemStorageBackend(base_dir=tmp_path)
+            provider = EuropePmcProvider(
+                storage=storage, queue=queue, http_client=client, xml_backend=_StubXmlBackend()
+            )
+            async with client:
+                await provider.parse_full_text("PMC:PMC4767193")
+
+        with pytest.raises(NotFoundError):
+            asyncio.run(scenario())
+
+    def test_parses_and_persists_markdown_once_source_is_fetched(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "fullTextXML" in str(req.url):
+                return httpx.Response(200, content=b"<article>fake jats</article>")
+            return httpx.Response(200, content=_search_payload([_record()]))
+
+        xml_backend = _StubXmlBackend(markdown="# Parsed JATS")
+
+        async def scenario():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+            storage = FilesystemStorageBackend(base_dir=tmp_path)
+            provider = EuropePmcProvider(storage=storage, queue=queue, http_client=client, xml_backend=xml_backend)
+            async with client:
+                fetched = await provider.fetch_full_text("PMC4767193")
+                canonical_id = fetched["resource_uri"].split("/")[3]
+                first = await provider.parse_full_text(canonical_id)
+                second = await provider.parse_full_text(canonical_id)
+                return first, second
+
+        first, second = asyncio.run(scenario())
+        assert first["markdown"] == "# Parsed JATS"
+        assert second == first
+        assert xml_backend.call_count == 1
