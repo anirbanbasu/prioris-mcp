@@ -175,21 +175,29 @@ class EuropePmcProvider(ResearchPublicationProvider):
     async def parse_full_text(self, identifier: str, format: str = "xml") -> dict:
         """See docs/requirement-specification/06-interface-specification.md#research_europepmc_parse_full_text.
 
-        Uses `StorageBackend.get_or_create` for the same in-flight de-duplication reason as
-        `ArxivProvider.parse_full_text` - see
-        docs/requirement-specification/04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work.
+        Storage is always keyed on the canonical identifier - see
+        docs/requirement-specification/02-storage.md#identifier-canonicalisation - so this
+        resolves `identifier` first, mirroring `fetch_full_text`'s pattern, before touching
+        storage. A bare PMCID short-circuits inside `resolve_identifier` with only a
+        `fetch_metadata` lookup; a MED identifier also costs only `fetch_metadata`.
+
+        Uses `StorageBackend.get_or_create` (keyed on the derived markdown format) so that two
+        concurrent parses of the same (identifier, format) never both invoke the parser backend -
+        see docs/requirement-specification/04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work.
         """
+        resolved = await self.resolve_identifier(identifier, format)
+        canonical_id = resolved["identifier"]
         markdown_format = "xml-markdown"
 
         async def factory() -> bytes:
-            if not await self._storage.exists("europepmc", identifier, "xml"):
-                raise NotFoundError(f"Europe PMC full text not fetched yet: identifier={identifier}")
-            source_content = await self._storage.read("europepmc", identifier, "xml")
+            if not await self._storage.exists("europepmc", canonical_id, "xml"):
+                raise NotFoundError(f"Europe PMC full text not fetched yet: identifier={canonical_id}")
+            source_content = await self._storage.read("europepmc", canonical_id, "xml")
             markdown = await self._xml_backend.to_markdown(source_content)
             return markdown.encode("utf-8")
 
-        markdown_bytes, _ = await self._storage.get_or_create("europepmc", identifier, markdown_format, factory)
+        markdown_bytes, _ = await self._storage.get_or_create("europepmc", canonical_id, markdown_format, factory)
         return {
             "markdown": markdown_bytes.decode("utf-8"),
-            "resource_uri": f"research://europepmc/{identifier}/xml/markdown",
+            "resource_uri": f"research://europepmc/{canonical_id}/xml/markdown",
         }

@@ -271,7 +271,10 @@ class TestEuropePmcProviderParseFullText:
 
     def test_not_found_when_source_never_fetched(self, tmp_path):
         def handler(req: httpx.Request) -> httpx.Response:
-            raise AssertionError("must not make a network request")
+            # resolve_identifier calls fetch_metadata first
+            if "fullTextXML" not in str(req.url):
+                return httpx.Response(200, content=_search_payload([_record()]))
+            raise AssertionError("must not attempt fullTextXML fetch when parse_full_text source wasn't fetched")
 
         async def scenario():
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -309,4 +312,29 @@ class TestEuropePmcProviderParseFullText:
         first, second = asyncio.run(scenario())
         assert first["markdown"] == "# Parsed JATS"
         assert second == first
+        assert xml_backend.call_count == 1
+
+    def test_parses_with_non_canonical_identifier_after_fetch(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "fullTextXML" in str(req.url):
+                return httpx.Response(200, content=b"<article>fake jats</article>")
+            return httpx.Response(200, content=_search_payload([_record()]))
+
+        xml_backend = _StubXmlBackend(markdown="# Parsed JATS")
+
+        async def scenario():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+            storage = FilesystemStorageBackend(base_dir=tmp_path)
+            provider = EuropePmcProvider(storage=storage, queue=queue, http_client=client, xml_backend=xml_backend)
+            async with client:
+                # Fetch using bare PMCID
+                await provider.fetch_full_text("PMC4767193")
+                # Parse using MED identifier (non-canonical form)
+                result = await provider.parse_full_text("MED:26551875")
+                return result
+
+        result = asyncio.run(scenario())
+        assert result["markdown"] == "# Parsed JATS"
+        assert "PMC:PMC4767193" in result["resource_uri"]
         assert xml_backend.call_count == 1
