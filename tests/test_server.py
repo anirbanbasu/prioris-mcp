@@ -279,15 +279,15 @@ class TestEuropePmcTools:
         ).encode("utf-8")
 
     def _server_and_client(self, handler, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
-        monkeypatch.setenv("PRIORIS_MCP_STORAGE_DIR", str(tmp_path))
-        import importlib
-
-        import prioris_mcp
-        import prioris_mcp.server as server_module
-
-        importlib.reload(prioris_mcp)
-        importlib.reload(server_module)
-        mcp_obj = server_module.PriorisMCP()
+        # See TestArxivTools._server_and_client's comment: `monkeypatch.setattr` on the
+        # `EnvVars` class attribute (not `setenv` + `importlib.reload`) is required here too -
+        # `storage.py` did `from prioris_mcp import EnvVars`, a reference that a reload of the
+        # `prioris_mcp` module alone does not update, so a previous test's `setenv`+reload
+        # approach silently kept resolving `FilesystemStorageBackend`'s default `base_dir` to a
+        # stale directory across tests once any test in this class began writing to storage
+        # (`research_europepmc_fetch_full_text`/`research_europepmc_parse_full_text`).
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path)
+        mcp_obj = PriorisMCP()
         mcp_obj._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         mcp_obj._arxiv_provider._http_client = mcp_obj._http_client
         mcp_obj._europepmc_provider._http_client = mcp_obj._http_client
@@ -338,3 +338,72 @@ class TestEuropePmcTools:
 
         result = asyncio.run(scenario())
         assert result.structured_content["provider"] == "arxiv"
+
+    def _jats_feed(self) -> bytes:
+        return b"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96) Journal Publishing DTD v1.2 20190208//EN"
+  "JATS-journalpublishing1.dtd">
+<article article-type="research-article">
+  <front>
+    <article-meta>
+      <title-group><article-title>A Test Article</article-title></title-group>
+    </article-meta>
+  </front>
+  <body>
+    <p>Hello, JATS world.</p>
+  </body>
+</article>
+"""
+
+    def _europepmc_handler(self, req: httpx.Request) -> httpx.Response:
+        """Serves both the `search` JSON endpoint (metadata/resolve) and `fullTextXML`."""
+        if "fullTextXML" in str(req.url):
+            return httpx.Response(200, content=self._jats_feed())
+        return httpx.Response(200, content=self._search_payload())
+
+    def test_research_europepmc_fetch_metadata_returns_results(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(self._europepmc_handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_europepmc_fetch_metadata", arguments={"identifiers": ["MED:26551875"]}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["not_found"] == []
+        assert result.structured_content["results"][0]["identifier"] == "MED:26551875"
+
+    def test_research_europepmc_fetch_full_text_then_read_resource(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(self._europepmc_handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_europepmc_fetch_full_text", arguments={"identifier": "PMC4767193"}
+                )
+                resource_result = await client.read_resource("research://europepmc/PMC:PMC4767193/xml/fulltext")
+                return fetch_result, resource_result
+
+        fetch_result, resource_result = asyncio.run(scenario())
+        assert fetch_result.structured_content["served_from_storage"] is False
+        assert fetch_result.structured_content["resource_uri"] == "research://europepmc/PMC:PMC4767193/xml/fulltext"
+        assert len(resource_result) == 1
+
+    def test_research_europepmc_parse_full_text_then_read_markdown_resource(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(self._europepmc_handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_europepmc_fetch_full_text", arguments={"identifier": "PMC4767193"})
+                parse_result = await client.call_tool(
+                    "research_europepmc_parse_full_text", arguments={"identifier": "PMC4767193"}
+                )
+                resource_result = await client.read_resource("research://europepmc/PMC:PMC4767193/xml/markdown")
+                return parse_result, resource_result
+
+        parse_result, resource_result = asyncio.run(scenario())
+        assert "Hello, JATS world." in parse_result.structured_content["markdown"]
+        assert len(resource_result) == 1
