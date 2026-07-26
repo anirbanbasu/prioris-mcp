@@ -205,22 +205,30 @@ class ArxivProvider(ResearchPublicationProvider):
     async def parse_full_text(self, identifier: str, format: str) -> dict:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_parse_full_text.
 
+        Storage is always keyed on the canonical, version-pinned identifier - see
+        docs/requirement-specification/02-storage.md#identifier-canonicalisation - so this
+        resolves `identifier` first, mirroring `fetch_full_text`'s pattern, before touching
+        storage. A version-pinned identifier short-circuits inside `resolve_identifier` with no
+        network call; an unversioned one costs a `fetch_metadata` lookup only, never a
+        `fetch_full_text` call.
+
         Uses `StorageBackend.get_or_create` (keyed on the derived markdown format) so that two
         concurrent parses of the same (identifier, format) never both invoke the parser backend -
         see docs/requirement-specification/04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work.
         """
+        canonical_id = (await self.resolve_identifier(identifier, format))["identifier"]
         markdown_format = f"{format}-markdown"
         backend = self._pdf_backend if format == "pdf" else self._html_backend
 
         async def factory() -> bytes:
-            if not await self._storage.exists("arxiv", identifier, format):
-                raise NotFoundError(f"arXiv full text not fetched yet: identifier={identifier}, format={format}")
-            source_content = await self._storage.read("arxiv", identifier, format)
+            if not await self._storage.exists("arxiv", canonical_id, format):
+                raise NotFoundError(f"arXiv full text not fetched yet: identifier={canonical_id}, format={format}")
+            source_content = await self._storage.read("arxiv", canonical_id, format)
             markdown = await backend.to_markdown(source_content)
             return markdown.encode("utf-8")
 
-        markdown_bytes, _ = await self._storage.get_or_create("arxiv", identifier, markdown_format, factory)
+        markdown_bytes, _ = await self._storage.get_or_create("arxiv", canonical_id, markdown_format, factory)
         return {
             "markdown": markdown_bytes.decode("utf-8"),
-            "resource_uri": f"research://arxiv/{identifier}/{format}/markdown",
+            "resource_uri": f"research://arxiv/{canonical_id}/{format}/markdown",
         }

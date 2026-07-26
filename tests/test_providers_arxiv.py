@@ -417,3 +417,28 @@ class TestArxivProviderParseFullText:
 
         result = asyncio.run(scenario())
         assert result["markdown"] == "# Parsed HTML"
+
+    def test_unversioned_identifier_finds_content_fetched_under_its_canonical_form(self, tmp_path):
+        """Regression test: parse_full_text must canonicalize identifier before touching storage.
+
+        `fetch_full_text` persists content under the canonical, version-pinned id (see
+        docs/requirement-specification/02-storage.md#identifier-canonicalisation). A caller who
+        fetched with an unversioned id and then parses with that same unversioned id must still
+        find the content - parse_full_text must not look it up under the raw, unversioned id.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("id_list"):
+                return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+            return httpx.Response(200, content=b"%PDF-1.4 fake bytes")
+
+        pdf_backend = _StubParserBackend(markdown="# Parsed PDF")
+
+        async def scenario():
+            provider, client = _provider_with_backends(handler, tmp_path, pdf_backend=pdf_backend)
+            async with client:
+                await provider.fetch_full_text("2106.09685", "pdf")
+                return await provider.parse_full_text("2106.09685", "pdf")
+
+        result = asyncio.run(scenario())
+        assert result == {"markdown": "# Parsed PDF", "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown"}
