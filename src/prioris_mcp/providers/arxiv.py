@@ -9,7 +9,7 @@ import logging
 import httpx
 from defusedxml import ElementTree as safe_ET
 
-from prioris_mcp.errors import InvalidRequestError
+from prioris_mcp.errors import FormatUnavailableError, InvalidRequestError, NotFoundError
 from prioris_mcp.providers import http as provider_http
 from prioris_mcp.providers.base import ResearchPublicationProvider
 from prioris_mcp.rate_limit import ProviderRequestQueue
@@ -143,10 +143,54 @@ class ArxivProvider(ResearchPublicationProvider):
         return {"results": entries, "not_found": not_found}
 
     async def resolve_identifier(self, identifier: str, format: str) -> dict:
-        raise NotImplementedError  # implemented in Task 4
+        """See docs/requirement-specification/01-architecture.md#resolve_identifier.
+
+        A version-pinned identifier is already immutable (see
+        docs/requirement-specification/02-storage.md#identifier-canonicalisation) and needs no
+        network round-trip; only an unversioned identifier triggers a `fetch_metadata` call to
+        find the current version.
+        """
+        if _is_version_pinned(identifier):
+            canonical_id = identifier
+        else:
+            metadata = await self.fetch_metadata([identifier])
+            if not metadata["results"]:
+                raise NotFoundError(f"arXiv identifier not recognised: {identifier}")
+            canonical_id = metadata["results"][0]["arxiv_id"]
+
+        if format == "pdf":
+            url = f"https://arxiv.org/pdf/{canonical_id}"
+        elif format == "html":
+            url = f"https://arxiv.org/html/{canonical_id}"
+        else:
+            raise ValueError(f"Unsupported format for arXiv: {format}")
+        return {"identifier": canonical_id, "resolved_url": url, "format": format}
 
     async def fetch_full_text(self, identifier: str, format: str) -> dict:
-        raise NotImplementedError  # implemented in Task 4
+        """See docs/requirement-specification/06-interface-specification.md#research_arxiv_fetch_full_text."""
+        resolved = await self.resolve_identifier(identifier, format)
+        canonical_id = resolved["identifier"]
+        url = resolved["resolved_url"]
+
+        async def factory() -> bytes:
+            async def op() -> httpx.Response:
+                return await provider_http.request(self._http_client, "GET", url)
+
+            response = await self._queue.execute(op)
+            if format == "html" and response.status_code == 404:
+                raise FormatUnavailableError(f"No HTML rendering available for arXiv {canonical_id}")
+            return response.content
+
+        content, served_from_storage = await self._storage.get_or_create(
+            "arxiv", canonical_id, format, factory, original_identifier=identifier
+        )
+        return {
+            "location": f"arxiv:{canonical_id}:{format}",
+            "format": format,
+            "size_bytes": len(content),
+            "served_from_storage": served_from_storage,
+            "resource_uri": f"research://arxiv/{canonical_id}/{format}/fulltext",
+        }
 
     async def parse_full_text(self, identifier: str, format: str) -> dict:
         raise NotImplementedError  # implemented in Task 6

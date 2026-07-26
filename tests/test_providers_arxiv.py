@@ -4,9 +4,10 @@ from collections.abc import Callable
 import httpx
 import pytest
 
-from prioris_mcp.errors import InvalidRequestError
+from prioris_mcp.errors import FormatUnavailableError, InvalidRequestError, NotFoundError
 from prioris_mcp.providers.arxiv import ArxivProvider, _bare_id, _is_version_pinned
 from prioris_mcp.rate_limit import ProviderRequestQueue
+from prioris_mcp.storage import FilesystemStorageBackend
 
 _FEED_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"
@@ -203,3 +204,127 @@ class TestArxivProviderFetchMetadata:
 
         result = asyncio.run(scenario())
         assert result["not_found"] == []
+
+
+def _provider_with_storage(
+    handler: Callable[[httpx.Request], httpx.Response], tmp_path
+) -> tuple[ArxivProvider, httpx.AsyncClient]:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+    storage = FilesystemStorageBackend(base_dir=tmp_path)
+    provider = ArxivProvider(storage=storage, queue=queue, http_client=client)
+    return provider, client
+
+
+class TestArxivProviderResolveIdentifier:
+    """Tests for `ArxivProvider.resolve_identifier`."""
+
+    def test_versioned_identifier_skips_metadata_call(self):
+        calls = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(200, content=_feed([]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.resolve_identifier("2106.09685v2", "pdf")
+
+        result = asyncio.run(scenario())
+        assert result == {
+            "identifier": "2106.09685v2",
+            "resolved_url": "https://arxiv.org/pdf/2106.09685v2",
+            "format": "pdf",
+        }
+        assert calls == []
+
+    def test_unversioned_identifier_resolves_current_version_via_metadata(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.resolve_identifier("2106.09685", "html")
+
+        result = asyncio.run(scenario())
+        assert result["identifier"] == "2106.09685v2"
+        assert result["resolved_url"] == "https://arxiv.org/html/2106.09685v2"
+
+    def test_unrecognised_identifier_raises_not_found(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_feed([]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                await provider.resolve_identifier("9999.99999", "pdf")
+
+        with pytest.raises(NotFoundError):
+            asyncio.run(scenario())
+
+
+class TestArxivProviderFetchFullText:
+    """Tests for `ArxivProvider.fetch_full_text`."""
+
+    def test_pdf_fetch_persists_and_returns_reference(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"%PDF-1.4 fake pdf bytes")
+
+        async def scenario():
+            provider, client = _provider_with_storage(handler, tmp_path)
+            async with client:
+                return await provider.fetch_full_text("2106.09685v2", "pdf")
+
+        result = asyncio.run(scenario())
+        assert result["format"] == "pdf"
+        assert result["served_from_storage"] is False
+        assert result["size_bytes"] == len(b"%PDF-1.4 fake pdf bytes")
+        assert result["resource_uri"] == "research://arxiv/2106.09685v2/pdf/fulltext"
+
+    def test_second_call_is_served_from_storage_without_a_second_request(self, tmp_path):
+        call_count = 0
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal call_count
+            call_count += 1
+            return httpx.Response(200, content=b"%PDF-1.4 fake pdf bytes")
+
+        async def scenario():
+            provider, client = _provider_with_storage(handler, tmp_path)
+            async with client:
+                first = await provider.fetch_full_text("2106.09685v2", "pdf")
+                second = await provider.fetch_full_text("2106.09685v2", "pdf")
+                return first, second, call_count
+
+        first, second, count = asyncio.run(scenario())
+        assert first["served_from_storage"] is False
+        assert second["served_from_storage"] is True
+        assert count == 1
+
+    def test_html_404_raises_format_unavailable_not_not_found(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404)
+
+        async def scenario():
+            provider, client = _provider_with_storage(handler, tmp_path)
+            async with client:
+                await provider.fetch_full_text("2106.09685v2", "html")
+
+        with pytest.raises(FormatUnavailableError):
+            asyncio.run(scenario())
+
+    def test_unversioned_identifier_is_persisted_under_its_canonical_form(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("id_list"):
+                return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+            return httpx.Response(200, content=b"%PDF-1.4 fake pdf bytes")
+
+        async def scenario():
+            provider, client = _provider_with_storage(handler, tmp_path)
+            async with client:
+                return await provider.fetch_full_text("2106.09685", "pdf")
+
+        result = asyncio.run(scenario())
+        assert result["resource_uri"] == "research://arxiv/2106.09685v2/pdf/fulltext"
