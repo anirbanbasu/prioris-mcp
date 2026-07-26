@@ -126,6 +126,57 @@ class TestArxivTools:
         assert fetch_result.structured_content["served_from_storage"] is False
         assert len(resource_result) == 1
 
+    def test_research_arxiv_list_top_n_returns_results(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._feed())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_arxiv_list_top_n", arguments={"category": "cs.CL", "n": 5})
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["results"]) == 1
+
+    def test_research_arxiv_fetch_metadata_returns_results(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._feed())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_arxiv_fetch_metadata", arguments={"arxiv_ids": ["2106.09685v2"]}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["not_found"] == []
+
+    def test_research_arxiv_parse_full_text_then_read_markdown_resource(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"<html><body><p>Hello world</p></body></html>")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_arxiv_fetch_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "html"}
+                )
+                parse_result = await client.call_tool(
+                    "research_arxiv_parse_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "html"}
+                )
+                resource_result = await client.read_resource("research://arxiv/2106.09685v2/html/markdown")
+                return parse_result, resource_result
+
+        parse_result, resource_result = asyncio.run(scenario())
+        assert "Hello world" in parse_result.structured_content["markdown"]
+        assert len(resource_result) == 1
+
     def test_research_arxiv_parse_full_text_not_found_returns_error_envelope(
         self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
     ):

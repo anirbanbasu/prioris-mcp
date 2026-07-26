@@ -277,6 +277,22 @@ class TestArxivProviderResolveIdentifier:
         with pytest.raises(NotFoundError):
             asyncio.run(scenario())
 
+    def test_unsupported_format_raises_value_error(self):
+        # The ABC declares `format: str` (not a `Literal`), so this validates provider-level
+        # misuse directly - the MCP tool layer's `Literal["pdf", "html"]` annotation only blocks
+        # invalid formats reaching this point via the registered tools, not via direct calls to
+        # the provider. Version-pinned so no network call is needed to exercise it.
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                await provider.resolve_identifier("2106.09685v2", "epub")
+
+        with pytest.raises(ValueError, match="Unsupported format"):
+            asyncio.run(scenario())
+
 
 class TestArxivProviderFetchFullText:
     """Tests for `ArxivProvider.fetch_full_text`."""
