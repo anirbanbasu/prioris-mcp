@@ -3,7 +3,7 @@ import asyncio
 import httpx
 import pytest
 
-from prioris_mcp.errors import UnsupportedProviderError
+from prioris_mcp.errors import InvalidRequestError, UnsupportedProviderError
 from prioris_mcp.providers.identifier_routing import resolve_research_identifier
 
 
@@ -17,6 +17,13 @@ class _StubResolvingProvider:
     async def resolve_identifier(self, identifier: str, format: str) -> dict:
         self.calls.append((identifier, format))
         return self.response
+
+
+class _UnsupportedFormatProvider:
+    """Simulates `ArxivProvider.resolve_identifier` raising a bare `ValueError` for a bad format."""
+
+    async def resolve_identifier(self, identifier: str, format: str) -> dict:
+        raise ValueError(f"Unsupported format for arXiv: {format}")
 
 
 def _no_op_client() -> httpx.AsyncClient:
@@ -44,6 +51,23 @@ class TestResolveResearchIdentifier:
         assert result["provider"] == "arxiv"
         assert arxiv_stub.calls == [("2106.09685v2", "pdf")]
         assert europepmc_stub.calls == []
+
+    def test_provider_value_error_for_unsupported_format_becomes_invalid_request_error(self):
+        """A provider's own `ValueError` (e.g. `ArxivProvider` on a non-pdf/html `format`) must surface.
+
+        Must surface as `InvalidRequestError`, not the bare `ValueError` - only `InvalidRequestError`
+        is mapped in `errors._ERROR_CODES` and so caught by `call_returning_envelope`.
+        """
+        arxiv_stub = _UnsupportedFormatProvider()
+        europepmc_stub = _StubResolvingProvider({})
+
+        async def scenario():
+            client = _no_op_client()
+            async with client:
+                await resolve_research_identifier("2106.09685v2", "xml", client, arxiv_stub, europepmc_stub)
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
 
     def test_europepmc_id_routes_directly_with_no_doi_round_trip(self):
         arxiv_stub = _StubResolvingProvider({})

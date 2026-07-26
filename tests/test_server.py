@@ -339,6 +339,30 @@ class TestEuropePmcTools:
         result = asyncio.run(scenario())
         assert result.structured_content["provider"] == "arxiv"
 
+    def test_research_resolve_identifier_returns_invalid_request_envelope_for_bad_format(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """`format` is intentionally not a `Literal[...]` at the tool schema level.
+
+        Valid values depend on the resolving provider, so an unsupported value (here, `arXiv`'s bare
+        `ValueError` for anything other than pdf/html) must still come back as the standard
+        `{"error": "invalid_request", ...}` envelope rather than as a raw uncaught exception.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_resolve_identifier", arguments={"identifier": "2106.09685v2", "format": "xml"}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["error"] == "invalid_request"
+
     def _jats_feed(self) -> bytes:
         return b"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96) Journal Publishing DTD v1.2 20190208//EN"

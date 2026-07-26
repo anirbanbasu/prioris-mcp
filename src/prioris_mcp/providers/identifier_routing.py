@@ -10,7 +10,7 @@ from typing import Protocol
 
 import httpx
 
-from prioris_mcp.errors import UnsupportedProviderError
+from prioris_mcp.errors import InvalidRequestError, UnsupportedProviderError
 from prioris_mcp.providers import http as provider_http
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,21 @@ def _is_doi(identifier: str) -> bool:
     return bool(_DOI_PATTERN.match(identifier))
 
 
+async def _resolve_identifier(provider: _ResolvingProvider, identifier: str, format: str) -> dict:
+    """Call `provider.resolve_identifier`, translating its format validation into `InvalidRequestError`.
+
+    A provider (e.g. `ArxivProvider`) raises a bare `ValueError` for a caller-supplied `format` it
+    doesn't support - `format` is deliberately not a `Literal[...]` at the tool schema level since
+    valid values depend on the resolving provider, so this is the first point that can validate it.
+    A bare `ValueError` isn't one of `errors._ERROR_CODES`' mapped types, so it must be translated
+    here rather than left to propagate past `call_returning_envelope` as a raw exception.
+    """
+    try:
+        return await provider.resolve_identifier(identifier, format)
+    except ValueError as exc:
+        raise InvalidRequestError(str(exc)) from exc
+
+
 def _extract_arxiv_id_from_url(url: str) -> str:
     match = re.search(r"/(?:abs|pdf|html)/([\w.\-/]+?)(?:\.pdf)?/?$", httpx.URL(url).path)
     if not match:
@@ -83,10 +98,10 @@ async def resolve_research_identifier(
     docs/requirement-specification/07-test-specification.md#research_resolve_identifier-acceptance-criteria.
     """
     if _is_arxiv_identifier(identifier):
-        resolved = await arxiv_provider.resolve_identifier(identifier, format)
+        resolved = await _resolve_identifier(arxiv_provider, identifier, format)
         return {**resolved, "provider": "arxiv"}
     if _is_europepmc_identifier(identifier):
-        resolved = await europepmc_provider.resolve_identifier(identifier, format)
+        resolved = await _resolve_identifier(europepmc_provider, identifier, format)
         return {**resolved, "provider": "europepmc"}
     if not _is_doi(identifier):
         raise UnsupportedProviderError(f"Unrecognised identifier scheme: {identifier}")
@@ -104,8 +119,8 @@ async def resolve_research_identifier(
 
     if provider_name == "arxiv":
         arxiv_id = _extract_arxiv_id_from_url(location)
-        resolved = await arxiv_provider.resolve_identifier(arxiv_id, format)
+        resolved = await _resolve_identifier(arxiv_provider, arxiv_id, format)
         return {**resolved, "provider": "arxiv"}
     europepmc_id = _extract_europepmc_id_from_url(location)
-    resolved = await europepmc_provider.resolve_identifier(europepmc_id, format)
+    resolved = await _resolve_identifier(europepmc_provider, europepmc_id, format)
     return {**resolved, "provider": "europepmc"}
