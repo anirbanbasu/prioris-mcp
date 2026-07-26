@@ -875,6 +875,7 @@ name = "prioris-mcp"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "anyio" },
     { name = "environs" },
     { name = "fastmcp" },
 ]
@@ -894,6 +895,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "anyio", specifier = ">=4.14.2" },
     { name = "environs", specifier = ">=15.0.1" },
     { name = "fastmcp", specifier = ">=3.4.4" },
 ]
