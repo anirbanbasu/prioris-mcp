@@ -252,3 +252,89 @@ class TestArxivTools:
         names = asyncio.run(scenario())
         assert "greet" not in names
         assert "research_arxiv_search" in names
+
+
+class TestEuropePmcTools:
+    """End-to-end MCP tool tests for the Europe PMC provider, stubbing its HTTP API."""
+
+    def _search_payload(self) -> bytes:
+        import json
+
+        return json.dumps(
+            {
+                "hitCount": 1,
+                "resultList": {
+                    "result": [
+                        {
+                            "id": "26551875",
+                            "source": "MED",
+                            "pmid": "26551875",
+                            "pmcid": "PMC4767193",
+                            "title": "A Paper",
+                            "inEPMC": "Y",
+                        }
+                    ]
+                },
+            }
+        ).encode("utf-8")
+
+    def _server_and_client(self, handler, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_STORAGE_DIR", str(tmp_path))
+        import importlib
+
+        import prioris_mcp
+        import prioris_mcp.server as server_module
+
+        importlib.reload(prioris_mcp)
+        importlib.reload(server_module)
+        mcp_obj = server_module.PriorisMCP()
+        mcp_obj._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        mcp_obj._arxiv_provider._http_client = mcp_obj._http_client
+        mcp_obj._europepmc_provider._http_client = mcp_obj._http_client
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_research_europepmc_search_returns_results(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._search_payload())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_europepmc_search", arguments={"query": "field:value"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["hit_count"] == 1
+
+    def test_no_list_top_n_tool_registered_for_europepmc(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._search_payload())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                tools = await client.list_tools()
+                return {t.name for t in tools}
+
+        names = asyncio.run(scenario())
+        assert "research_europepmc_list_top_n" not in names
+        assert "research_europepmc_search" in names
+        assert "research_resolve_identifier" in names
+
+    def test_research_resolve_identifier_routes_arxiv_id_directly(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._search_payload())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_resolve_identifier", arguments={"identifier": "2106.09685v2", "format": "pdf"}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["provider"] == "arxiv"

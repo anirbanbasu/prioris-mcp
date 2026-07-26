@@ -23,8 +23,11 @@ from prioris_mcp.errors import call_returning_envelope
 from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
 from prioris_mcp.mixin import MCPMixin
 from prioris_mcp.parsers.html_markdownify import MarkdownifyHtmlBackend
+from prioris_mcp.parsers.jats_xslt import JatsXsltMarkdownBackend
 from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
 from prioris_mcp.providers.arxiv import ARXIV_BASE_SPACING_SECONDS, ArxivProvider
+from prioris_mcp.providers.europepmc import EUROPEPMC_BASE_SPACING_SECONDS, EuropePmcProvider
+from prioris_mcp.providers.identifier_routing import resolve_research_identifier
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
 
@@ -52,6 +55,23 @@ class PriorisMCP(MCPMixin):
             "tags": ["research", "arxiv"],
             "annotations": {"readOnlyHint": True},
         },
+        {"fn": "research_europepmc_search", "tags": ["research", "europepmc"], "annotations": {"readOnlyHint": True}},
+        {
+            "fn": "research_europepmc_fetch_metadata",
+            "tags": ["research", "europepmc"],
+            "annotations": {"readOnlyHint": True},
+        },
+        {
+            "fn": "research_europepmc_fetch_full_text",
+            "tags": ["research", "europepmc"],
+            "annotations": {"readOnlyHint": True},
+        },
+        {
+            "fn": "research_europepmc_parse_full_text",
+            "tags": ["research", "europepmc"],
+            "annotations": {"readOnlyHint": True},
+        },
+        {"fn": "research_resolve_identifier", "tags": ["research"], "annotations": {"readOnlyHint": True}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -74,6 +94,17 @@ class PriorisMCP(MCPMixin):
             http_client=self._http_client,
             pdf_backend=pdf_backend,
             html_backend=html_backend,
+        )
+        europepmc_queue = ProviderRequestQueue(
+            base_spacing_seconds=EUROPEPMC_BASE_SPACING_SECONDS,
+            max_total_backoff_seconds=EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS,
+        )
+        jats_backend = JatsXsltMarkdownBackend(html_backend)
+        self._europepmc_provider = EuropePmcProvider(
+            storage=self._storage,
+            queue=europepmc_queue,
+            http_client=self._http_client,
+            xml_backend=jats_backend,
         )
 
     async def research_arxiv_search(
@@ -130,6 +161,57 @@ class PriorisMCP(MCPMixin):
     ) -> dict:
         """Convert already-fetched arXiv full text into Markdown."""
         return await call_returning_envelope(self._arxiv_provider.parse_full_text(arxiv_id, format))
+
+    async def research_europepmc_search(
+        self,
+        ctx: Context,
+        query: Annotated[str, Field(description="Europe PMC query syntax, e.g. 'field:value AND field:value'")],
+        page_size: Annotated[int, Field(default=25)] = 25,
+        cursor_mark: Annotated[str, Field(default="*", description="Europe PMC's opaque pagination cursor")] = "*",
+    ) -> dict:
+        """Search Europe PMC by keyword/query, returning metadata records."""
+        return await call_returning_envelope(
+            self._europepmc_provider.search(query, page_size=page_size, cursor_mark=cursor_mark)
+        )
+
+    async def research_europepmc_fetch_metadata(
+        self,
+        ctx: Context,
+        identifiers: Annotated[list[str], Field(description="One or more Europe PMC identifiers or bare PMCIDs")],
+    ) -> dict:
+        """Fetch metadata for one or more Europe PMC identifiers in a single call."""
+        return await call_returning_envelope(self._europepmc_provider.fetch_metadata(identifiers))
+
+    async def research_europepmc_fetch_full_text(
+        self,
+        ctx: Context,
+        identifier: Annotated[str, Field(description="A Europe PMC identifier or bare PMCID")],
+    ) -> dict:
+        """Fetch (or return the already-persisted) JATS XML full text for a Europe PMC item."""
+        return await call_returning_envelope(self._europepmc_provider.fetch_full_text(identifier))
+
+    async def research_europepmc_parse_full_text(
+        self,
+        ctx: Context,
+        identifier: Annotated[str, Field(description="A Europe PMC identifier or bare PMCID")],
+    ) -> dict:
+        """Convert already-fetched Europe PMC JATS XML full text into Markdown."""
+        return await call_returning_envelope(self._europepmc_provider.parse_full_text(identifier))
+
+    async def research_resolve_identifier(
+        self,
+        ctx: Context,
+        identifier: Annotated[str, Field(description="An arXiv ID, a Europe PMC identifier, or a DOI")],
+        format: Annotated[
+            str, Field(description="Desired target format; valid values depend on the resolving provider")
+        ],
+    ) -> dict:
+        """Resolve an identifier of unknown provider (including DOIs) to its owning provider and URL."""
+        return await call_returning_envelope(
+            resolve_research_identifier(
+                identifier, format, self._http_client, self._arxiv_provider, self._europepmc_provider
+            )
+        )
 
     async def read_fulltext_resource(self, provider: str, identifier: str, format: str) -> bytes:
         """Read persisted full text for (provider, identifier, format); a plain not-found if absent."""
