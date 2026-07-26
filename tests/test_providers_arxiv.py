@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from prioris_mcp.errors import FormatUnavailableError, InvalidRequestError, NotFoundError
+from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers.arxiv import ArxivProvider, _bare_id, _is_version_pinned
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
@@ -52,7 +53,13 @@ def _provider_with_handler(
 ) -> tuple[ArxivProvider, httpx.AsyncClient]:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
-    provider = ArxivProvider(storage=None, queue=queue, http_client=client)
+    provider = ArxivProvider(
+        storage=None,
+        queue=queue,
+        http_client=client,
+        pdf_backend=_StubParserBackend(),
+        html_backend=_StubParserBackend(),
+    )
     return provider, client
 
 
@@ -212,7 +219,13 @@ def _provider_with_storage(
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
     storage = FilesystemStorageBackend(base_dir=tmp_path)
-    provider = ArxivProvider(storage=storage, queue=queue, http_client=client)
+    provider = ArxivProvider(
+        storage=storage,
+        queue=queue,
+        http_client=client,
+        pdf_backend=_StubParserBackend(),
+        html_backend=_StubParserBackend(),
+    )
     return provider, client
 
 
@@ -328,3 +341,79 @@ class TestArxivProviderFetchFullText:
 
         result = asyncio.run(scenario())
         assert result["resource_uri"] == "research://arxiv/2106.09685v2/pdf/fulltext"
+
+
+class _StubParserBackend(ParserBackend):
+    def __init__(self, markdown: str = "# parsed") -> None:
+        self.markdown = markdown
+        self.call_count = 0
+
+    async def to_markdown(self, content: bytes) -> str:
+        self.call_count += 1
+        return self.markdown
+
+
+def _provider_with_backends(
+    handler: Callable[[httpx.Request], httpx.Response], tmp_path, pdf_backend=None, html_backend=None
+) -> tuple[ArxivProvider, httpx.AsyncClient]:
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+    storage = FilesystemStorageBackend(base_dir=tmp_path)
+    provider = ArxivProvider(
+        storage=storage,
+        queue=queue,
+        http_client=client,
+        pdf_backend=pdf_backend or _StubParserBackend(),
+        html_backend=html_backend or _StubParserBackend(),
+    )
+    return provider, client
+
+
+class TestArxivProviderParseFullText:
+    """Tests for `ArxivProvider.parse_full_text`."""
+
+    def test_not_found_when_source_never_fetched(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        async def scenario():
+            provider, client = _provider_with_backends(handler, tmp_path)
+            async with client:
+                await provider.parse_full_text("2106.09685v2", "pdf")
+
+        with pytest.raises(NotFoundError):
+            asyncio.run(scenario())
+
+    def test_parses_and_persists_markdown_once_source_is_fetched(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"%PDF-1.4 fake bytes")
+
+        pdf_backend = _StubParserBackend(markdown="# Parsed PDF")
+
+        async def scenario():
+            provider, client = _provider_with_backends(handler, tmp_path, pdf_backend=pdf_backend)
+            async with client:
+                await provider.fetch_full_text("2106.09685v2", "pdf")
+                first = await provider.parse_full_text("2106.09685v2", "pdf")
+                second = await provider.parse_full_text("2106.09685v2", "pdf")
+                return first, second
+
+        first, second = asyncio.run(scenario())
+        assert first == {"markdown": "# Parsed PDF", "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown"}
+        assert second == first
+        assert pdf_backend.call_count == 1  # second call served from storage, not re-parsed
+
+    def test_uses_html_backend_for_html_format(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"<html>fake</html>")
+
+        html_backend = _StubParserBackend(markdown="# Parsed HTML")
+
+        async def scenario():
+            provider, client = _provider_with_backends(handler, tmp_path, html_backend=html_backend)
+            async with client:
+                await provider.fetch_full_text("2106.09685v2", "html")
+                return await provider.parse_full_text("2106.09685v2", "html")
+
+        result = asyncio.run(scenario())
+        assert result["markdown"] == "# Parsed HTML"

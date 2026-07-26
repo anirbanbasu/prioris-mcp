@@ -10,6 +10,7 @@ import httpx
 from defusedxml import ElementTree as safe_ET
 
 from prioris_mcp.errors import FormatUnavailableError, InvalidRequestError, NotFoundError
+from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers import http as provider_http
 from prioris_mcp.providers.base import ResearchPublicationProvider
 from prioris_mcp.rate_limit import ProviderRequestQueue
@@ -87,10 +88,19 @@ def _parse_feed(xml_bytes: bytes) -> tuple[list[dict], int]:
 class ArxivProvider(ResearchPublicationProvider):
     """arXiv implementation of `ResearchPublicationProvider`."""
 
-    def __init__(self, storage: StorageBackend, queue: ProviderRequestQueue, http_client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        storage: StorageBackend,
+        queue: ProviderRequestQueue,
+        http_client: httpx.AsyncClient,
+        pdf_backend: ParserBackend,
+        html_backend: ParserBackend,
+    ) -> None:
         self._storage = storage
         self._queue = queue
         self._http_client = http_client
+        self._pdf_backend = pdf_backend
+        self._html_backend = html_backend
 
     async def _get(self, params: dict) -> bytes:
         async def op() -> httpx.Response:
@@ -193,4 +203,24 @@ class ArxivProvider(ResearchPublicationProvider):
         }
 
     async def parse_full_text(self, identifier: str, format: str) -> dict:
-        raise NotImplementedError  # implemented in Task 6
+        """See docs/requirement-specification/06-interface-specification.md#research_arxiv_parse_full_text.
+
+        Uses `StorageBackend.get_or_create` (keyed on the derived markdown format) so that two
+        concurrent parses of the same (identifier, format) never both invoke the parser backend -
+        see docs/requirement-specification/04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work.
+        """
+        markdown_format = f"{format}-markdown"
+        backend = self._pdf_backend if format == "pdf" else self._html_backend
+
+        async def factory() -> bytes:
+            if not await self._storage.exists("arxiv", identifier, format):
+                raise NotFoundError(f"arXiv full text not fetched yet: identifier={identifier}, format={format}")
+            source_content = await self._storage.read("arxiv", identifier, format)
+            markdown = await backend.to_markdown(source_content)
+            return markdown.encode("utf-8")
+
+        markdown_bytes, _ = await self._storage.get_or_create("arxiv", identifier, markdown_format, factory)
+        return {
+            "markdown": markdown_bytes.decode("utf-8"),
+            "resource_uri": f"research://arxiv/{identifier}/{format}/markdown",
+        }
