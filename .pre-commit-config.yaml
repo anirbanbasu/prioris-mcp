@@ -6,8 +6,9 @@ repos:
     rev: v6.0.0
     hooks:
       - id: trailing-whitespace
-        exclude: tests
+        exclude: tests|src/prioris_mcp/parsers/data/
       - id: end-of-file-fixer
+        exclude: src/prioris_mcp/parsers/data/
       - id: check-merge-conflict
       - id: check-case-conflict
       - id: check-json

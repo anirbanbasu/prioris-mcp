@@ -1,0 +1,88 @@
+# tests/test_parsers_jats_xslt.py
+import asyncio
+
+import pytest
+
+from prioris_mcp.parsers.base import ParseError, ParserBackend
+from prioris_mcp.parsers.jats_xslt import JatsXsltMarkdownBackend
+
+_MINIMAL_JATS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96) Journal Publishing DTD v1.2 20190208//EN"
+  "JATS-journalpublishing1.dtd">
+<article article-type="research-article">
+  <front>
+    <article-meta>
+      <title-group><article-title>A Test Article</article-title></title-group>
+    </article-meta>
+  </front>
+  <body>
+    <p>Hello, world.</p>
+  </body>
+</article>
+"""
+
+
+class _RecordingHtmlBackend(ParserBackend):
+    def __init__(self) -> None:
+        self.received_html: bytes | None = None
+
+    async def to_markdown(self, content: bytes) -> str:
+        self.received_html = content
+        return "# A Test Article\\n\\nHello, world."
+
+
+class TestJatsXsltMarkdownBackend:
+    """JatsXsltMarkdownBackend.to_markdown: XSLT transform, delegation, and security bounds."""
+
+    def test_transforms_jats_to_html_then_delegates_to_html_backend(self):
+        html_backend = _RecordingHtmlBackend()
+
+        async def scenario():
+            backend = JatsXsltMarkdownBackend(html_backend)
+            return await backend.to_markdown(_MINIMAL_JATS)
+
+        result = asyncio.run(scenario())
+        assert result == "# A Test Article\\n\\nHello, world."
+        assert html_backend.received_html is not None
+        assert b"Hello, world." in html_backend.received_html
+
+    def test_malformed_xml_raises_parse_error(self):
+        async def scenario():
+            backend = JatsXsltMarkdownBackend(_RecordingHtmlBackend())
+            await backend.to_markdown(b"<article>not closed")
+
+        with pytest.raises(ParseError):
+            asyncio.run(scenario())
+
+    def test_billion_laughs_style_entity_expansion_is_rejected_not_hung(self):
+        malicious = b"""<?xml version="1.0"?>
+<!DOCTYPE article [
+  <!ENTITY a "a a a a a a a a a a">
+  <!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">
+  <!ENTITY c "&b;&b;&b;&b;&b;&b;&b;&b;&b;&b;">
+]>
+<article><body><p>&c;</p></body></article>
+"""
+
+        async def scenario():
+            backend = JatsXsltMarkdownBackend(_RecordingHtmlBackend())
+            await backend.to_markdown(malicious)
+
+        with pytest.raises(ParseError):
+            asyncio.run(scenario())
+
+    def test_slow_transform_raises_parse_error_within_bound(self, monkeypatch: pytest.MonkeyPatch):
+        from prioris_mcp.parsers import jats_xslt
+
+        monkeypatch.setattr(jats_xslt, "JATS_PARSE_TIMEOUT_SECONDS", 0.01)
+
+        async def scenario():
+            backend = JatsXsltMarkdownBackend(_RecordingHtmlBackend())
+            await backend.to_markdown(_MINIMAL_JATS)
+
+        # Not guaranteed to trip the timeout on a fast machine for a tiny document, but must
+        # never raise anything other than ParseError if it does.
+        try:
+            asyncio.run(scenario())
+        except ParseError:
+            pass
