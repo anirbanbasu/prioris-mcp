@@ -21,5 +21,5 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server to faci
 
 ## Next steps
 
-- [Getting started](getting-started.md) — install PriorisMCP and connect it to Claude.
-- [Configuration](configuration.md) — environment variables recognised by the server.
+- [Getting started](01-getting-started.md) — install PriorisMCP and connect it to Claude.
+- [Configuration](02-configuration.md) — environment variables recognised by the server.

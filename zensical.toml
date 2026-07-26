@@ -301,8 +301,8 @@ toggle.name = "Switch to light mode"
 # The "extra" section contains miscellaneous settings.
 # ----------------------------------------------------------------------------
 #[[project.extra.social]]
-#icon = "fontawesome/brands/github"
-#link = "https://github.com/user/repo"
+icon = "fontawesome/brands/github"
+link = "https://github.com/anirbanbasu/prioris-mcp"
 
 # ----------------------------------------------------------------------------
 # In this section you can configure the Markdown extensions that are used when

@@ -28,7 +28,7 @@ PriorisMCP can be started standalone as an MCP server with the `stdio` transport
 uv run prioris-mcp
 ```
 
-Alternatively, it can be started using the `streamable-http` or `http` transports by setting the `PRIORIS_MCP_TRANSPORT` environment variable — see [Configuration](configuration.md).
+Alternatively, it can be started using the `streamable-http` or `http` transports by setting the `PRIORIS_MCP_TRANSPORT` environment variable — see [Configuration](02-configuration.md).
 
 ## Connect it to Claude
 
@@ -82,7 +82,7 @@ claude mcp add prioris-mcp -- uv run --directory /absolute/path/to/prioris-mcp p
 
 Instead of `uv run --directory ... prioris-mcp`, you may also point `command` directly at the virtual environment's script, e.g. `/absolute/path/to/prioris-mcp/.venv/bin/prioris-mcp`.
 
-To pass configuration (see [Configuration](configuration.md)) to the server, add an `env` block alongside `command`/`args` in either config, e.g. `"env": {"PRIORIS_MCP_LOG_LEVEL": "DEBUG"}`, or pass `--env KEY=VALUE` flags to `claude mcp add`.
+To pass configuration (see [Configuration](02-configuration.md)) to the server, add an `env` block alongside `command`/`args` in either config, e.g. `"env": {"PRIORIS_MCP_LOG_LEVEL": "DEBUG"}`, or pass `--env KEY=VALUE` flags to `claude mcp add`.
 
 ## Test with the MCP Inspector
 
