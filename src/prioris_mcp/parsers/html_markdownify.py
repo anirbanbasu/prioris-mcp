@@ -36,6 +36,9 @@ class MarkdownifyHtmlBackend(ParserBackend):
 
         try:
             with anyio.fail_after(HTML_PARSE_TIMEOUT_SECONDS):
+                # abandon_on_cancel=True is required for fail_after's deadline to have any effect
+                # here - without it, anyio.to_thread.run_sync ignores cancellation until the
+                # thread finishes, silently defeating the timeout bound entirely.
                 return await to_thread.run_sync(_parse, abandon_on_cancel=True)
         except TimeoutError as exc:
             raise ParseError(f"HTML parse exceeded {HTML_PARSE_TIMEOUT_SECONDS}s bound") from exc
