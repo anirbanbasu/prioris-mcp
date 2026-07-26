@@ -82,6 +82,19 @@ wheels = [
 ]
 
 [[package]]
+name = "beautifulsoup4"
+version = "4.15.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "soupsieve" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/43/65/318323f98dbee45d42dff61d8f047181bc6f2268a9068cfad035a46be5af/beautifulsoup4-4.15.0.tar.gz", hash = "sha256:288e3ca7d54b06f2ac191970bc275c1939cb46d450b255bf6718b04aa37ab4f7", size = 632571, upload-time = "2026-06-07T16:44:20.453Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/c6/92fcd42f1ba33e1184263f25bfabf3d27c383410470f169e4b8163bf9c17/beautifulsoup4-4.15.0-py3-none-any.whl", hash = "sha256:d6f88de62e1d4e38ecb1077eb9724cd0eff29d2a08ca16a401e9b9e93f117cf9", size = 109924, upload-time = "2026-06-07T16:44:21.566Z" },
+]
+
+[[package]]
 name = "cachetools"
 version = "7.1.6"
 source = { registry = "https://pypi.org/simple" }
@@ -695,6 +708,32 @@ wheels = [
 ]
 
 [[package]]
+name = "liteparse"
+version = "2.9.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/b3/a7/433bd46d617ec4da506227d31a0680a0242d3e1905f38b439202d8f2cb41/liteparse-2.9.0.tar.gz", hash = "sha256:f8f1091e78ecd0d195a127a23ddd6aa7ad8894c7d6b9858fa01a9b1e3a880f3c", size = 409278, upload-time = "2026-07-25T01:47:59.226Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/f5/ae28c586a7d1363b193793f518b250924a9ef1cf7e908c534a564e12c193/liteparse-2.9.0-cp313-cp313-macosx_10_12_x86_64.whl", hash = "sha256:d8226e3bb54aa0eefa9a2879e70e405b0661f89bf20ccdd389aaad9b9480bd2b", size = 12410041, upload-time = "2026-07-25T01:47:10.11Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/b0/8a7d64a2dcc46177c74857db66bbf50a22bfceb9715fb7b62753e5d1d10a/liteparse-2.9.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:e9be1cd3f7510987723a4843a995cd7ae994c30959b037a0f4d8ad8dd3404114", size = 11806480, upload-time = "2026-07-25T01:47:12.594Z" },
+    { url = "https://files.pythonhosted.org/packages/67/b5/0b92a84265c509a7eaf3952a6c75a23965a0ecd81f278993cafacae81320/liteparse-2.9.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:69f590f871df03cd2ad38093b4eb7d52041d29231fc1ec1a2bcc68bd5443f1fb", size = 13320655, upload-time = "2026-07-25T01:47:15.175Z" },
+    { url = "https://files.pythonhosted.org/packages/54/d2/7ce830a22682f48fe9dbb2ff5879a15053bf793195132743b68071963f7d/liteparse-2.9.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:a3889169b965d01def863b056599d86cb044befac4dfdc439616cb88891c285a", size = 13589772, upload-time = "2026-07-25T01:47:17.501Z" },
+    { url = "https://files.pythonhosted.org/packages/2b/d0/16f66657ac7bad115b512217a960f3b7dae580318be4f72f8ccb749419ec/liteparse-2.9.0-cp313-cp313-win_amd64.whl", hash = "sha256:06ccb3d2d883846c02f534992c37450276b79e43571e5321bfc0ac8a7b88e9ee", size = 11841242, upload-time = "2026-07-25T01:47:19.749Z" },
+    { url = "https://files.pythonhosted.org/packages/17/a6/f7c42b882d48d9239a100f59390bcfe1590df70e59328144641c2840ef59/liteparse-2.9.0-cp313-cp313-win_arm64.whl", hash = "sha256:c7733c1fb9988348ab7048a1d6fd6e2cbbc48d75cd3dad86539270daced758ca", size = 11168902, upload-time = "2026-07-25T01:47:22.105Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/a7/1ce7d35f120ce74acb78e637b9f3e19fc028c6d6f77120f30e2953450961/liteparse-2.9.0-cp314-cp314-macosx_10_12_x86_64.whl", hash = "sha256:2f5ccd496231002293f339e511011db6bcba11c8cd2f9d45cf12794a0252f8a6", size = 12409654, upload-time = "2026-07-25T01:47:24.605Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/3b/11fe23fa6f2e7ef06d38951511487a842171b05282dd23f91de1a4779933/liteparse-2.9.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:8f57fdf2202d184cd4fdf26664614dbd3a845e3a59b6ea60c981f22dede6a018", size = 11805892, upload-time = "2026-07-25T01:47:26.915Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/28/5947c3c6dbe44bcb9ffc7e37da07f6f44d7c594ddca6b27ff9cd1df498de/liteparse-2.9.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:b29002898d921f0175fd8fc99fc6a065d94954043c00b7ab6d276bac0c654956", size = 13320158, upload-time = "2026-07-25T01:47:29.467Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/25/d38c9601d9141e3c637e4354fe30424016465a252af2136815bb970d2f9f/liteparse-2.9.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:7b061e808a867e82f3a82b8877f05db74a82c3669a84801e53576c1c7e786ff4", size = 13589842, upload-time = "2026-07-25T01:47:32.081Z" },
+    { url = "https://files.pythonhosted.org/packages/af/88/c7948c4f3061531bef958c0db1187fa9fb139da164603ef8e01d19777d70/liteparse-2.9.0-cp314-cp314-win_amd64.whl", hash = "sha256:9a6737e1c60da8a290a5a1fee33b3211e2f8266235c6e8b9e7201e05fb5f30bc", size = 11841898, upload-time = "2026-07-25T01:47:34.662Z" },
+    { url = "https://files.pythonhosted.org/packages/84/be/8d74a39926e3d5153b1e36fb5afde8b1e8293185a16df4ba3c8f294bec00/liteparse-2.9.0-cp314-cp314-win_arm64.whl", hash = "sha256:7973416a2ca6ce1bfc955ae182bd325953f162675729ef3fea92355a7898bab9", size = 11169952, upload-time = "2026-07-25T01:47:36.839Z" },
+    { url = "https://files.pythonhosted.org/packages/40/39/ec104a510919ba6e327dcf9fc31cabf169cb54fc423c2695ea93d8805925/liteparse-2.9.0-cp314-cp314t-manylinux_2_28_aarch64.whl", hash = "sha256:0ef921d79f55e899babb7cf161754e18752c28cc1a710c09388d4c6dfa05dfc4", size = 13319190, upload-time = "2026-07-25T01:47:39.237Z" },
+    { url = "https://files.pythonhosted.org/packages/13/f7/6375b71ddac1df9de79e2bb3f9a1f16434f7ba533b7afdb7e6a2d53a1669/liteparse-2.9.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:9aeb684b7b270f3947d077cc4e1e1b8333370184b50fef6cdb84d2e1db09bd9f", size = 13589489, upload-time = "2026-07-25T01:47:41.829Z" },
+    { url = "https://files.pythonhosted.org/packages/70/c2/2f42dfab34e1da038dec079e8cae1006e668b13270752d3430bfcc294bc8/liteparse-2.9.0-cp315-cp315-manylinux_2_28_aarch64.whl", hash = "sha256:270a561b1e652a7f8e9867d0f8e5fada55ab17d3f5ec35d15975b81ed3aabfe6", size = 13319801, upload-time = "2026-07-25T01:47:44.299Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/72/7d2c60eeed555c73552a002dadb57b969e0d44a3b4773be61a6af14471ae/liteparse-2.9.0-cp315-cp315-manylinux_2_28_x86_64.whl", hash = "sha256:320961892d51f97f0f0fe444047ccf014fd3d06aabd9f0a74d4e6484c1d06d13", size = 13589836, upload-time = "2026-07-25T01:47:46.7Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/e3/483e275522f238b9b6bde1b28a4ae6e0d3695be501efd3f97e80bc65e184/liteparse-2.9.0-cp315-cp315t-manylinux_2_28_aarch64.whl", hash = "sha256:f2226b4168a09399f2e69b3b9a460dc89f6d67877c1a82bd854fee7717244ca2", size = 13319021, upload-time = "2026-07-25T01:47:49.273Z" },
+    { url = "https://files.pythonhosted.org/packages/03/be/63244af0a2e34470d618b51a87573641252e988fcb6510bbcd6913ca0b61/liteparse-2.9.0-cp315-cp315t-manylinux_2_28_x86_64.whl", hash = "sha256:25c4e4def43b276c24d86d2c1e458b7cd2ab06d143ca35f8865954d0ebf4896a", size = 13589319, upload-time = "2026-07-25T01:47:52.009Z" },
+]
+
+[[package]]
 name = "markdown"
 version = "3.10.2"
 source = { registry = "https://pypi.org/simple" }
@@ -713,6 +752,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/06/ff/7841249c247aa650a76b9ee4bbaeae59370dc8bfd2f6c01f3630c35eb134/markdown_it_py-4.2.0.tar.gz", hash = "sha256:04a21681d6fbb623de53f6f364d352309d4094dd4194040a10fd51833e418d49", size = 82454, upload-time = "2026-05-07T12:08:28.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/81/4da04ced5a082363ecfa159c010d200ecbd959ae410c10c0264a38cac0f5/markdown_it_py-4.2.0-py3-none-any.whl", hash = "sha256:9f7ebbcd14fe59494226453aed97c1070d83f8d24b6fc3a3bcf9a38092641c4a", size = 91687, upload-time = "2026-05-07T12:08:27.182Z" },
+]
+
+[[package]]
+name = "markdownify"
+version = "1.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "beautifulsoup4" },
+    { name = "six" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/92/ab/d1297139c0e2ceb151ae564c8c4f57ac0155d8f1f8b4cbd5d6523c82ea36/markdownify-1.2.3.tar.gz", hash = "sha256:1a176f05522c8a2cb1dd3ab9d307dcdadbed5c26ae717855bfc42b3b6d38d937", size = 18852, upload-time = "2026-06-30T20:27:39.06Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/04/10/fa543d484e8b1199243fe20eedd02cc5af050edebce98a7293a5773df592/markdownify-1.2.3-py3-none-any.whl", hash = "sha256:a189a0bedfd14009030fde5f85bb6f77c56897cb839b5c25315dd7d4e3e290ba", size = 15732, upload-time = "2026-06-30T20:27:38.094Z" },
 ]
 
 [[package]]
@@ -889,6 +941,8 @@ dependencies = [
     { name = "environs" },
     { name = "fastmcp" },
     { name = "httpx" },
+    { name = "liteparse" },
+    { name = "markdownify" },
 ]
 
 [package.dev-dependencies]
@@ -911,6 +965,8 @@ requires-dist = [
     { name = "environs", specifier = ">=15.0.1" },
     { name = "fastmcp", specifier = ">=3.4.4" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "liteparse", specifier = ">=2.9.0" },
+    { name = "markdownify", specifier = ">=1.2.3" },
 ]
 
 [package.metadata.requires-dev]
@@ -1319,6 +1375,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be", size = 19884, upload-time = "2025-11-23T19:02:53.191Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/46/f5af3402b579fd5e11573ce652019a67074317e18c1935cc0b4ba9b35552/secretstorage-3.5.0-py3-none-any.whl", hash = "sha256:0ce65888c0725fcb2c5bc0fdb8e5438eece02c523557ea40ce0703c266248137", size = 15554, upload-time = "2025-11-23T19:02:51.545Z" },
+]
+
+[[package]]
+name = "six"
+version = "1.17.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "soupsieve"
+version = "2.9.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d9/38/e12680bbe6b4f8f3d17adcaf38d26850aa756c85cf4a80e79fc12a018fe8/soupsieve-2.9.1.tar.gz", hash = "sha256:c33e6605bbc71dd628b00c632d58ae607c22bade247e52553928f83bbb75b4ba", size = 122261, upload-time = "2026-07-21T16:57:17.452Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/2c/437fe806897c2d6cfdc3ee43a18da8bf8e568530a4ae9bac781541ca9896/soupsieve-2.9.1-py3-none-any.whl", hash = "sha256:4f4477399246b7a0c720a88ca2454b11cd6bb9ae4c9d170140786e916776c14c", size = 37404, upload-time = "2026-07-21T16:57:16.421Z" },
 ]
 
 [[package]]
