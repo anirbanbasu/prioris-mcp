@@ -1,0 +1,152 @@
+"""arXiv research-publication provider.
+
+See docs/requirement-specification/01-architecture.md and
+docs/requirement-specification/06-interface-specification.md#arxiv.
+"""
+
+import logging
+
+import httpx
+from defusedxml import ElementTree as safe_ET
+
+from prioris_mcp.errors import InvalidRequestError
+from prioris_mcp.providers import http as provider_http
+from prioris_mcp.providers.base import ResearchPublicationProvider
+from prioris_mcp.rate_limit import ProviderRequestQueue
+from prioris_mcp.storage import StorageBackend
+
+logger = logging.getLogger(__name__)
+
+ARXIV_API_URL = "http://export.arxiv.org/api/query"
+ARXIV_BASE_SPACING_SECONDS = 3.0
+ARXIV_MAX_RESULTS = 2000
+ARXIV_MAX_CUMULATIVE = 30000
+
+_ATOM_NS = "http://www.w3.org/2005/Atom"
+_ARXIV_NS = "http://arxiv.org/schemas/atom"
+_OPENSEARCH_NS = "http://a9.com/-/spec/opensearch/1.1/"
+_NS = {"atom": _ATOM_NS, "arxiv": _ARXIV_NS, "opensearch": _OPENSEARCH_NS}
+
+
+def _bare_id(identifier: str) -> str:
+    """Strip a trailing arXiv version suffix (e.g. 'v2') from `identifier`, if present."""
+    prefix, sep, suffix = identifier.rpartition("v")
+    if sep and suffix.isdigit():
+        return prefix
+    return identifier
+
+
+def _is_version_pinned(identifier: str) -> bool:
+    """Whether `identifier` already names one immutable, version-pinned arXiv record."""
+    return _bare_id(identifier) != identifier
+
+
+def _text(element, path: str) -> str | None:
+    found = element.find(path, _NS)
+    return found.text.strip() if found is not None and found.text else None
+
+
+def _parse_entry(entry) -> dict:
+    entry_id = _text(entry, "atom:id") or ""
+    arxiv_id = entry_id.rsplit("/abs/", 1)[-1] if "/abs/" in entry_id else entry_id
+    authors = []
+    for author in entry.findall("atom:author", _NS):
+        authors.append({"name": _text(author, "atom:name") or "", "affiliation": _text(author, "arxiv:affiliation")})
+    categories = [c.get("term") for c in entry.findall("atom:category", _NS) if c.get("term")]
+    primary_category_el = entry.find("arxiv:primary_category", _NS)
+    primary_category = primary_category_el.get("term") if primary_category_el is not None else None
+    pdf_url = None
+    for link in entry.findall("atom:link", _NS):
+        if link.get("rel") == "related" and link.get("type") == "application/pdf":
+            pdf_url = link.get("href")
+            break
+    return {
+        "arxiv_id": arxiv_id,
+        "title": _text(entry, "atom:title"),
+        "authors": authors,
+        "abstract": _text(entry, "atom:summary"),
+        "categories": categories,
+        "primary_category": primary_category,
+        "published": _text(entry, "atom:published"),
+        "updated": _text(entry, "atom:updated"),
+        "pdf_url": pdf_url,
+        "doi": _text(entry, "arxiv:doi"),
+        "journal_ref": _text(entry, "arxiv:journal_ref"),
+        "comment": _text(entry, "arxiv:comment"),
+    }
+
+
+def _parse_feed(xml_bytes: bytes) -> tuple[list[dict], int]:
+    root = safe_ET.fromstring(xml_bytes)
+    entries = [_parse_entry(e) for e in root.findall("atom:entry", _NS)]
+    total_el = root.find("opensearch:totalResults", _NS)
+    total_results = int(total_el.text) if total_el is not None and total_el.text else len(entries)
+    return entries, total_results
+
+
+class ArxivProvider(ResearchPublicationProvider):
+    """arXiv implementation of `ResearchPublicationProvider`."""
+
+    def __init__(self, storage: StorageBackend, queue: ProviderRequestQueue, http_client: httpx.AsyncClient) -> None:
+        self._storage = storage
+        self._queue = queue
+        self._http_client = http_client
+
+    async def _get(self, params: dict) -> bytes:
+        async def op() -> httpx.Response:
+            return await provider_http.request(self._http_client, "GET", ARXIV_API_URL, params=params)
+
+        response = await self._queue.execute(op)
+        return response.content
+
+    async def search(  # ty: ignore[invalid-method-override]
+        self,
+        query: str,
+        max_results: int = 10,
+        start: int = 0,
+        sort_by: str = "relevance",
+        sort_order: str = "descending",
+    ) -> dict:
+        """See docs/requirement-specification/06-interface-specification.md#research_arxiv_search."""
+        if max_results > ARXIV_MAX_RESULTS:
+            raise InvalidRequestError(f"max_results must be <= {ARXIV_MAX_RESULTS}, got {max_results}")
+        if start + max_results > ARXIV_MAX_CUMULATIVE:
+            raise InvalidRequestError(f"start + max_results must be <= {ARXIV_MAX_CUMULATIVE}")
+        params = {
+            "search_query": query,
+            "start": start,
+            "max_results": max_results,
+            "sortBy": sort_by,
+            "sortOrder": sort_order,
+        }
+        entries, total_results = _parse_feed(await self._get(params))
+        return {"results": entries, "total_results": total_results}
+
+    async def list_top_n(self, category: str, n: int) -> dict:
+        """See docs/requirement-specification/06-interface-specification.md#research_arxiv_list_top_n."""
+        params = {
+            "search_query": f"cat:{category}",
+            "start": 0,
+            "max_results": n,
+            "sortBy": "submittedDate",
+            "sortOrder": "descending",
+        }
+        entries, _ = _parse_feed(await self._get(params))
+        return {"results": entries}
+
+    async def fetch_metadata(self, identifiers: list[str]) -> dict:
+        """See docs/requirement-specification/06-interface-specification.md#research_arxiv_fetch_metadata."""
+        params = {"id_list": ",".join(identifiers)}
+        entries, _ = _parse_feed(await self._get(params))
+        found_bare_ids = {_bare_id(e["arxiv_id"]) for e in entries}
+        not_found = [i for i in identifiers if _bare_id(i) not in found_bare_ids]
+        return {"results": entries, "not_found": not_found}
+
+    async def resolve_identifier(self, identifier: str, format: str) -> dict:
+        raise NotImplementedError  # implemented in Task 4
+
+    async def fetch_full_text(self, identifier: str, format: str) -> dict:
+        raise NotImplementedError  # implemented in Task 4
+
+    async def parse_full_text(self, identifier: str, format: str) -> dict:
+        raise NotImplementedError  # implemented in Task 6
