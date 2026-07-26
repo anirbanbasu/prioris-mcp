@@ -100,27 +100,47 @@ class TestProviderRequestQueueBackoff:
     def test_a_later_call_still_starts_its_own_backoff_from_the_base_spacing(self):
         # Per this plan's "Backoff sequence scope" design decision: a call that follows one
         # which was rate-limited does not inherit an elevated wait - it starts fresh.
+        #
+        # A count-only assertion (both calls take exactly 2 attempts) would not catch a
+        # regression where backoff state was incorrectly persisted as instance state instead
+        # of being local to each `execute()` call: both calls would still succeed on their
+        # 2nd attempt, but the second call's actual wait before that 2nd attempt would be
+        # elevated (a further-doubled value) rather than reset to `base_spacing_seconds`. So
+        # this test measures the actual wait duration between each call's failing 1st attempt
+        # and its succeeding 2nd attempt, for both calls independently.
+        base_spacing_seconds = 0.1
+
         async def scenario():
-            queue = ProviderRequestQueue(base_spacing_seconds=0.02, max_total_backoff_seconds=1.0)
+            queue = ProviderRequestQueue(base_spacing_seconds=base_spacing_seconds, max_total_backoff_seconds=5.0)
             attempts_by_call: list[int] = []
+            retry_wait_seconds_by_call: list[float] = []
 
             async def make_operation():
                 attempts = 0
+                failed_at = 0.0
 
                 async def operation() -> str:
-                    nonlocal attempts
+                    nonlocal attempts, failed_at
                     attempts += 1
                     if attempts == 1:
+                        failed_at = time.monotonic()
                         raise RateLimitedError
                     attempts_by_call.append(attempts)
+                    retry_wait_seconds_by_call.append(time.monotonic() - failed_at)
                     return "ok"
 
                 return operation
 
             await queue.execute(await make_operation())
             await queue.execute(await make_operation())
-            return attempts_by_call
+            return attempts_by_call, retry_wait_seconds_by_call
 
-        # Both calls take exactly 2 attempts (fail once, then succeed) - the second call's
-        # single retry wait is the base spacing again, not a further-doubled value.
-        assert asyncio.run(scenario()) == [2, 2]
+        attempts_by_call, retry_wait_seconds_by_call = asyncio.run(scenario())
+        # Both calls take exactly 2 attempts (fail once, then succeed).
+        assert attempts_by_call == [2, 2]
+        # And, crucially, each call's single retry wait is close to base_spacing_seconds on
+        # its own - not a multiple of it, which is what a persisted/elevated backoff state
+        # would produce for the second call (two elevated-but-equal waits would still pass a
+        # "both gaps are similar" check, so each is compared against the base independently).
+        for retry_wait_seconds in retry_wait_seconds_by_call:
+            assert base_spacing_seconds <= retry_wait_seconds < base_spacing_seconds * 1.75, retry_wait_seconds_by_call
