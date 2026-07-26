@@ -18,8 +18,10 @@ classifiers = [
 ]
 dependencies = [
     "anyio>=4.14.2",
+    "defusedxml>=0.7.1",
     "environs>=15.0.1",
     "fastmcp>=3.4.4",
+    "httpx>=0.28.1",
 ]
 
 [project.scripts]
