@@ -1,4 +1,6 @@
 import logging
+import os
+from pathlib import Path
 
 from environs import Env
 from marshmallow.validate import OneOf, Range
@@ -46,6 +48,23 @@ class EnvVars:
     PRIORIS_MCP_UNVERIFIED_HTTPS: bool = env.bool(
         name="PRIORIS_MCP_UNVERIFIED_HTTPS",
         default=False,  # By default, HTTPS requests are verified; override in development for testing
+    )
+
+    _default_data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+
+    PRIORIS_MCP_STORAGE_DIR = env.path(
+        "PRIORIS_MCP_STORAGE_DIR",
+        # Data, not configuration, hence XDG_DATA_HOME (not XDG_CONFIG_HOME) - see
+        # docs/requirement-specification/02-storage.md.
+        default=_default_data_home / "prioris-mcp" / "downloads",
+    )
+
+    PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS = env.float(
+        "PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS",
+        # Total time a single tool call's rate-limit backoff may spend retrying before giving up
+        # with `rate_limited` - see docs/requirement-specification/04-non-functional-requirements.md.
+        default=60.0,
+        validate=Range(min=0, max=3600),
     )
 
 
