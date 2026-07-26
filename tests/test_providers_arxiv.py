@@ -358,6 +358,41 @@ class TestArxivProviderFetchFullText:
         result = asyncio.run(scenario())
         assert result["resource_uri"] == "research://arxiv/2106.09685v2/pdf/fulltext"
 
+    def test_redirect_is_followed_and_final_content_persisted(self, tmp_path):
+        """Regression test for `PriorisMCP.__init__`'s `httpx.AsyncClient(follow_redirects=True)`.
+
+        Mirrors the real client configuration (see `src/prioris_mcp/server.py`): with
+        `follow_redirects=True`, a 302 from the full-text URL is followed transparently and the
+        final 200's body - not the redirect stub - is what gets persisted. Constructing the
+        client here with `follow_redirects=False` (httpx's default, and what this codebase used
+        to construct before the fix) would instead persist the tiny redirect-stub body with
+        `served_from_storage=False`, silently masking the failure - this is the exact bug class
+        Finding 2 of the final review flagged.
+        """
+        real_content = b"%PDF-1.4 real pdf bytes after redirect"
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.path == "/pdf/2106.09685v2":
+                return httpx.Response(302, headers={"Location": "https://arxiv.org/pdf/2106.09685v2-final"})
+            return httpx.Response(200, content=real_content)
+
+        async def scenario():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
+            queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+            storage = FilesystemStorageBackend(base_dir=tmp_path)
+            provider = ArxivProvider(
+                storage=storage,
+                queue=queue,
+                http_client=client,
+                pdf_backend=_StubParserBackend(),
+                html_backend=_StubParserBackend(),
+            )
+            async with client:
+                return await provider.fetch_full_text("2106.09685v2", "pdf")
+
+        result = asyncio.run(scenario())
+        assert result["size_bytes"] == len(real_content)
+
 
 class _StubParserBackend(ParserBackend):
     def __init__(self, markdown: str = "# parsed") -> None:

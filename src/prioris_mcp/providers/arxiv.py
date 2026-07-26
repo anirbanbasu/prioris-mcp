@@ -5,6 +5,7 @@ docs/requirement-specification/06-interface-specification.md#arxiv.
 """
 
 import logging
+from urllib.parse import quote
 
 import httpx
 from defusedxml import ElementTree as safe_ET
@@ -109,6 +110,8 @@ class ArxivProvider(ResearchPublicationProvider):
         response = await self._queue.execute(op)
         return response.content
 
+    # invalid-method-override: base.py's search(**kwargs: Any) is intentionally generic so each
+    # provider can define its own concrete parameter shape (see providers/base.py's docstring).
     async def search(  # ty: ignore[invalid-method-override]
         self,
         query: str,
@@ -199,7 +202,14 @@ class ArxivProvider(ResearchPublicationProvider):
             "format": format,
             "size_bytes": len(content),
             "served_from_storage": served_from_storage,
-            "resource_uri": f"research://arxiv/{canonical_id}/{format}/fulltext",
+            # canonical_id is percent-encoded (safe="" so even old-style slash-bearing ids like
+            # "hep-th/9901001v1" collapse to one opaque path segment): the resource template in
+            # server.py is `research://{provider}/{identifier}/{format}/fulltext`, and a bare "/"
+            # in {identifier} would otherwise split across what FastMCP's matcher treats as two
+            # path segments. FastMCP's match_uri_template() unquotes each captured segment before
+            # calling the handler, so read_fulltext_resource still receives the identifier in its
+            # original, storage-key-compatible form.
+            "resource_uri": f"research://arxiv/{quote(canonical_id, safe='')}/{format}/fulltext",
         }
 
     async def parse_full_text(self, identifier: str, format: str) -> dict:
@@ -230,5 +240,7 @@ class ArxivProvider(ResearchPublicationProvider):
         markdown_bytes, _ = await self._storage.get_or_create("arxiv", canonical_id, markdown_format, factory)
         return {
             "markdown": markdown_bytes.decode("utf-8"),
-            "resource_uri": f"research://arxiv/{canonical_id}/{format}/markdown",
+            # See the matching comment in fetch_full_text: canonical_id is percent-encoded so an
+            # old-style slash-bearing identifier still resolves as a single {identifier} segment.
+            "resource_uri": f"research://arxiv/{quote(canonical_id, safe='')}/{format}/markdown",
         }

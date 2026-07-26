@@ -61,7 +61,7 @@ class PriorisMCP(MCPMixin):
 
     def __init__(self) -> None:
         self._storage = FilesystemStorageBackend()
-        self._http_client = httpx.AsyncClient()
+        self._http_client = httpx.AsyncClient(follow_redirects=True)
         arxiv_queue = ProviderRequestQueue(
             base_spacing_seconds=ARXIV_BASE_SPACING_SECONDS,
             max_total_backoff_seconds=EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS,

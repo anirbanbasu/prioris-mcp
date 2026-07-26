@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 
 import httpx
@@ -53,6 +54,17 @@ class TestMCPServer:
             result = await mcp_client.get_prompt(prompt_name, arguments=kwargs)
             await mcp_client.close()
         return result
+
+    def test_outbound_http_client_follows_redirects(self):
+        """`httpx.AsyncClient()` defaults `follow_redirects` to False.
+
+        Without `follow_redirects=True`, a 3xx from e.g. arXiv's `/pdf/{id}` endpoint would be
+        passed through by `providers/http.request` (it only special-cases 429/5xx) and silently
+        persisted as if it were the actual document - see
+        tests/test_providers_arxiv.py::TestArxivProviderFetchFullText::test_redirect_is_followed_and_final_content_persisted
+        for the end-to-end consequence.
+        """
+        assert PriorisMCP()._http_client.follow_redirects is True
 
 
 class TestArxivTools:
@@ -125,6 +137,38 @@ class TestArxivTools:
         fetch_result, resource_result = asyncio.run(scenario())
         assert fetch_result.structured_content["served_from_storage"] is False
         assert len(resource_result) == 1
+
+    def test_fetch_full_text_old_style_slash_id_resource_uri_round_trips(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression test for the resource-URI round-trip bug with pre-2007 archive/number ids.
+
+        `hep-th/9901001v1` is version-pinned (see `_is_version_pinned`), so `fetch_full_text`
+        never issues a `fetch_metadata` call for it - the handler only ever needs to answer the
+        full-text GET. The returned `resource_uri` must contain the identifier's "/" percent-
+        encoded (`%2F`) as a single opaque `{identifier}` path segment; if it didn't, a client
+        calling `read_resource` with the exact URI string PriorisMCP handed back would fail to
+        match the `research://{provider}/{identifier}/{format}/fulltext` template as one segment.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"%PDF-1.4 old style fake bytes")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_arxiv_fetch_full_text", arguments={"arxiv_id": "hep-th/9901001v1", "format": "pdf"}
+                )
+                resource_uri = fetch_result.structured_content["resource_uri"]
+                resource_result = await client.read_resource(resource_uri)
+                return resource_uri, resource_result
+
+        resource_uri, resource_result = asyncio.run(scenario())
+        assert resource_uri == "research://arxiv/hep-th%2F9901001v1/pdf/fulltext"
+        blob = resource_result[0].blob
+        assert base64.b64decode(blob) == b"%PDF-1.4 old style fake bytes"
 
     def test_research_arxiv_list_top_n_returns_results(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
         def handler(req: httpx.Request) -> httpx.Response:
