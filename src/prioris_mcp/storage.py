@@ -10,6 +10,12 @@ from abc import ABC, abstractmethod
 from asyncio import Lock
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+
+from anyio import to_thread
+
+from prioris_mcp import EnvVars
 
 logger = logging.getLogger(__name__)
 
@@ -120,3 +126,55 @@ class StorageBackend(ABC):
             content = await factory()
             await self.write(provider, identifier, format, content, original_identifier=original_identifier)
             return content, False
+
+
+class FilesystemStorageBackend(StorageBackend):
+    """Persists content under a directory on local disk.
+
+    See docs/requirement-specification/02-storage.md#v1-local-filesystem-backend.
+    """
+
+    def __init__(self, base_dir: Path | None = None) -> None:
+        super().__init__()
+        self._base_dir = base_dir if base_dir is not None else EnvVars.PRIORIS_MCP_STORAGE_DIR
+        self._base_dir.mkdir(parents=True, exist_ok=True)
+
+    def _data_path(self, provider: str, identifier: str, format: str) -> Path:
+        return self._base_dir / f"{self._storage_key(provider, identifier, format)}.data"
+
+    def _manifest_path(self, provider: str, identifier: str, format: str) -> Path:
+        return self._base_dir / f"{self._storage_key(provider, identifier, format)}.json"
+
+    async def exists(self, provider: str, identifier: str, format: str) -> bool:
+        return await to_thread.run_sync(self._data_path(provider, identifier, format).exists)
+
+    async def write(
+        self,
+        provider: str,
+        identifier: str,
+        format: str,
+        content: bytes,
+        *,
+        original_identifier: str | None = None,
+    ) -> str:
+        data_path = self._data_path(provider, identifier, format)
+        manifest_path = self._manifest_path(provider, identifier, format)
+        manifest = {
+            "provider": provider,
+            "canonical_identifier": identifier,
+            "original_identifier": original_identifier,
+            "format": format,
+            "fetched_at": datetime.now(UTC).isoformat(),
+        }
+        await to_thread.run_sync(self._atomic_write, data_path, content)
+        await to_thread.run_sync(self._atomic_write, manifest_path, json.dumps(manifest, indent=2).encode("utf-8"))
+        return str(data_path)
+
+    async def read(self, provider: str, identifier: str, format: str) -> bytes:
+        return await to_thread.run_sync(self._data_path(provider, identifier, format).read_bytes)
+
+    @staticmethod
+    def _atomic_write(path: Path, content: bytes) -> None:
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_bytes(content)
+        tmp_path.replace(path)

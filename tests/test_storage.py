@@ -1,6 +1,11 @@
 import asyncio
+import json
+from pathlib import Path
 
-from prioris_mcp.storage import KeyedAsyncLockManager, StorageBackend
+import pytest
+
+from prioris_mcp import EnvVars
+from prioris_mcp.storage import FilesystemStorageBackend, KeyedAsyncLockManager, StorageBackend
 
 
 class _InMemoryStorageBackend(StorageBackend):
@@ -169,3 +174,80 @@ class TestStorageBackendGetOrCreate:
             return calls
 
         assert asyncio.run(scenario()) == 2
+
+
+class TestFilesystemStorageBackend:
+    """Dedicated test class for FilesystemStorageBackend."""
+
+    def test_exists_is_false_before_write(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        assert asyncio.run(backend.exists("arxiv", "2601.05525v2", "pdf")) is False
+
+    def test_write_then_read_round_trips_content(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write("arxiv", "2601.05525v2", "pdf", b"%PDF-1.4 fake content")
+            exists = await backend.exists("arxiv", "2601.05525v2", "pdf")
+            content = await backend.read("arxiv", "2601.05525v2", "pdf")
+            return exists, content
+
+        exists, content = asyncio.run(scenario())
+        assert exists is True
+        assert content == b"%PDF-1.4 fake content"
+
+    def test_write_persists_a_manifest_sidecar(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("arxiv", "2601.05525v2", "pdf", b"content", original_identifier="2601.05525"))
+        key = FilesystemStorageBackend._storage_key("arxiv", "2601.05525v2", "pdf")
+        manifest = json.loads((tmp_path / f"{key}.json").read_text())
+        assert manifest == {
+            "provider": "arxiv",
+            "canonical_identifier": "2601.05525v2",
+            "original_identifier": "2601.05525",
+            "format": "pdf",
+            "fetched_at": manifest["fetched_at"],  # asserted separately below
+        }
+        # fetched_at must be a real, parseable ISO-8601 UTC timestamp
+        from datetime import datetime
+
+        datetime.fromisoformat(manifest["fetched_at"])
+
+    def test_write_without_original_identifier_stores_null(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("arxiv", "2601.05525v2", "pdf", b"content"))
+        key = FilesystemStorageBackend._storage_key("arxiv", "2601.05525v2", "pdf")
+        manifest = json.loads((tmp_path / f"{key}.json").read_text())
+        assert manifest["original_identifier"] is None
+
+    def test_read_missing_content_raises_file_not_found(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(backend.read("arxiv", "does-not-exist", "pdf"))
+
+    def test_base_dir_is_created_if_missing(self, tmp_path: Path):
+        target = tmp_path / "nested" / "downloads"
+        FilesystemStorageBackend(target)
+        assert target.is_dir()
+
+    def test_no_leftover_temp_files_after_write(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("arxiv", "2601.05525v2", "pdf", b"content"))
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_defaults_base_dir_to_env_var(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "from-env")
+        backend = FilesystemStorageBackend()
+        assert backend._base_dir == tmp_path / "from-env"
+        assert (tmp_path / "from-env").is_dir()
+
+    def test_get_or_create_works_end_to_end_against_the_real_filesystem(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def factory() -> bytes:
+            return b"downloaded bytes"
+
+        first = asyncio.run(backend.get_or_create("arxiv", "2601.05525v2", "pdf", factory))
+        second = asyncio.run(backend.get_or_create("arxiv", "2601.05525v2", "pdf", factory))
+        assert first == (b"downloaded bytes", False)
+        assert second == (b"downloaded bytes", True)
