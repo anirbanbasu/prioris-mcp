@@ -8,6 +8,7 @@ import logging
 
 import httpx
 
+from prioris_mcp.errors import FormatUnavailableError, NotFoundError
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers import http as provider_http
 from prioris_mcp.providers.base import ResearchPublicationProvider
@@ -116,10 +117,60 @@ class EuropePmcProvider(ResearchPublicationProvider):
         return {"results": results, "not_found": not_found}
 
     async def resolve_identifier(self, identifier: str, format: str) -> dict:
-        raise NotImplementedError  # implemented in Task 2
+        """See docs/requirement-specification/01-architecture.md#resolve_identifier.
+
+        Always resolves via `fetch_metadata`, even for a bare PMCID: Europe PMC's PMCID alone
+        doesn't say whether Europe PMC hosts full text for it (`full_text_available`), which
+        `fetch_full_text` needs. Returning it here (alongside the `identifier`/`resolved_url`/
+        `format` the interface spec requires) lets `fetch_full_text` reuse this one metadata
+        call instead of issuing a second, redundant one purely to re-check availability.
+        """
+        metadata = await self.fetch_metadata([identifier])
+        if not metadata["results"]:
+            raise NotFoundError(f"Europe PMC identifier not recognised: {identifier}")
+        record = metadata["results"][0]
+        if not record["pmcid"]:
+            raise FormatUnavailableError(f"Europe PMC record {identifier} has no PMCID")
+        pmcid = record["pmcid"]
+        url = f"{EUROPEPMC_API_URL}/{pmcid}/fullTextXML"
+        return {
+            "identifier": f"PMC:{pmcid}",
+            "resolved_url": url,
+            "format": "xml",
+            "full_text_available": record["full_text_available"],
+        }
 
     async def fetch_full_text(self, identifier: str, format: str = "xml") -> dict:
-        raise NotImplementedError  # implemented in Task 2
+        """See docs/requirement-specification/06-interface-specification.md#research_europepmc_fetch_full_text.
+
+        `fullTextUrlList` entries can point off-domain (publisher sites, NCBI Bookshelf), which
+        this provider never follows - only the same-domain `fullTextXML` endpoint, and only when
+        `full_text_available` is true - see
+        docs/requirement-specification/05-security.md#untrusted-identifiers-must-not-drive-unconstrained-outbound-requests.
+        """
+        resolved = await self.resolve_identifier(identifier, "xml")
+        if not resolved["full_text_available"]:
+            raise FormatUnavailableError(f"Europe PMC does not host full text for {identifier}")
+        canonical_id = resolved["identifier"]
+        url = resolved["resolved_url"]
+
+        async def factory() -> bytes:
+            async def op() -> httpx.Response:
+                return await provider_http.request(self._http_client, "GET", url)
+
+            response = await self._queue.execute(op)
+            return response.content
+
+        content, served_from_storage = await self._storage.get_or_create(
+            "europepmc", canonical_id, "xml", factory, original_identifier=identifier
+        )
+        return {
+            "location": f"europepmc:{canonical_id}:xml",
+            "format": "xml",
+            "size_bytes": len(content),
+            "served_from_storage": served_from_storage,
+            "resource_uri": f"research://europepmc/{canonical_id}/xml/fulltext",
+        }
 
     async def parse_full_text(self, identifier: str, format: str = "xml") -> dict:
         raise NotImplementedError  # implemented in Task 4
