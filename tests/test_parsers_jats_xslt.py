@@ -1,5 +1,6 @@
 # tests/test_parsers_jats_xslt.py
 import asyncio
+import threading
 import time
 
 import pytest
@@ -119,3 +120,44 @@ class TestJatsXsltMarkdownBackend:
             f"expected ParseError near the {jats_xslt.JATS_PARSE_TIMEOUT_SECONDS}s bound, "
             f"not after waiting out the full 0.5s sleep (took {elapsed:.3f}s)"
         )
+
+    def test_concurrent_transforms_are_bounded_by_the_semaphore(self, monkeypatch: pytest.MonkeyPatch):
+        """No more than the configured cap ever run the transform step at the same time.
+
+        Regression guard for the abandoned-thread resource-exhaustion risk described in
+        docs/requirement-specification/05-security.md#a-bounded-per-call-failure-is-not-sufficient-on-its-own:
+        an `anyio.CapacityLimiter` passed to `to_thread.run_sync` would release its slot as soon as
+        the *caller* is cancelled, not when the worker thread actually finishes - this test proves
+        the module's plain `threading.Semaphore` genuinely caps concurrent execution instead.
+        """
+        from prioris_mcp.parsers import jats_xslt
+
+        monkeypatch.setattr(jats_xslt, "_TRANSFORM_SEMAPHORE", threading.Semaphore(1))
+
+        state_lock = threading.Lock()
+        concurrent_count = 0
+        max_concurrent = 0
+
+        def _slow_transform(source_doc):
+            nonlocal concurrent_count, max_concurrent
+            with state_lock:
+                concurrent_count += 1
+                max_concurrent = max(max_concurrent, concurrent_count)
+            time.sleep(0.2)
+            with state_lock:
+                concurrent_count -= 1
+            return source_doc
+
+        backend_a = JatsXsltMarkdownBackend(_RecordingHtmlBackend())
+        backend_b = JatsXsltMarkdownBackend(_RecordingHtmlBackend())
+        monkeypatch.setattr(backend_a, "_get_transform", lambda: _slow_transform)
+        monkeypatch.setattr(backend_b, "_get_transform", lambda: _slow_transform)
+
+        async def scenario():
+            await asyncio.gather(
+                backend_a.to_markdown(_MINIMAL_JATS),
+                backend_b.to_markdown(_MINIMAL_JATS),
+            )
+
+        asyncio.run(scenario())
+        assert max_concurrent == 1

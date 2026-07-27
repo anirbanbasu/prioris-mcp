@@ -1,4 +1,5 @@
 import importlib
+import os
 from pathlib import Path
 
 import pytest
@@ -48,3 +49,31 @@ class TestRateLimitBackoffBudgetDefault:
         monkeypatch.setenv("PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS", "12.5")
         reloaded = importlib.reload(prioris_mcp)
         assert reloaded.EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS == 12.5
+
+
+class TestJatsMaxConcurrentTransformsDefault:
+    """EnvVars.PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS default, override, and CPU-count clamp."""
+
+    def test_defaults_to_4_when_cpu_count_is_at_least_4(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS", raising=False)
+        monkeypatch.setattr(os, "cpu_count", lambda: 8)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS == 4
+
+    def test_defaults_to_cpu_count_when_below_4(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS", raising=False)
+        monkeypatch.setattr(os, "cpu_count", lambda: 2)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS == 2
+
+    def test_explicit_override_wins_when_within_cpu_count(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS", "3")
+        monkeypatch.setattr(os, "cpu_count", lambda: 8)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS == 3
+
+    def test_override_is_clamped_to_cpu_count_even_if_higher(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS", "64")
+        monkeypatch.setattr(os, "cpu_count", lambda: 4)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS == 4

@@ -67,6 +67,19 @@ class EnvVars:
         validate=Range(min=0, max=3600),
     )
 
+    # Clamped to the host's CPU count even if the environment variable requests more: this bounds
+    # concurrently-*executing* JATS transforms (not just concurrently-awaited ones) against
+    # unbounded resource use from abandoned, still-running transforms - see
+    # docs/requirement-specification/05-security.md#a-bounded-per-call-failure-is-not-sufficient-on-its-own.
+    PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS = min(
+        env.int(
+            "PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS",
+            default=min(4, os.cpu_count() or 4),
+            validate=Range(min=1),
+        ),
+        os.cpu_count() or 4,
+    )
+
 
 logging.basicConfig(
     level=EnvVars.PRIORIS_MCP_LOG_LEVEL,

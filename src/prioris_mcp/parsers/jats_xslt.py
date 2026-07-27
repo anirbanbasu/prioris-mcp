@@ -15,6 +15,7 @@ fully supported by lxml/libxslt (no Saxon/XSLT-2.0 dependency needed).
 """
 
 import logging
+import threading
 from pathlib import Path
 
 import anyio
@@ -24,6 +25,7 @@ from anyio import to_thread
 # carry a separate lxml-stubs dependency; ty cannot resolve `lxml.etree`'s members as a result.
 from lxml import etree  # ty: ignore[unresolved-import]
 
+from prioris_mcp import EnvVars
 from prioris_mcp.parsers.base import ParseError, ParserBackend
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,14 @@ logger = logging.getLogger(__name__)
 JATS_PARSE_TIMEOUT_SECONDS = 60.0
 
 _STYLESHEET_PATH = Path(__file__).parent / "data" / "jats-html.xsl"
+
+# Bounds concurrently-*executing* transforms (not concurrently-awaited ones - see
+# docs/requirement-specification/05-security.md#a-bounded-per-call-failure-is-not-sufficient-on-its-own).
+# A plain threading.Semaphore, acquired/released around the transform itself rather than passed as
+# an anyio CapacityLimiter, is required here: anyio releases a CapacityLimiter as soon as the
+# *caller* abandons the call, not when the worker thread actually finishes, which would let
+# abandoned-but-still-running transforms escape the cap entirely.
+_TRANSFORM_SEMAPHORE = threading.Semaphore(EnvVars.PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS)
 
 
 class JatsXsltMarkdownBackend(ParserBackend):
@@ -52,40 +62,46 @@ class JatsXsltMarkdownBackend(ParserBackend):
 
     async def to_markdown(self, content: bytes) -> str:
         def _transform_to_html() -> bytes:
-            # This parses untrusted external content (see
-            # docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text):
-            # resolve_entities=False stops custom DTD-declared entities (e.g. "billion laughs") from
-            # being expanded inline (paired with the explicit rejection below), no_network=True blocks
-            # fetching an external DTD/entity over the network, and huge_tree=False (lxml's own
-            # default) keeps libxml2's structural safety limits - including its own entity-amplification
-            # cap, which independently bounds entities used within attribute values - on.
-            parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
-            source_doc = etree.fromstring(content, parser=parser)
-            # resolve_entities=False stops libxml2 from *expanding* custom DTD-declared
-            # entities (so a "billion laughs" document never balloons in memory), but it does
-            # not raise on its own - the entity reference is simply left unresolved as an
-            # `etree._Entity` node in the tree. Treat any such node as a rejected document:
-            # legitimate JATS content does not need custom internal/external general entities,
-            # and silently dropping the reference would hide content rather than surface it.
-            unresolved_entity_names = [node.name for node in source_doc.iter() if isinstance(node, etree._Entity)]
-            if unresolved_entity_names:
-                raise ValueError(
-                    "JATS XML contains unresolved custom entity reference(s): "
-                    f"{', '.join(f'&{name};' for name in unresolved_entity_names)}; entity expansion is "
-                    "disabled to prevent resource-exhaustion attacks, so documents relying on custom "
-                    "entities are rejected"
-                )
-            result_tree = self._get_transform()(source_doc)
-            return etree.tostring(result_tree, encoding="utf-8")
+            # Held for the transform's true lifetime (released only once this function returns or
+            # raises), not tied to the calling task's own cancellation - see
+            # docs/requirement-specification/05-security.md#a-bounded-per-call-failure-is-not-sufficient-on-its-own.
+            # A caller beyond the cap blocks here (cheap - no CPU use while waiting), and is still
+            # subject to the fail_after bound below if a slot never frees in time.
+            with _TRANSFORM_SEMAPHORE:
+                # This parses untrusted external content (see
+                # docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text):
+                # resolve_entities=False stops custom DTD-declared entities (e.g. "billion laughs") from
+                # being expanded inline (paired with the explicit rejection below), no_network=True blocks
+                # fetching an external DTD/entity over the network, and huge_tree=False (lxml's own
+                # default) keeps libxml2's structural safety limits - including its own entity-amplification
+                # cap, which independently bounds entities used within attribute values - on.
+                parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
+                source_doc = etree.fromstring(content, parser=parser)
+                # resolve_entities=False stops libxml2 from *expanding* custom DTD-declared
+                # entities (so a "billion laughs" document never balloons in memory), but it does
+                # not raise on its own - the entity reference is simply left unresolved as an
+                # `etree._Entity` node in the tree. Treat any such node as a rejected document:
+                # legitimate JATS content does not need custom internal/external general entities,
+                # and silently dropping the reference would hide content rather than surface it.
+                unresolved_entity_names = [node.name for node in source_doc.iter() if isinstance(node, etree._Entity)]
+                if unresolved_entity_names:
+                    raise ValueError(
+                        "JATS XML contains unresolved custom entity reference(s): "
+                        f"{', '.join(f'&{name};' for name in unresolved_entity_names)}; entity expansion is "
+                        "disabled to prevent resource-exhaustion attacks, so documents relying on custom "
+                        "entities are rejected"
+                    )
+                result_tree = self._get_transform()(source_doc)
+                return etree.tostring(result_tree, encoding="utf-8")
 
         try:
             with anyio.fail_after(JATS_PARSE_TIMEOUT_SECONDS):
                 # abandon_on_cancel=True: anyio's default (False) defers cancellation until the
                 # worker thread finishes on its own, so a CPU-bound pathological transform would
                 # run past fail_after's deadline instead of surfacing ParseError at the bound. The
-                # abandoned thread keeps running in the background after this call returns, which
-                # is acceptable here - each call gets its own isolated parser/thread, sharing no
-                # state with the caller.
+                # abandoned thread keeps running in the background after this call returns;
+                # _TRANSFORM_SEMAPHORE bounds how many such threads can ever be doing real
+                # transform work concurrently, regardless of how many calls have been abandoned.
                 html_bytes = await to_thread.run_sync(_transform_to_html, abandon_on_cancel=True)
         except TimeoutError as exc:
             raise ParseError(f"JATS XSLT transform exceeded {JATS_PARSE_TIMEOUT_SECONDS}s bound") from exc
