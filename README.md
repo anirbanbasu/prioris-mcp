@@ -4,7 +4,7 @@
 
 A MCP server to facilitate looking up prior art.
 
-Full documentation, including installation, configuration, and how to connect this server to Claude, is published at **[docs-prioris-mcp.anirbanbasu.com](https://docs-prioris-mcp.anirbanbasu.com)**.
+Full documentation, including installation, configuration, and how to connect this server to Claude, is published at **[the documentation site](https://docs-prioris-mcp.anirbanbasu.com)**.
 
 # Contributing
 
