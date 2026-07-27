@@ -159,7 +159,7 @@ class TestEuropePmcProviderResolveIdentifier:
                 return await provider.resolve_identifier("PMC4767193", "xml")
 
         result = asyncio.run(scenario())
-        assert result["identifier"] == "PMC:PMC4767193"
+        assert result["identifier"] == "PMC:4767193"
         assert result["resolved_url"] == f"{'https://www.ebi.ac.uk/europepmc/webservices/rest'}/PMC4767193/fullTextXML"
         assert result["full_text_available"] is True
 
@@ -173,7 +173,7 @@ class TestEuropePmcProviderResolveIdentifier:
                 return await provider.resolve_identifier("MED:26551875", "xml")
 
         result = asyncio.run(scenario())
-        assert result["identifier"] == "PMC:PMC4767193"
+        assert result["identifier"] == "PMC:4767193"
 
     def test_unrecognised_identifier_raises_not_found(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -217,7 +217,7 @@ class TestEuropePmcProviderFetchFullText:
         result = asyncio.run(scenario())
         assert result["format"] == "xml"
         assert result["served_from_storage"] is False
-        assert result["resource_uri"] == "research://europepmc/PMC:PMC4767193/xml/fulltext"
+        assert result["resource_uri"] == "research://europepmc/PMC:4767193/xml/fulltext"
 
     def test_second_call_is_served_from_storage(self, tmp_path):
         xml_call_count = 0
@@ -284,7 +284,7 @@ class TestEuropePmcProviderParseFullText:
                 storage=storage, queue=queue, http_client=client, xml_backend=_StubXmlBackend()
             )
             async with client:
-                await provider.parse_full_text("PMC:PMC4767193")
+                await provider.parse_full_text("PMC:4767193")
 
         with pytest.raises(NotFoundError):
             asyncio.run(scenario())
@@ -336,5 +336,5 @@ class TestEuropePmcProviderParseFullText:
 
         result = asyncio.run(scenario())
         assert result["markdown"] == "# Parsed JATS"
-        assert "PMC:PMC4767193" in result["resource_uri"]
+        assert "PMC:4767193" in result["resource_uri"]
         assert xml_backend.call_count == 1

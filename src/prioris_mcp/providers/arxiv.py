@@ -190,7 +190,26 @@ class ArxivProvider(ResearchPublicationProvider):
                 return await provider_http.request(self._http_client, "GET", url)
 
             response = await self._queue.execute(op)
-            if format == "html" and response.status_code == 404:
+            if response.status_code == 404:
+                if format == "pdf":
+                    # A PDF is always available for any submission that exists (see
+                    # docs/requirement-specification/06-interface-specification.md#research_arxiv_fetch_full_text),
+                    # so a 404 here can only mean the identifier itself doesn't exist - unlike
+                    # html below, there is no legitimate "exists but unavailable in this format"
+                    # case to distinguish it from.
+                    raise NotFoundError(f"arXiv identifier not recognised: {canonical_id}")
+                # html: resolve_identifier skips the fetch_metadata existence check for an
+                # already-version-pinned identifier (see
+                # docs/requirement-specification/02-storage.md#identifier-canonicalisation), so a
+                # 404 here is ambiguous on its own for one - it could mean "no html rendering for
+                # a real item" or "this identifier doesn't exist at all". Disambiguate now, but
+                # only in that case: an unversioned identifier was already existence-checked by
+                # resolve_identifier's own fetch_metadata call, so paying for a second one here
+                # would be pure waste on the common path.
+                if _is_version_pinned(identifier):
+                    metadata = await self.fetch_metadata([canonical_id])
+                    if not metadata["results"]:
+                        raise NotFoundError(f"arXiv identifier not recognised: {canonical_id}")
                 raise FormatUnavailableError(f"No HTML rendering available for arXiv {canonical_id}")
             return response.content
 

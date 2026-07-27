@@ -436,12 +436,12 @@ class TestEuropePmcTools:
                 fetch_result = await client.call_tool(
                     "research_europepmc_fetch_full_text", arguments={"identifier": "PMC4767193"}
                 )
-                resource_result = await client.read_resource("research://europepmc/PMC:PMC4767193/xml/fulltext")
+                resource_result = await client.read_resource("research://europepmc/PMC:4767193/xml/fulltext")
                 return fetch_result, resource_result
 
         fetch_result, resource_result = asyncio.run(scenario())
         assert fetch_result.structured_content["served_from_storage"] is False
-        assert fetch_result.structured_content["resource_uri"] == "research://europepmc/PMC:PMC4767193/xml/fulltext"
+        assert fetch_result.structured_content["resource_uri"] == "research://europepmc/PMC:4767193/xml/fulltext"
         assert len(resource_result) == 1
 
     def test_research_europepmc_parse_full_text_then_read_markdown_resource(
@@ -455,7 +455,7 @@ class TestEuropePmcTools:
                 parse_result = await client.call_tool(
                     "research_europepmc_parse_full_text", arguments={"identifier": "PMC4767193"}
                 )
-                resource_result = await client.read_resource("research://europepmc/PMC:PMC4767193/xml/markdown")
+                resource_result = await client.read_resource("research://europepmc/PMC:4767193/xml/markdown")
                 return parse_result, resource_result
 
         parse_result, resource_result = asyncio.run(scenario())

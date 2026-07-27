@@ -134,7 +134,10 @@ class EuropePmcProvider(ResearchPublicationProvider):
         pmcid = record["pmcid"]
         url = f"{EUROPEPMC_API_URL}/{pmcid}/fullTextXML"
         return {
-            "identifier": f"PMC:{pmcid}",
+            # pmcid already carries the "PMC" prefix (e.g. "PMC4767193"); strip it before
+            # rebuilding the "{source}:{id}" canonical form, or this doubles to "PMC:PMC4767193"
+            # - inconsistent with the identifier `_parse_record` produces for the same record.
+            "identifier": f"PMC:{pmcid.removeprefix('PMC')}",
             "resolved_url": url,
             "format": "xml",
             "full_text_available": record["full_text_available"],

@@ -170,6 +170,19 @@ class TestArxivProviderListTopN:
         assert len(result["results"]) == 2
         assert "total_results" not in result
 
+    def test_requesting_more_than_the_category_has_returns_however_many_exist(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.params["max_results"] == "50"
+            return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.list_top_n("cs.CL", 50)
+
+        result = asyncio.run(scenario())
+        assert len(result["results"]) == 1
+
 
 class TestArxivProviderFetchMetadata:
     """Tests for `ArxivProvider.fetch_metadata`."""
@@ -333,7 +346,16 @@ class TestArxivProviderFetchFullText:
         assert count == 1
 
     def test_html_404_raises_format_unavailable_not_not_found(self, tmp_path):
+        """A version-pinned id whose html 404s, but which genuinely exists, is `format_unavailable`.
+
+        Confirmed by the disambiguating fetch_metadata call - see
+        `test_html_404_for_nonexistent_versioned_id_raises_not_found` below for the other outcome
+        of that same disambiguation.
+        """
+
         def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("id_list"):
+                return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
             return httpx.Response(404)
 
         async def scenario():
@@ -342,6 +364,74 @@ class TestArxivProviderFetchFullText:
                 await provider.fetch_full_text("2106.09685v2", "html")
 
         with pytest.raises(FormatUnavailableError):
+            asyncio.run(scenario())
+
+    def test_html_404_for_nonexistent_versioned_id_raises_not_found(self, tmp_path):
+        """A 404 for a nonexistent version-pinned id's html fetch must raise `NotFoundError`.
+
+        A version-pinned identifier skips `resolve_identifier`'s existence check (see
+        docs/requirement-specification/02-storage.md#identifier-canonicalisation), so a 404 on
+        its html fetch is ambiguous on its own between "no html rendering" and "doesn't exist at
+        all" - `fetch_full_text` must disambiguate via `fetch_metadata` and raise `NotFoundError`
+        for a genuinely nonexistent id, not silently report `format_unavailable`.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if req.url.params.get("id_list"):
+                return httpx.Response(200, content=_feed([]))
+            return httpx.Response(404)
+
+        async def scenario():
+            provider, client = _provider_with_storage(handler, tmp_path)
+            async with client:
+                await provider.fetch_full_text("2106.00000v1", "html")
+
+        with pytest.raises(NotFoundError):
+            asyncio.run(scenario())
+
+    def test_html_404_for_unversioned_id_does_not_re_check_existence(self, tmp_path):
+        """An unversioned identifier's html 404 must not pay for a second existence check.
+
+        It's already existence-checked once by `resolve_identifier`'s own `fetch_metadata` call -
+        unlike the version-pinned case above, existence is already known here.
+        """
+        metadata_call_count = 0
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            nonlocal metadata_call_count
+            if req.url.params.get("id_list"):
+                metadata_call_count += 1
+                return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+            return httpx.Response(404)
+
+        async def scenario():
+            provider, client = _provider_with_storage(handler, tmp_path)
+            async with client:
+                await provider.fetch_full_text("2106.09685", "html")
+
+        with pytest.raises(FormatUnavailableError):
+            asyncio.run(scenario())
+        assert metadata_call_count == 1
+
+    def test_pdf_404_for_nonexistent_versioned_id_raises_not_found(self, tmp_path):
+        """A 404 for a nonexistent version-pinned id's pdf fetch must raise `NotFoundError`.
+
+        A PDF is always available for any submission that exists (see
+        docs/requirement-specification/06-interface-specification.md#research_arxiv_fetch_full_text),
+        so unlike html, a pdf 404 unambiguously means the identifier itself doesn't exist - and,
+        since it's version-pinned, `resolve_identifier` never checked that in advance. Must not
+        silently persist the 404 response body as if it were real PDF content.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, content=b"<html>not found</html>")
+
+        async def scenario():
+            provider, client = _provider_with_storage(handler, tmp_path)
+            async with client:
+                await provider.fetch_full_text("2106.00000v1", "pdf")
+
+        with pytest.raises(NotFoundError):
             asyncio.run(scenario())
 
     def test_unversioned_identifier_is_persisted_under_its_canonical_form(self, tmp_path):
