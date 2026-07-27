@@ -42,7 +42,3 @@ The outbound requests described above ([Untrusted identifiers](#untrusted-identi
 `test_outbound_http_client_trusts_env_for_proxy_and_ca_bundle` (`tests/test_server.py`) guards `trust_env` staying on, since it's what makes both of the above work.
 
 `PRIORIS_MCP_UNVERIFIED_HTTPS` (see [Configuration](../02-configuration.md)) is a separate, narrower escape hatch for when neither applies — e.g. a proxy whose CA can't be added to the environment's trust store. It disables HTTPS certificate verification entirely for every outbound request, not just those behind the proxy, so it must be used sparingly: development/testing only, never as a default or a substitute for installing the proxy's CA. Enabling it logs a `WARNING` at server startup so the reduced security posture is visible in operational logs, not a silent config change.
-
-## Next
-
-- [Interface specification](06-interface-specification.md) and [Test specification](07-test-specification.md) — the latter's [Cross-cutting: security](07-test-specification.md#cross-cutting-security) section states acceptance criteria for the requirements on this page (e.g. a malformed-document parse must fail cleanly, not hang, and the DOI allowlist must block a request before it's made, not after).

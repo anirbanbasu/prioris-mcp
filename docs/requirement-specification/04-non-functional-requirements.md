@@ -39,7 +39,3 @@ A non-429 upstream failure — a timeout, a connection error, or a 5xx response 
 Where a capability has multiple viable library choices — converting fetched full text to Markdown (see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text)) is the concrete v1 example — prefer widely-used, actively-maintained libraries with fast native (C, Rust, or similar) backends over pure-Python alternatives, since parsing is CPU-heavy and a slow implementation is felt directly in tool-call latency.
 
 License compatibility is checked before performance or popularity, not after: a copyleft dependency (GPL, AGPL) is avoided regardless of how fast or well-regarded it is. This matters more than the usual "check the licence" caution for a project shaped like PriorisMCP specifically: it is MIT-licensed, and for AGPL in particular, the copyleft obligation can be triggered merely by serving a dependent program over a network — not only by distributing it — which is directly relevant given PriorisMCP's `streamable-http`/`http` transport (see [Security → PriorisMCP's own HTTP ingress surface](05-security.md#priorismcps-own-http-ingress-surface)).
-
-## Next
-
-[Security](05-security.md) covers the other cross-cutting requirements category for v1. [Interface specification](06-interface-specification.md) and [test specification](07-test-specification.md) state the concrete schemas and acceptance criteria this page's concurrency requirements are tested against.

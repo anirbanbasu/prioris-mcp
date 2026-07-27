@@ -72,7 +72,3 @@ Per [Security](05-security.md):
 
 - `just test-coverage`'s 100% line-coverage gate applies to all capability code as it lands; genuinely unreachable branches use `# pragma: no cover` / `# pragma: lax no cover` per `CLAUDE.md`, rather than tests contorted to hit them.
 - Authenticated-source test criteria are out of scope, following [Security → Authenticated sources are explicitly deferred](05-security.md#authenticated-sources-are-explicitly-deferred-not-silently-assumed).
-
-## Next
-
-None — this is currently the last page in the SRS document structure (see [SRS overview → Document structure](index.md)).

@@ -74,10 +74,3 @@ Two resource templates expose content that `StorageBackend` already has, as a re
 These are read-only and never trigger a fetch or a parse — reading a resource that doesn't exist yet is a normal "not found," not an error the caller needs special handling for beyond "go call the tool first." `research_*_fetch_full_text` and `research_*_parse_full_text` return the corresponding resource URI in their output specifically so a caller can re-read the same content later without re-invoking the tool.
 
 Metadata is **not** exposed as a resource: it's only ever response-cached (TTL-bound via `ResponseCachingMiddleware`), never written to `StorageBackend`, so there's no stable "it's just there" location for it the way there is for full text and Markdown — a metadata resource would be indistinguishable from just calling the tool again.
-
-## Next
-
-- [Non-functional requirements](04-non-functional-requirements.md) — concurrency and other cross-cutting qualities not tied to a single tool.
-- [Security](05-security.md) — untrusted-identifier and untrusted-content requirements that apply to `research_resolve_identifier` and `parse_full_text` above.
-- [Interface specification](06-interface-specification.md) — exact wire-level schemas for every tool above, grounded in the live arXiv and Europe PMC APIs.
-- [Test specification](07-test-specification.md) — acceptance criteria per capability, verified against those schemas.

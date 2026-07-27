@@ -71,12 +71,3 @@ Metadata results are similarly typed, but as structured fields (title, authors, 
 Response caching is **not** a provider concern. The server already applies `ResponseCachingMiddleware` (see `server.py`) to tool/resource calls; `search`, `list_top_n`, and `fetch_metadata` results are cached there like any other tool response. Providers should not implement their own duplicate caching layer.
 
 Rate limiting **is** a provider concern, and a distinct one from caching: it exists to satisfy each source's terms of use (e.g. arXiv's API rate limits), not to avoid redundant work, and applies per outbound request to the source regardless of whether the response ends up cached. See [Non-functional requirements](04-non-functional-requirements.md) for how rate limiting behaves under concurrent tool invocations.
-
-## Next pages
-
-- [Storage](02-storage.md) — how `fetch_full_text` results are persisted (local filesystem default, optional S3).
-- [Functional requirements](03-functional-requirements.md) — the concrete arXiv and Europe PMC tools/resources built on this interface for v1.
-- [Non-functional requirements](04-non-functional-requirements.md) — concurrency and other cross-cutting qualities.
-- [Security](05-security.md) — untrusted-identifier and untrusted-content requirements.
-- [Interface specification](06-interface-specification.md) — exact MCP wire-level schemas for every v1 tool.
-- [Test specification](07-test-specification.md) — acceptance criteria per capability.

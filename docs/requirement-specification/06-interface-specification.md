@@ -150,7 +150,3 @@ Europe PMC publishes no numeric rate limit; per [Functional requirements → Eur
 **Output on success:** `{"identifier": <canonical form>, "provider": "arxiv"|"europepmc", "resolved_url": <string>, "format": <string>}`, plus a provider-dependent extra field: for a Europe PMC-routed identifier, `full_text_available` (bool) is also present — carried through from the Europe PMC provider's own `resolve_identifier` (see [Europe PMC → `research_europepmc_fetch_full_text`](#research_europepmc_fetch_full_text)) — telling the caller upfront whether a subsequent `research_europepmc_fetch_full_text` call for this identifier will succeed. arXiv-routed identifiers carry no such extra field.
 
 **Output on failure:** `{"error": "unsupported_provider", "message": <detail>}` per [Architecture → Identifier routing](01-architecture.md#identifier-routing-grouping-level) — a DOI resolving to any domain other than `arxiv.org` or `europepmc.org`/`ncbi.nlm.nih.gov` fails here rather than attempting to serve it.
-
-## Next
-
-- [Test specification](07-test-specification.md) — acceptance criteria per capability, now unblocked by the concrete shapes on this page.
