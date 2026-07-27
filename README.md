@@ -2,7 +2,7 @@
 
 # Prioris MCP
 
-A MCP server to facilitate looking up prior art.
+A model context protocol (MCP) server to facilitate looking up prior art.
 
 Full documentation, including installation, configuration, and how to connect this server to Claude, is published at **[the documentation site](https://docs-prioris-mcp.anirbanbasu.com)**.
 
