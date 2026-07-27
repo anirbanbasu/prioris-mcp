@@ -50,8 +50,7 @@ class ResponseMetadataMiddleware(Middleware):
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.debug(f"{operation_name} completed in {duration_ms:.2f}ms")
             return result, duration_ms
-        # FIXME: Remove. the no cover pragma and implement a test.
-        except Exception as e:  # pragma: no cover
+        except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.warning(
                 f"{operation_name} failed after {duration_ms:.2f}ms: {e}",

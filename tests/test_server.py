@@ -6,6 +6,7 @@ import ssl
 import httpx
 import pytest
 from fastmcp import Client, FastMCP
+from mcp.shared.exceptions import McpError
 
 from prioris_mcp import EnvVars
 from prioris_mcp.server import PriorisMCP
@@ -267,6 +268,50 @@ class TestArxivTools:
 
         result = asyncio.run(scenario())
         assert result.structured_content["error"] == "not_found"
+
+    def test_reading_unfetched_resource_is_a_plain_not_found_with_no_side_effect(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Reading a resource before the corresponding fetch/parse call must be a plain not-found.
+
+        Per docs/requirement-specification/07-test-specification.md's Resources acceptance
+        criteria: this must not be a crash, and critically, must never itself trigger a fetch or
+        parse as a side effect of the read.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("read_resource must never itself trigger an outbound HTTP request")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.read_resource("research://arxiv/2106.09685v2/pdf/fulltext")
+
+        with pytest.raises(McpError):
+            asyncio.run(scenario())
+
+    def test_exactly_two_resource_templates_are_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        """No metadata resource exists.
+
+        Only the fulltext/markdown templates documented in
+        docs/requirement-specification/06-interface-specification.md#resources are registered.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.list_resource_templates()
+
+        templates = asyncio.run(scenario())
+        assert {t.uriTemplate for t in templates} == {
+            "research://{provider}/{identifier}/{format}/fulltext",
+            "research://{provider}/{identifier}/{format}/markdown",
+        }
 
     def test_greet_tool_no_longer_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
         def handler(req: httpx.Request) -> httpx.Response:

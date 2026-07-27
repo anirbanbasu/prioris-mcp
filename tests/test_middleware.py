@@ -253,3 +253,28 @@ class TestResponseMetadataMiddleware:
         assert any("Added package metadata to tool response" in record.message for record in caplog.records), (
             "Expected debug logging of package metadata addition"
         )
+
+    def test_time_operation_reraises_and_logs_on_call_next_failure(self, caplog):
+        """`_time_operation`'s exception branch: this is a framework-level failure path.
+
+        A real tool call never reaches here directly - `call_returning_envelope` catches
+        business-logic errors into a typed envelope before `call_next` returns - so this is unit
+        tested against `_time_operation` itself, standing in for `call_next` raising (e.g. a bug
+        elsewhere in the middleware chain or in FastMCP's own dispatch), rather than driven through
+        a full `Client`/`FastMCP` round trip.
+        """
+
+        async def failing_call_next(context):
+            raise ValueError("boom")
+
+        middleware = ResponseMetadataMiddleware()
+
+        async def scenario():
+            await middleware._time_operation(None, failing_call_next, "Tool 'unit_test'")
+
+        with caplog.at_level(logging.WARNING), pytest.raises(ValueError, match="boom"):
+            asyncio.run(scenario())
+
+        assert any("Tool 'unit_test' failed after" in record.message for record in caplog.records), (
+            "Expected a warning logged with the elapsed duration before the exception re-raises"
+        )
