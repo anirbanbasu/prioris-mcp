@@ -6,20 +6,11 @@ icon: lucide/house
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server to facilitate looking up prior art.
 
-## Tools
-
-!!! warning "Placeholder"
-
-    `greet` is scaffolding left over from the initial project setup. It will be removed once the software requirement specification is written and the real prior-art tools are implemented.
-
-1. **`greet`** _(placeholder, to be removed)_
-    - Greets the caller with a quintessential Hello World message.
-    - Input(s)
-        - `name`: _`string`_ (_optional_): The name to greet. Default value is none.
-    - Output(s)
-        - `TextContent` with a UTC time-stamped greeting.
+PriorisMCP gives an MCP client a single, uniform way to search, fetch, and parse prior art from research-publication sources — arXiv and Europe PMC in v1, with patents and other prior-art domains anticipated as future work. See the [Software Requirements Specification](requirement-specification/index.md) for the full design.
 
 ## Next steps
 
 - [Getting started](01-getting-started.md) — install PriorisMCP and connect it to Claude.
 - [Configuration](02-configuration.md) — environment variables recognised by the server.
+- [Tools](03-tools.md) — the MCP tools exposed by the server.
+- [Resources](04-resources.md) — the MCP resource templates exposed by the server.
