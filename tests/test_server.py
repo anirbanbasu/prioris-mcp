@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import logging
+import ssl
 
 import httpx
 import pytest
@@ -65,6 +66,35 @@ class TestMCPServer:
         for the end-to-end consequence.
         """
         assert PriorisMCP()._http_client.follow_redirects is True
+
+    def test_outbound_http_client_trusts_env_for_proxy_and_ca_bundle(self):
+        """`trust_env` (on by default) is what makes httpx honour `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and `SSL_CERT_FILE`/`SSL_CERT_DIR`.
+
+        See
+        docs/requirement-specification/05-security.md#egress-through-a-organisational-https-inspecting-proxy.
+        This guards against a future refactor silently passing `trust_env=False`.
+        """
+        assert PriorisMCP()._http_client.trust_env is True
+
+    def test_outbound_http_client_verifies_https_by_default(self):
+        """Default configuration must verify upstream HTTPS certificates."""
+        transport = PriorisMCP()._http_client._transport
+        ssl_context = transport._pool._ssl_context  # ty: ignore[unresolved-attribute]
+        assert ssl_context.verify_mode == ssl.CERT_REQUIRED
+
+    def test_unverified_https_env_var_disables_certificate_verification(self, monkeypatch: "pytest.MonkeyPatch"):
+        """`PRIORIS_MCP_UNVERIFIED_HTTPS=True` must actually disable verification, not just be documented."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_UNVERIFIED_HTTPS", True)
+        transport = PriorisMCP()._http_client._transport
+        ssl_context = transport._pool._ssl_context  # ty: ignore[unresolved-attribute]
+        assert ssl_context.verify_mode == ssl.CERT_NONE
+
+    def test_unverified_https_env_var_logs_warning(self, caplog: "pytest.LogCaptureFixture", monkeypatch):
+        """Enabling unverified HTTPS must be loud, not a silent behavioural change."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_UNVERIFIED_HTTPS", True)
+        with caplog.at_level(logging.WARNING):
+            PriorisMCP()
+        assert "HTTPS certificate verification is DISABLED" in caplog.text
 
 
 class TestArxivTools:

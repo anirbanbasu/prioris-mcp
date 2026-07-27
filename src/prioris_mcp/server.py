@@ -1,3 +1,4 @@
+import logging
 import sys
 from importlib.metadata import version
 from typing import Annotated, ClassVar, Literal
@@ -32,6 +33,7 @@ from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
 
 package_version = version(PACKAGE_NAME)
+logger = logging.getLogger(__name__)
 
 
 class PriorisMCP(MCPMixin):
@@ -81,7 +83,12 @@ class PriorisMCP(MCPMixin):
 
     def __init__(self) -> None:
         self._storage = FilesystemStorageBackend()
-        self._http_client = httpx.AsyncClient(follow_redirects=True)
+        if EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS:
+            logger.warning(
+                "HTTPS certificate verification is DISABLED (PRIORIS_MCP_UNVERIFIED_HTTPS=True) - "
+                "do not use in production"
+            )
+        self._http_client = httpx.AsyncClient(follow_redirects=True, verify=not EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS)
         arxiv_queue = ProviderRequestQueue(
             base_spacing_seconds=ARXIV_BASE_SPACING_SECONDS,
             max_total_backoff_seconds=EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS,
