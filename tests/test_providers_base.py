@@ -20,7 +20,7 @@ class _StubProvider(ResearchPublicationProvider):
     async def fetch_full_text(self, identifier: str, format: str) -> dict:
         return {"location": "x", "format": format, "size_bytes": 0, "served_from_storage": False}
 
-    async def parse_full_text(self, identifier: str, format: str) -> dict:
+    async def parse_full_text(self, identifier: str, format: str, offset: int = 0, limit: int | None = None) -> dict:
         return {"markdown": "", "resource_uri": "x"}
 
 

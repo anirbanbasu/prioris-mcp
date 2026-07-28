@@ -11,6 +11,7 @@ import httpx
 from defusedxml import ElementTree as safe_ET
 
 from prioris_mcp.errors import FormatUnavailableError, InvalidRequestError, NotFoundError
+from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers import http as provider_http
 from prioris_mcp.providers.base import ResearchPublicationProvider
@@ -99,12 +100,14 @@ class ArxivProvider(ResearchPublicationProvider):
         http_client: httpx.AsyncClient,
         pdf_backend: ParserBackend,
         html_backend: ParserBackend,
+        default_inline_char_limit: int = 20000,
     ) -> None:
         self._storage = storage
         self._queue = queue
         self._http_client = http_client
         self._pdf_backend = pdf_backend
         self._html_backend = html_backend
+        self._default_inline_char_limit = default_inline_char_limit
 
     async def _get(self, params: dict) -> bytes:
         async def op() -> httpx.Response:
@@ -234,7 +237,7 @@ class ArxivProvider(ResearchPublicationProvider):
             "resource_uri": f"research://arxiv/{quote(canonical_id, safe='')}/{format}/fulltext",
         }
 
-    async def parse_full_text(self, identifier: str, format: str) -> dict:
+    async def parse_full_text(self, identifier: str, format: str, offset: int = 0, limit: int | None = None) -> dict:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_parse_full_text.
 
         Storage is always keyed on the canonical, version-pinned identifier - see
@@ -247,6 +250,10 @@ class ArxivProvider(ResearchPublicationProvider):
         Uses `StorageBackend.get_or_create` (keyed on the derived markdown format) so that two
         concurrent parses of the same (identifier, format) never both invoke the parser backend -
         see docs/requirement-specification/04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work.
+
+        Returns one paginated page of the Markdown, not the whole string - see
+        docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole.
+        `limit` defaults to `default_inline_char_limit` when unset.
         """
         canonical_id = (await self.resolve_identifier(identifier, format))["identifier"]
         markdown_format = f"{format}-markdown"
@@ -260,8 +267,15 @@ class ArxivProvider(ResearchPublicationProvider):
             return markdown.encode("utf-8")
 
         markdown_bytes, _ = await self._storage.get_or_create("arxiv", canonical_id, markdown_format, factory)
+        page = paginate_text(
+            markdown_bytes.decode("utf-8"), offset, limit if limit is not None else self._default_inline_char_limit
+        )
         return {
-            "markdown": markdown_bytes.decode("utf-8"),
+            "markdown": page["content"],
+            "offset": page["offset"],
+            "limit": page["limit"],
+            "total_length": page["total_length"],
+            "has_more": page["has_more"],
             # See the matching comment in fetch_full_text: canonical_id is percent-encoded so an
             # old-style slash-bearing identifier still resolves as a single {identifier} segment.
             "resource_uri": f"research://arxiv/{quote(canonical_id, safe='')}/{format}/markdown",

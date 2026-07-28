@@ -60,6 +60,17 @@ class EnvVars:
         validate=Range(min=0.1, max=300),
     )
 
+    PRIORIS_MCP_MAX_INLINE_CHARS: int = env.int(
+        name="PRIORIS_MCP_MAX_INLINE_CHARS",
+        # Default limit for text (e.g. parsed Markdown) returned inline in a tool response - a
+        # large parsed PDF/HTML can otherwise exceed an MCP client's own max-tokens-per-result
+        # ceiling. Content past this limit stays reachable via the paired resource_uri, paginated
+        # with the same offset/limit shape - see
+        # docs/requirement-specification/04-non-functional-requirements.md.
+        default=20000,
+        validate=Range(min=1),
+    )
+
     _default_data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
 
     PRIORIS_MCP_STORAGE_DIR = env.path(

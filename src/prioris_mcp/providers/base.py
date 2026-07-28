@@ -50,5 +50,7 @@ class ResearchPublicationProvider(ABC):
         """Fetch (or return already-persisted) full text for `identifier`/`format`."""
 
     @abstractmethod
-    async def parse_full_text(self, identifier: str, format: str) -> dict[str, Any]:
-        """Convert already-persisted full text for `identifier`/`format` into Markdown."""
+    async def parse_full_text(
+        self, identifier: str, format: str, offset: int = 0, limit: int | None = None
+    ) -> dict[str, Any]:
+        """Convert already-persisted full text for `identifier`/`format` into one page of Markdown."""

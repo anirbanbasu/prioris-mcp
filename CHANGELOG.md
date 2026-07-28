@@ -8,7 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
-- None documented yet.
+- `research_arxiv_parse_full_text` and `research_europepmc_parse_full_text` now accept `offset`/`limit` and return one bounded page of Markdown (`offset`, `limit`, `total_length`, `has_more`) instead of the whole string, so a large parsed PDF/HTML/XML document no longer risks exceeding an MCP client's own max-tokens-per-result limit. The default page size is configurable via a new `PRIORIS_MCP_MAX_INLINE_CHARS` environment variable (default 20000 characters).
+- The `research://{provider}/{identifier}/{format}/markdown` resource template now accepts the same `offset`/`limit` query parameters, so previously-parsed content can be paged through via a resource read instead of re-invoking the tool.
 
 ### Changed
 

@@ -513,7 +513,11 @@ class _StubParserBackend(ParserBackend):
 
 
 def _provider_with_backends(
-    handler: Callable[[httpx.Request], httpx.Response], tmp_path, pdf_backend=None, html_backend=None
+    handler: Callable[[httpx.Request], httpx.Response],
+    tmp_path,
+    pdf_backend=None,
+    html_backend=None,
+    default_inline_char_limit=20000,
 ) -> tuple[ArxivProvider, httpx.AsyncClient]:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
@@ -524,6 +528,7 @@ def _provider_with_backends(
         http_client=client,
         pdf_backend=pdf_backend or _StubParserBackend(),
         html_backend=html_backend or _StubParserBackend(),
+        default_inline_char_limit=default_inline_char_limit,
     )
     return provider, client
 
@@ -558,7 +563,14 @@ class TestArxivProviderParseFullText:
                 return first, second
 
         first, second = asyncio.run(scenario())
-        assert first == {"markdown": "# Parsed PDF", "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown"}
+        assert first == {
+            "markdown": "# Parsed PDF",
+            "offset": 0,
+            "limit": 20000,
+            "total_length": len("# Parsed PDF"),
+            "has_more": False,
+            "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown",
+        }
         assert second == first
         assert pdf_backend.call_count == 1  # second call served from storage, not re-parsed
 
@@ -576,6 +588,59 @@ class TestArxivProviderParseFullText:
 
         result = asyncio.run(scenario())
         assert result["markdown"] == "# Parsed HTML"
+
+    def test_default_inline_char_limit_truncates_large_markdown(self, tmp_path):
+        """A parsed document longer than the provider's default limit is truncated, not returned whole.
+
+        Reproduces issue #1: an oversized inline result blows past an MCP client's own
+        max-tokens-per-result ceiling. The full content stays reachable via `resource_uri` or a
+        later call with an explicit `offset`.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"%PDF-1.4 fake bytes")
+
+        pdf_backend = _StubParserBackend(markdown="0123456789")
+
+        async def scenario():
+            provider, client = _provider_with_backends(
+                handler, tmp_path, pdf_backend=pdf_backend, default_inline_char_limit=4
+            )
+            async with client:
+                await provider.fetch_full_text("2106.09685v2", "pdf")
+                return await provider.parse_full_text("2106.09685v2", "pdf")
+
+        result = asyncio.run(scenario())
+        assert result == {
+            "markdown": "0123",
+            "offset": 0,
+            "limit": 4,
+            "total_length": 10,
+            "has_more": True,
+            "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown",
+        }
+
+    def test_explicit_offset_and_limit_are_honored(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"%PDF-1.4 fake bytes")
+
+        pdf_backend = _StubParserBackend(markdown="0123456789")
+
+        async def scenario():
+            provider, client = _provider_with_backends(handler, tmp_path, pdf_backend=pdf_backend)
+            async with client:
+                await provider.fetch_full_text("2106.09685v2", "pdf")
+                return await provider.parse_full_text("2106.09685v2", "pdf", offset=4, limit=3)
+
+        result = asyncio.run(scenario())
+        assert result == {
+            "markdown": "456",
+            "offset": 4,
+            "limit": 3,
+            "total_length": 10,
+            "has_more": True,
+            "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown",
+        }
 
     def test_unversioned_identifier_finds_content_fetched_under_its_canonical_form(self, tmp_path):
         """Regression test: parse_full_text must canonicalize identifier before touching storage.
@@ -600,4 +665,11 @@ class TestArxivProviderParseFullText:
                 return await provider.parse_full_text("2106.09685", "pdf")
 
         result = asyncio.run(scenario())
-        assert result == {"markdown": "# Parsed PDF", "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown"}
+        assert result == {
+            "markdown": "# Parsed PDF",
+            "offset": 0,
+            "limit": 20000,
+            "total_length": len("# Parsed PDF"),
+            "has_more": False,
+            "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown",
+        }

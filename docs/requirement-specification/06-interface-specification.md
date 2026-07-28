@@ -14,6 +14,8 @@ This page states the exact wire-level input/output contract for every v1 MCP too
 
 **Resource URIs.** Both `fetch_full_text` and `parse_full_text` return the resource URI templates from [Functional requirements → Resources](03-functional-requirements.md#resources), instantiated for that call, e.g. `research://arxiv/2106.09685v2/pdf/fulltext` or `research://europepmc/MED:26551875/xml/markdown`.
 
+**Pagination.** `parse_full_text` and the `.../markdown` resource template both accept `offset`/`limit` (integers, optional) and return one bounded page of Markdown rather than the whole string — see [Non-functional requirements → Inline text is paginated, not returned whole](04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole). Every `parse_full_text` output below includes `offset`, `limit`, `total_length`, and `has_more` alongside `markdown`, even though the per-tool sections list only `markdown`/`resource_uri` for brevity.
+
 ## arXiv
 
 All arXiv tools call `https://export.arxiv.org/api/query`, which returns an Atom 1.0 feed. This is the same endpoint for search, listing, and single-item lookup — they differ only in which query parameters are set. This must be called over `https`, not `http`: `export.arxiv.org` 301-redirects every plain-`http` request to `https`, so calling `http` directly would cost an extra round-trip on every single arXiv API call for no benefit.
@@ -76,9 +78,9 @@ Every arXiv tool that returns article data (`search`, `list_top_n`, `fetch_metad
 
 ### `research_arxiv_parse_full_text`
 
-**Input:** `arxiv_id` (string, required), `format` (`pdf` \| `html`, required — the already-persisted source format to parse).
+**Input:** `arxiv_id` (string, required), `format` (`pdf` \| `html`, required — the already-persisted source format to parse), `offset` (integer, optional, default 0), `limit` (integer, optional, default `PRIORIS_MCP_MAX_INLINE_CHARS`).
 
-**Output:** `{"markdown": <string>, "resource_uri": "research://arxiv/{id}/{format}/markdown"}`, or `not_found` if that `(arxiv_id, format)` hasn't been fetched (see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text) — never triggers a fetch itself).
+**Output:** `{"markdown": <string>, "offset": <int>, "limit": <int>, "total_length": <int>, "has_more": <bool>, "resource_uri": "research://arxiv/{id}/{format}/markdown"}`, or `not_found` if that `(arxiv_id, format)` hasn't been fetched (see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text) — never triggers a fetch itself).
 
 ### Rate limiting
 
@@ -135,9 +137,9 @@ Taken from a `resultType=core` search/lookup response:
 
 ### `research_europepmc_parse_full_text`
 
-**Input:** `identifier` (string, required). **No `format` parameter**, for the same reason as `fetch_full_text` above — the persisted source is always XML, so there's nothing for the caller to choose.
+**Input:** `identifier` (string, required), `offset` (integer, optional, default 0), `limit` (integer, optional, default `PRIORIS_MCP_MAX_INLINE_CHARS`). **No `format` parameter**, for the same reason as `fetch_full_text` above — the persisted source is always XML, so there's nothing for the caller to choose.
 
-**Output:** `{"markdown": <string>, "resource_uri": "research://europepmc/{identifier}/xml/markdown"}`, or `not_found` if `(identifier, "xml")` hasn't been fetched. Converting from JATS XML (a well-structured, semantically-tagged format containing the genuine article body — confirmed live, not just links out to it) is expected to be a materially more reliable Markdown conversion than arXiv's PDF/HTML sources, though this page doesn't specify the conversion mechanism itself (an implementation detail).
+**Output:** `{"markdown": <string>, "offset": <int>, "limit": <int>, "total_length": <int>, "has_more": <bool>, "resource_uri": "research://europepmc/{identifier}/xml/markdown"}`, or `not_found` if `(identifier, "xml")` hasn't been fetched. Converting from JATS XML (a well-structured, semantically-tagged format containing the genuine article body — confirmed live, not just links out to it) is expected to be a materially more reliable Markdown conversion than arXiv's PDF/HTML sources, though this page doesn't specify the conversion mechanism itself (an implementation detail).
 
 ### Rate limiting
 

@@ -338,3 +338,55 @@ class TestEuropePmcProviderParseFullText:
         assert result["markdown"] == "# Parsed JATS"
         assert "PMC:4767193" in result["resource_uri"]
         assert xml_backend.call_count == 1
+
+    def test_default_inline_char_limit_truncates_large_markdown(self, tmp_path):
+        """Reproduces issue #1: an oversized inline result must be truncated, not returned whole."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "fullTextXML" in str(req.url):
+                return httpx.Response(200, content=b"<article>fake jats</article>")
+            return httpx.Response(200, content=_search_payload([_record()]))
+
+        xml_backend = _StubXmlBackend(markdown="0123456789")
+
+        async def scenario():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+            storage = FilesystemStorageBackend(base_dir=tmp_path)
+            provider = EuropePmcProvider(
+                storage=storage, queue=queue, http_client=client, xml_backend=xml_backend, default_inline_char_limit=4
+            )
+            async with client:
+                await provider.fetch_full_text("PMC4767193")
+                return await provider.parse_full_text("PMC:4767193")
+
+        result = asyncio.run(scenario())
+        assert result["markdown"] == "0123"
+        assert result["offset"] == 0
+        assert result["limit"] == 4
+        assert result["total_length"] == 10
+        assert result["has_more"] is True
+
+    def test_explicit_offset_and_limit_are_honored(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            if "fullTextXML" in str(req.url):
+                return httpx.Response(200, content=b"<article>fake jats</article>")
+            return httpx.Response(200, content=_search_payload([_record()]))
+
+        xml_backend = _StubXmlBackend(markdown="0123456789")
+
+        async def scenario():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+            storage = FilesystemStorageBackend(base_dir=tmp_path)
+            provider = EuropePmcProvider(storage=storage, queue=queue, http_client=client, xml_backend=xml_backend)
+            async with client:
+                await provider.fetch_full_text("PMC4767193")
+                return await provider.parse_full_text("PMC:4767193", offset=4, limit=3)
+
+        result = asyncio.run(scenario())
+        assert result["markdown"] == "456"
+        assert result["offset"] == 4
+        assert result["limit"] == 3
+        assert result["total_length"] == 10
+        assert result["has_more"] is True
