@@ -88,7 +88,11 @@ class PriorisMCP(MCPMixin):
                 "HTTPS certificate verification is DISABLED (PRIORIS_MCP_UNVERIFIED_HTTPS=True) - "
                 "do not use in production"
             )
-        self._http_client = httpx.AsyncClient(follow_redirects=True, verify=not EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS)
+        self._http_client = httpx.AsyncClient(
+            follow_redirects=True,
+            verify=not EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS,
+            timeout=EnvVars.PRIORIS_MCP_HTTP_TIMEOUT_SECONDS,
+        )
         arxiv_queue = ProviderRequestQueue(
             base_spacing_seconds=ARXIV_BASE_SPACING_SECONDS,
             max_total_backoff_seconds=EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS,

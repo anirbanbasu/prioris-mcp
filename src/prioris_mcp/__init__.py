@@ -50,6 +50,16 @@ class EnvVars:
         default=False,  # By default, HTTPS requests are verified; override in development for testing
     )
 
+    PRIORIS_MCP_HTTP_TIMEOUT_SECONDS: float = env.float(
+        name="PRIORIS_MCP_HTTP_TIMEOUT_SECONDS",
+        # httpx.AsyncClient()'s own default (5s on connect/read/write/pool) is too tight for
+        # export.arxiv.org and Europe PMC, which can legitimately take longer than that under
+        # load - too-short a timeout surfaces as a spurious `provider_unavailable`, not a real
+        # outage. Applied uniformly to connect/read/write/pool via httpx.AsyncClient(timeout=...).
+        default=30.0,
+        validate=Range(min=0.1, max=300),
+    )
+
     _default_data_home = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
 
     PRIORIS_MCP_STORAGE_DIR = env.path(

@@ -51,6 +51,20 @@ class TestRateLimitBackoffBudgetDefault:
         assert reloaded.EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS == 12.5
 
 
+class TestHttpTimeoutSecondsDefault:
+    """EnvVars.PRIORIS_MCP_HTTP_TIMEOUT_SECONDS default and override."""
+
+    def test_defaults_to_30_seconds(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_HTTP_TIMEOUT_SECONDS", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_HTTP_TIMEOUT_SECONDS == 30.0
+
+    def test_explicit_override_wins(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_HTTP_TIMEOUT_SECONDS", "10")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_HTTP_TIMEOUT_SECONDS == 10.0
+
+
 class TestJatsMaxConcurrentTransformsDefault:
     """EnvVars.PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS default, override, and CPU-count clamp."""
 

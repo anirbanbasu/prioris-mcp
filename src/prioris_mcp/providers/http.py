@@ -20,7 +20,10 @@ async def request(client: httpx.AsyncClient, method: str, url: str, **kwargs: ob
     try:
         response = await client.request(method, url, **kwargs)
     except httpx.TransportError as exc:
-        raise ProviderUnavailableError(f"{method} {url} failed: {exc}") from exc
+        # str(exc) is empty for several httpx.TransportError subclasses (e.g. a bare
+        # httpx.ReadTimeout) - always naming the exception type keeps the message diagnosable
+        # instead of reading as "... failed: " with nothing after the colon.
+        raise ProviderUnavailableError(f"{method} {url} failed: {type(exc).__name__}: {exc}") from exc
     if response.status_code == 429:
         raise RateLimitedError(f"{method} {url} returned 429")
     if response.status_code >= 500:

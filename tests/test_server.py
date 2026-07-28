@@ -68,6 +68,15 @@ class TestMCPServer:
         """
         assert PriorisMCP()._http_client.follow_redirects is True
 
+    def test_outbound_http_client_uses_configured_timeout(self, monkeypatch: "pytest.MonkeyPatch"):
+        """Verify the client is built with the configured timeout, not httpx's own default.
+
+        httpx.AsyncClient()'s own default (5s) is too tight for arXiv/Europe PMC under load - see
+        issue #2 - so the client must be built with PRIORIS_MCP_HTTP_TIMEOUT_SECONDS instead.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_HTTP_TIMEOUT_SECONDS", 45.0)
+        assert PriorisMCP()._http_client.timeout == httpx.Timeout(45.0)
+
     def test_outbound_http_client_trusts_env_for_proxy_and_ca_bundle(self):
         """`trust_env` (on by default) is what makes httpx honour `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and `SSL_CERT_FILE`/`SSL_CERT_DIR`.
 

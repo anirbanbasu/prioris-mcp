@@ -89,6 +89,24 @@ class TestIsVersionPinned:
 class TestArxivProviderSearch:
     """Tests for `ArxivProvider.search`."""
 
+    def test_uses_https_scheme_not_a_redirect_from_http(self):
+        """Verify the API is called over https, not http.
+
+        export.arxiv.org 301-redirects every http:// call to https:// - calling https:// directly
+        avoids paying for that extra round-trip on every arXiv API call (see issue #2).
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.scheme == "https"
+            return httpx.Response(200, content=_feed([_entry("2106.09685v2")], total_results=1))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.search("cat:cs.CL")
+
+        asyncio.run(scenario())
+
     def test_returns_parsed_results_and_total(self):
         def handler(req: httpx.Request) -> httpx.Response:
             assert req.url.params["search_query"] == "cat:cs.CL"

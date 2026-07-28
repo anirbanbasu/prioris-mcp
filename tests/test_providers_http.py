@@ -70,3 +70,22 @@ class TestRequest:
 
         with pytest.raises(ProviderUnavailableError):
             asyncio.run(scenario())
+
+    def test_transport_error_message_names_exception_type_even_when_str_is_empty(self):
+        """Verify the message names the exception type even when str(exc) is empty.
+
+        `httpx.ReadTimeout` (and other transport errors) can stringify to "" - the raised message
+        must still say what happened rather than reading as "... failed: " with nothing after the
+        colon (see issue #2).
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("", request=req)
+
+        async def scenario():
+            async with _client_with_handler(handler) as client:
+                await request(client, "GET", "https://example.test/thing")
+
+        with pytest.raises(ProviderUnavailableError) as exc_info:
+            asyncio.run(scenario())
+        assert "ReadTimeout" in str(exc_info.value)
