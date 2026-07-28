@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
+- None documented yet.
+
+### Changed
+
+- None documented yet.
+
+### Deprecated
+
+- None documented yet.
+
+### Removed
+
+- None documented yet.
+
+### Fixed
+
+- None documented yet.
+
+### Security
+
+- None documented yet.
+
+## [0.1.0.post1] - 2026-07-28
+
+### Added
+
 - `research_arxiv_parse_full_text` and `research_europepmc_parse_full_text` now accept `offset`/`limit` and return one bounded page of Markdown (`offset`, `limit`, `total_length`, `has_more`) instead of the whole string, so a large parsed PDF/HTML/XML document no longer risks exceeding an MCP client's own max-tokens-per-result limit. The default page size is configurable via a new `PRIORIS_MCP_MAX_INLINE_CHARS` environment variable (default 20000 characters).
 - The `research://{provider}/{identifier}/{format}/markdown` resource template now accepts the same `offset`/`limit` query parameters, so previously-parsed content can be paged through via a resource read instead of re-invoking the tool.
 
@@ -63,5 +89,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Concurrently *executing* (not just concurrently *awaited*) JATS-to-HTML transforms are capped by `PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS` (default `min(4, os.cpu_count())`), closing an unbounded-thread-accumulation risk under sustained malicious input.
 - The Europe PMC provider only ever follows its own same-domain `fullTextXML` endpoint for full-text retrieval, never the publisher- or third-party-hosted full-text URLs surfaced in search results.
 
-[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0...HEAD
+[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0.post1...HEAD
+[0.1.0.post1]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0...v0.1.0.post1
 [0.1.0]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.0.1...v0.1.0
