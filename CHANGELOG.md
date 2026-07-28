@@ -30,7 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - None documented yet.
 
-## [0.1.0.post1] - 2026-07-28
+## [0.1.0.post2] - 2026-07-28
 
 ### Added
 
@@ -89,6 +89,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Concurrently *executing* (not just concurrently *awaited*) JATS-to-HTML transforms are capped by `PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS` (default `min(4, os.cpu_count())`), closing an unbounded-thread-accumulation risk under sustained malicious input.
 - The Europe PMC provider only ever follows its own same-domain `fullTextXML` endpoint for full-text retrieval, never the publisher- or third-party-hosted full-text URLs surfaced in search results.
 
-[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0.post1...HEAD
-[0.1.0.post1]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0...v0.1.0.post1
+[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0.post2...HEAD
+[0.1.0.post2]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0...v0.1.0.post2
 [0.1.0]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.0.1...v0.1.0
