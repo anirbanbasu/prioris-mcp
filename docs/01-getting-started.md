@@ -82,6 +82,31 @@ claude mcp add prioris-mcp -- uv run --directory /absolute/path/to/prioris-mcp p
 
 Instead of `uv run --directory ... prioris-mcp`, you may also point `command` directly at the virtual environment's script, e.g. `/absolute/path/to/prioris-mcp/.venv/bin/prioris-mcp`.
 
+### Using `uvx` against the GitHub repository (unreleased/HEAD)
+
+To test against the unreleased state of this repository without cloning it, point `uvx` at the git repository instead of PyPI with `--from`.
+
+**Claude Code**
+
+```bash
+claude mcp add prioris-mcp -- uvx --from git+https://github.com/anirbanbasu/prioris-mcp prioris-mcp
+```
+
+**Claude Desktop**
+
+```json
+{
+    "mcpServers": {
+        "prioris-mcp": {
+            "command": "uvx",
+            "args": ["--from", "git+https://github.com/anirbanbasu/prioris-mcp", "prioris-mcp"]
+        }
+    }
+}
+```
+
+This tracks the default branch (`master`). `uvx` caches by resolved commit, so pass `--refresh` after `--from` (or run `uv cache clean`) to force it to re-resolve to the latest commit rather than serving a cached one. To pin to a specific branch, tag, or commit instead, append `@ref` to the repository URL, e.g. `git+https://github.com/anirbanbasu/prioris-mcp@some-branch`.
+
 To pass configuration (see [Configuration](02-configuration.md)) to the server, add an `env` block alongside `command`/`args` in either config, e.g. `"env": {"PRIORIS_MCP_LOG_LEVEL": "DEBUG"}`, or pass `--env KEY=VALUE` flags to `claude mcp add`.
 
 ## Test with the MCP Inspector
@@ -113,12 +138,12 @@ To run the provided set of tests with a coverage report, execute the following i
 just test-coverage
 ```
 
-This will generate something like the following output.
+This will generate something like the following output (exact statement count grows as the project does — treat this as illustrative, not authoritative; re-run `just test-coverage` for the current figure).
 
 ```bash
 Name    Stmts   Miss    Cover   Missing
 ---------------------------------------
-TOTAL     98      0  100.00%
+TOTAL     696      0  100.00%
 ```
 
 See the [Contributing guide](https://github.com/anirbanbasu/prioris-mcp/blob/master/CONTRIBUTING.md) for the full development workflow.
