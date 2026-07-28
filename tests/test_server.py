@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import json
 import logging
 import ssl
 
@@ -76,6 +77,18 @@ class TestMCPServer:
         """
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_HTTP_TIMEOUT_SECONDS", 45.0)
         assert PriorisMCP()._http_client.timeout == httpx.Timeout(45.0)
+
+    def test_providers_use_configured_max_inline_chars(self, monkeypatch: "pytest.MonkeyPatch"):
+        """Verify both providers are built with the configured inline-text limit.
+
+        A large parsed PDF/HTML/XML can otherwise be returned whole in a tool response and exceed
+        an MCP client's own max-tokens-per-result ceiling - see issue #1 - so both providers must
+        be wired to `PRIORIS_MCP_MAX_INLINE_CHARS`, not an unconfigurable default.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_MAX_INLINE_CHARS", 12345)
+        mcp_obj = PriorisMCP()
+        assert mcp_obj._arxiv_provider._default_inline_char_limit == 12345
+        assert mcp_obj._europepmc_provider._default_inline_char_limit == 12345
 
     def test_outbound_http_client_trusts_env_for_proxy_and_ca_bundle(self):
         """`trust_env` (on by default) is what makes httpx honour `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and `SSL_CERT_FILE`/`SSL_CERT_DIR`.
@@ -261,6 +274,51 @@ class TestArxivTools:
         assert "Hello world" in parse_result.structured_content["markdown"]
         assert len(resource_result) == 1
 
+    def test_research_arxiv_parse_full_text_honors_offset_and_limit(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"<html><body><p>Hello world</p></body></html>")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_arxiv_fetch_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "html"}
+                )
+                return await client.call_tool(
+                    "research_arxiv_parse_full_text",
+                    arguments={"arxiv_id": "2106.09685v2", "format": "html", "offset": 6, "limit": 3},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["markdown"] == "wor"
+        assert result.structured_content["offset"] == 6
+        assert result.structured_content["limit"] == 3
+        assert result.structured_content["has_more"] is True
+
+    def test_research_arxiv_markdown_resource_honors_offset_and_limit_query_params(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"<html><body><p>Hello world</p></body></html>")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_arxiv_fetch_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "html"}
+                )
+                await client.call_tool(
+                    "research_arxiv_parse_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "html"}
+                )
+                return await client.read_resource("research://arxiv/2106.09685v2/html/markdown?offset=6&limit=3")
+
+        resource_result = asyncio.run(scenario())
+        payload = json.loads(resource_result[0].text)
+        assert payload["markdown"] == "wor"
+        assert payload["has_more"] is True
+
     def test_research_arxiv_parse_full_text_not_found_returns_error_envelope(
         self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
     ):
@@ -319,7 +377,7 @@ class TestArxivTools:
         templates = asyncio.run(scenario())
         assert {t.uriTemplate for t in templates} == {
             "research://{provider}/{identifier}/{format}/fulltext",
-            "research://{provider}/{identifier}/{format}/markdown",
+            "research://{provider}/{identifier}/{format}/markdown{?offset,limit}",
         }
 
     def test_greet_tool_no_longer_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
@@ -515,3 +573,22 @@ class TestEuropePmcTools:
         parse_result, resource_result = asyncio.run(scenario())
         assert "Hello, JATS world." in parse_result.structured_content["markdown"]
         assert len(resource_result) == 1
+
+    def test_research_europepmc_parse_full_text_honors_offset_and_limit(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(self._europepmc_handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_europepmc_fetch_full_text", arguments={"identifier": "PMC4767193"})
+                return await client.call_tool(
+                    "research_europepmc_parse_full_text",
+                    arguments={"identifier": "PMC4767193", "offset": 0, "limit": 5},
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["markdown"]) == 5
+        assert result.structured_content["offset"] == 0
+        assert result.structured_content["limit"] == 5
+        assert result.structured_content["has_more"] is True

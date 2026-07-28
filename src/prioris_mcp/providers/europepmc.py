@@ -9,6 +9,7 @@ import logging
 import httpx
 
 from prioris_mcp.errors import FormatUnavailableError, NotFoundError
+from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers import http as provider_http
 from prioris_mcp.providers.base import ResearchPublicationProvider
@@ -77,11 +78,13 @@ class EuropePmcProvider(ResearchPublicationProvider):
         queue: ProviderRequestQueue,
         http_client: httpx.AsyncClient,
         xml_backend: ParserBackend,
+        default_inline_char_limit: int = 20000,
     ) -> None:
         self._storage = storage
         self._queue = queue
         self._http_client = http_client
         self._xml_backend = xml_backend
+        self._default_inline_char_limit = default_inline_char_limit
 
     async def _get_json(self, path: str, params: dict) -> dict:
         async def op() -> httpx.Response:
@@ -175,7 +178,9 @@ class EuropePmcProvider(ResearchPublicationProvider):
             "resource_uri": f"research://europepmc/{canonical_id}/xml/fulltext",
         }
 
-    async def parse_full_text(self, identifier: str, format: str = "xml") -> dict:
+    async def parse_full_text(
+        self, identifier: str, format: str = "xml", offset: int = 0, limit: int | None = None
+    ) -> dict:
         """See docs/requirement-specification/06-interface-specification.md#research_europepmc_parse_full_text.
 
         Storage is always keyed on the canonical identifier - see
@@ -187,6 +192,10 @@ class EuropePmcProvider(ResearchPublicationProvider):
         Uses `StorageBackend.get_or_create` (keyed on the derived markdown format) so that two
         concurrent parses of the same (identifier, format) never both invoke the parser backend -
         see docs/requirement-specification/04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work.
+
+        Returns one paginated page of the Markdown, not the whole string - see
+        docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole.
+        `limit` defaults to `default_inline_char_limit` when unset.
         """
         resolved = await self.resolve_identifier(identifier, format)
         canonical_id = resolved["identifier"]
@@ -200,7 +209,14 @@ class EuropePmcProvider(ResearchPublicationProvider):
             return markdown.encode("utf-8")
 
         markdown_bytes, _ = await self._storage.get_or_create("europepmc", canonical_id, markdown_format, factory)
+        page = paginate_text(
+            markdown_bytes.decode("utf-8"), offset, limit if limit is not None else self._default_inline_char_limit
+        )
         return {
-            "markdown": markdown_bytes.decode("utf-8"),
+            "markdown": page["content"],
+            "offset": page["offset"],
+            "limit": page["limit"],
+            "total_length": page["total_length"],
+            "has_more": page["has_more"],
             "resource_uri": f"research://europepmc/{canonical_id}/xml/markdown",
         }

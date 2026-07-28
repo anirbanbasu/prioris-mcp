@@ -65,6 +65,20 @@ class TestHttpTimeoutSecondsDefault:
         assert reloaded.EnvVars.PRIORIS_MCP_HTTP_TIMEOUT_SECONDS == 10.0
 
 
+class TestMaxInlineCharsDefault:
+    """EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS default and override."""
+
+    def test_defaults_to_20000(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_MAX_INLINE_CHARS", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS == 20000
+
+    def test_explicit_override_wins(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_MAX_INLINE_CHARS", "5000")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS == 5000
+
+
 class TestJatsMaxConcurrentTransformsDefault:
     """EnvVars.PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS default, override, and CPU-count clamp."""
 

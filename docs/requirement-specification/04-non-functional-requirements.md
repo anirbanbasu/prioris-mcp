@@ -40,6 +40,16 @@ For the same reason, every arXiv call goes to `https://export.arxiv.org/api/quer
 
 `StorageBackend` (or the layer calling it) must guarantee that only one fetch and only one parse is ever in flight for a given key at a time: a second concurrent request for a key already being fetched or parsed must wait for that in-flight operation to complete and be served its result, rather than starting a redundant one. This is an in-flight lock, distinct from `exists` (which only reflects already-completed work).
 
+## Response size
+
+### Inline text is paginated, not returned whole
+
+`parse_full_text` converts an already-fetched source (a PDF, HTML, or JATS XML document) to Markdown. That Markdown is not bounded in size the way most other tool responses are — a large paper can produce tens of thousands of characters — and an MCP client enforces its own ceiling on how large a single tool result may be, independent of anything this server controls. Returning the whole string inline risks exceeding that ceiling, which surfaces to the caller as an opaque client-side failure rather than a typed error from this server.
+
+`parse_full_text` therefore accepts `offset` and `limit` (character-based, zero-indexed) and returns one bounded page of the Markdown, not the whole string: `{"markdown": ..., "offset", "limit", "total_length", "has_more", "resource_uri"}`. `limit` defaults to a configurable `EnvVars` entry, `PRIORIS_MCP_MAX_INLINE_CHARS` (default 20000 characters), for the same reason the timeout and backoff-budget entries above are configurable — the right value depends on the calling client's own ceiling, which this SRS cannot assume. A caller that needs the rest pages through with a later call using the returned `total_length`/`has_more` to know when to stop.
+
+The `research://{provider}/{identifier}/{format}/markdown` resource template accepts the same `offset`/`limit` query parameters (`research://.../markdown{?offset,limit}`) and applies identical pagination, so a caller can page through previously-parsed content via a resource read instead of re-invoking the tool. `research://.../fulltext` (the raw, unparsed source) is not paginated — it is never returned inline in a tool response in the first place (`fetch_full_text` returns only `location`/`size_bytes`/`resource_uri`), so it is not subject to the same failure mode.
+
 ## Dependency selection
 
 Where a capability has multiple viable library choices — converting fetched full text to Markdown (see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text)) is the concrete v1 example — prefer widely-used, actively-maintained libraries with fast native (C, Rust, or similar) backends over pure-Python alternatives, since parsing is CPU-heavy and a slow implementation is felt directly in tool-call latency.

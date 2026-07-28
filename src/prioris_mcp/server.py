@@ -23,6 +23,7 @@ from prioris_mcp import PACKAGE_NAME, EnvVars
 from prioris_mcp.errors import call_returning_envelope
 from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
 from prioris_mcp.mixin import MCPMixin
+from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.html_markdownify import MarkdownifyHtmlBackend
 from prioris_mcp.parsers.jats_xslt import JatsXsltMarkdownBackend
 from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
@@ -78,7 +79,7 @@ class PriorisMCP(MCPMixin):
 
     resources: ClassVar[list[dict]] = [
         {"fn": "read_fulltext_resource", "uri": "research://{provider}/{identifier}/{format}/fulltext"},
-        {"fn": "read_markdown_resource", "uri": "research://{provider}/{identifier}/{format}/markdown"},
+        {"fn": "read_markdown_resource", "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit}"},
     ]
 
     def __init__(self) -> None:
@@ -105,6 +106,7 @@ class PriorisMCP(MCPMixin):
             http_client=self._http_client,
             pdf_backend=pdf_backend,
             html_backend=html_backend,
+            default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
         )
         europepmc_queue = ProviderRequestQueue(
             base_spacing_seconds=EUROPEPMC_BASE_SPACING_SECONDS,
@@ -116,6 +118,7 @@ class PriorisMCP(MCPMixin):
             queue=europepmc_queue,
             http_client=self._http_client,
             xml_backend=jats_backend,
+            default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
         )
 
     async def research_arxiv_search(
@@ -169,9 +172,16 @@ class PriorisMCP(MCPMixin):
         ctx: Context,
         arxiv_id: Annotated[str, Field(description="An arXiv identifier, version suffix optional")],
         format: Annotated[Literal["pdf", "html"], Field(description="Already-persisted source format to parse")],
+        offset: Annotated[int, Field(default=0, description="Zero-based character offset into the Markdown")] = 0,
+        limit: Annotated[
+            int | None,
+            Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
+        ] = None,
     ) -> dict:
-        """Convert already-fetched arXiv full text into Markdown."""
-        return await call_returning_envelope(self._arxiv_provider.parse_full_text(arxiv_id, format))
+        """Convert already-fetched arXiv full text into one page of Markdown."""
+        return await call_returning_envelope(
+            self._arxiv_provider.parse_full_text(arxiv_id, format, offset=offset, limit=limit)
+        )
 
     async def research_europepmc_search(
         self,
@@ -205,9 +215,16 @@ class PriorisMCP(MCPMixin):
         self,
         ctx: Context,
         identifier: Annotated[str, Field(description="A Europe PMC identifier or bare PMCID")],
+        offset: Annotated[int, Field(default=0, description="Zero-based character offset into the Markdown")] = 0,
+        limit: Annotated[
+            int | None,
+            Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
+        ] = None,
     ) -> dict:
-        """Convert already-fetched Europe PMC JATS XML full text into Markdown."""
-        return await call_returning_envelope(self._europepmc_provider.parse_full_text(identifier))
+        """Convert already-fetched Europe PMC JATS XML full text into one page of Markdown."""
+        return await call_returning_envelope(
+            self._europepmc_provider.parse_full_text(identifier, offset=offset, limit=limit)
+        )
 
     async def research_resolve_identifier(
         self,
@@ -228,9 +245,26 @@ class PriorisMCP(MCPMixin):
         """Read persisted full text for (provider, identifier, format); a plain not-found if absent."""
         return await self._storage.read(provider, identifier, format)
 
-    async def read_markdown_resource(self, provider: str, identifier: str, format: str) -> bytes:
-        """Read persisted parsed Markdown for (provider, identifier, format); a plain not-found if absent."""
-        return await self._storage.read(provider, identifier, f"{format}-markdown")
+    async def read_markdown_resource(
+        self, provider: str, identifier: str, format: str, offset: int = 0, limit: int | None = None
+    ) -> dict:
+        """Read one page of persisted parsed Markdown for (provider, identifier, format).
+
+        A plain not-found if absent. Paginated the same way as `parse_full_text` - see
+        docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole
+        - `limit` defaults to `PRIORIS_MCP_MAX_INLINE_CHARS` when unset.
+        """
+        markdown_bytes = await self._storage.read(provider, identifier, f"{format}-markdown")
+        page = paginate_text(
+            markdown_bytes.decode("utf-8"), offset, limit if limit is not None else EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS
+        )
+        return {
+            "markdown": page["content"],
+            "offset": page["offset"],
+            "limit": page["limit"],
+            "total_length": page["total_length"],
+            "has_more": page["has_more"],
+        }
 
 
 def app() -> FastMCP:  # pragma: no cover
