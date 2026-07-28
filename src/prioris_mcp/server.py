@@ -80,6 +80,7 @@ class PriorisMCP(MCPMixin):
     resources: ClassVar[list[dict]] = [
         {"fn": "read_fulltext_resource", "uri": "research://{provider}/{identifier}/{format}/fulltext"},
         {"fn": "read_markdown_resource", "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit}"},
+        {"fn": "read_arxiv_categories_resource", "uri": "research://arxiv/categories"},
     ]
 
     def __init__(self) -> None:
@@ -144,11 +145,22 @@ class PriorisMCP(MCPMixin):
     async def research_arxiv_list_top_n(
         self,
         ctx: Context,
-        category: Annotated[str, Field(description="arXiv subject class, e.g. 'cs.CL'")],
+        include_categories: Annotated[
+            list[str],
+            Field(
+                description="One or more arXiv subject classes to include, e.g. ['cs.CL', 'cs.LG']; combined with AND"
+            ),
+        ],
         n: Annotated[int, Field(description="Number of most-recently-submitted items to return")],
+        exclude_categories: Annotated[
+            list[str] | None,
+            Field(default=None, description="Optional arXiv subject classes to exclude, combined with ANDNOT"),
+        ] = None,
     ) -> dict:
-        """List the N most recently submitted arXiv items in a subject category."""
-        return await call_returning_envelope(self._arxiv_provider.list_top_n(category, n))
+        """List the N most recently submitted arXiv items across one or more subject categories."""
+        return await call_returning_envelope(
+            self._arxiv_provider.list_top_n(include_categories, n, exclude_categories=exclude_categories)
+        )
 
     async def research_arxiv_fetch_metadata(
         self,
@@ -265,6 +277,10 @@ class PriorisMCP(MCPMixin):
             "total_length": page["total_length"],
             "has_more": page["has_more"],
         }
+
+    async def read_arxiv_categories_resource(self) -> dict:
+        """Read arXiv's queryable category codes and names, for `research_arxiv_list_top_n`/`research_arxiv_search`."""
+        return await self._arxiv_provider.list_categories()
 
 
 def app() -> FastMCP:  # pragma: no cover

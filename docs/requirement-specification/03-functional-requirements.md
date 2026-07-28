@@ -42,7 +42,7 @@ Both arXiv's and Europe PMC's search responses already include full record metad
 | Tool | Requirement | Cost |
 |---|---|---|
 | `research_arxiv_search` | Must accept a free-text query and a way to bound the number of results returned; returns metadata records, one per hit. | Light |
-| `research_arxiv_list_top_n` | Must accept an arXiv subject category and a count N; returns metadata records for the top N items in that category. | Light |
+| `research_arxiv_list_top_n` | Must accept one or more arXiv subject categories to include (`AND`-combined) and optionally one or more to exclude (`ANDNOT`-combined), plus a count N; returns metadata records for the top N items matching that query. | Light |
 | `research_arxiv_fetch_metadata` | Must accept **one or more** arXiv identifiers in a single call (arXiv's own API accepts a comma-delimited ID list, making batched lookup a single rate-limited request instead of one per identifier); returns one metadata record per identifier arXiv recognises, plus which of the requested identifiers were not found — it must not fail the whole call just because some requested identifiers don't exist. | Light |
 | `research_arxiv_fetch_full_text` | Must accept an arXiv identifier and a format valid for that item (arXiv exposes both PDF and HTML); returns a reference to the persisted content (location, format, size), whether it was served from storage or freshly downloaded, and the resource URI for direct re-reads. | Heavy on a storage miss; light on a storage hit |
 | `research_arxiv_parse_full_text` | Must accept an arXiv identifier and the source format to parse, plus optional `offset`/`limit`; returns one bounded page of Markdown (see [Non-functional requirements → Response size](04-non-functional-requirements.md#response-size)) plus the resource URI for direct re-reads; fails with the single "not found" error (see [Architecture → `parse_full_text`](01-architecture.md)) if the source format isn't already persisted — it never triggers a fetch itself. | Heavy (CPU) on a first parse; light if already persisted |
@@ -64,13 +64,16 @@ Europe PMC's [RESTful Web Service documentation](https://europepmc.org/RestfulWe
 
 ## Resources
 
-Two resource templates expose content that `StorageBackend` already has, as a read-only alternative to re-invoking a tool:
+Three resource templates expose read-only content, as an alternative to re-invoking a tool:
 
 | Resource template | Returns |
 |---|---|
 | `research://{provider}/{identifier}/{format}/fulltext` | The persisted full text for that item/format, if present. |
 | `research://{provider}/{identifier}/{format}/markdown{?offset,limit}` | One paginated page of the persisted parsed Markdown for that item/format, if present — see [Non-functional requirements → Inline text is paginated, not returned whole](04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole). |
+| `research://arxiv/categories` | arXiv's queryable category codes and names (e.g. `cs.LG` → "Machine Learning"), sourced from arXiv's OAI-PMH `ListSets` endpoint — see [Interface specification](06-interface-specification.md#arxiv-category-list-resource). |
 
-These are read-only and never trigger a fetch or a parse — reading a resource that doesn't exist yet is a normal "not found," not an error the caller needs special handling for beyond "go call the tool first." `research_*_fetch_full_text` and `research_*_parse_full_text` return the corresponding resource URI in their output specifically so a caller can re-read the same content later without re-invoking the tool.
+The first two are read-only and never trigger a fetch or a parse — reading one that doesn't exist yet is a normal "not found," not an error the caller needs special handling for beyond "go call the tool first." `research_*_fetch_full_text` and `research_*_parse_full_text` return the corresponding resource URI in their output specifically so a caller can re-read the same content later without re-invoking the tool.
 
-Metadata is **not** exposed as a resource: it's only ever response-cached (TTL-bound via `ResponseCachingMiddleware`), never written to `StorageBackend`, so there's no stable "it's just there" location for it the way there is for full text and Markdown — a metadata resource would be indistinguishable from just calling the tool again.
+`research://arxiv/categories` is different in kind: it has no corresponding tool call and nothing to persist to `StorageBackend` — it's a direct, response-cache-backed read of arXiv's category taxonomy (see [Architecture → Caching and rate limiting](01-architecture.md#caching-and-rate-limiting)), included as a resource rather than a tool because it's reference data to read, not an action with inputs to invoke.
+
+Per-item metadata (title, authors, abstract, ...) is still **not** exposed as a resource: it's only ever response-cached (TTL-bound via `ResponseCachingMiddleware`), never written to `StorageBackend`, so there's no stable "it's just there" location for it the way there is for full text and Markdown — a metadata resource would be indistinguishable from just calling the tool again. `research://arxiv/categories` doesn't run into this problem because it isn't per-item metadata; it's a single, provider-wide taxonomy lookup.

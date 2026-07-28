@@ -17,7 +17,7 @@ Tests must not perform live network calls against arXiv or Europe PMC: both to r
 | Tool | Criteria |
 |---|---|
 | `research_arxiv_search` | A valid query with default parameters returns `results` (the documented metadata shape) and a `total_results` integer. A zero-hit query returns `results: []` and `total_results: 0` — not an error. A request with `max_results` over 2000, or `start + max_results` over 30000, fails with a validation error from `research_arxiv_search` itself, without a call reaching arXiv. |
-| `research_arxiv_list_top_n` | Returns up to `n` records for `category`, ordered most-recently-submitted first. Requesting more than the category actually has returns however many exist, without erroring. |
+| `research_arxiv_list_top_n` | Returns up to `n` records matching `include_categories` (`AND`-combined) minus `exclude_categories` (`ANDNOT`-combined), ordered most-recently-submitted first. Requesting more than the query actually has returns however many exist, without erroring. An empty `include_categories` fails with `invalid_request` before any outbound call. Duplicate entries in either list are deduplicated before the query is built. |
 | `research_arxiv_fetch_metadata` | One or more valid `arxiv_ids` (with or without version suffix) each return a metadata record in `results`. A batch mixing valid and invalid IDs returns records only for the valid ones, with the rest in `not_found` — the call as a whole must not fail. An all-invalid batch returns `results: []` and every requested ID in `not_found`. |
 | `research_arxiv_fetch_full_text` | `format: pdf` always succeeds (every arXiv submission has a PDF). `format: html` on an item with no native HTML rendering fails with `format_unavailable`, not `not_found`. An unversioned `arxiv_id` resolves to its current canonical, version-pinned form before being persisted or looked up. A second call for an already-persisted `(id, format)` returns `served_from_storage: true` and does not issue a second outbound fetch. An unrecognised `arxiv_id` fails with `not_found`. |
 | `research_arxiv_parse_full_text` | An already-fetched `(arxiv_id, format)` returns `markdown` and `resource_uri`. A never-fetched `(arxiv_id, format)` fails with `not_found` and must not trigger a `fetch_full_text` call — assert no outbound network request occurs. |
@@ -49,8 +49,9 @@ There is no `research_europepmc_list_top_n` to test against — confirm its abse
 
 - `research://{provider}/{identifier}/{format}/fulltext` returns the persisted content once the corresponding `fetch_full_text` call has been made for that exact key; before that, reading it is a plain not-found, not an error requiring special handling.
 - `research://{provider}/{identifier}/{format}/markdown` behaves the same way relative to `parse_full_text`.
-- Reading either resource must never itself trigger a fetch or a parse — assert no outbound network request or parse executes as a side effect of a resource read.
-- No metadata resource template exists — confirm the registered resource list contains only the two templates above, per [Functional requirements → Resources](03-functional-requirements.md#resources).
+- Reading either of the above resources must never itself trigger a fetch or a parse — assert no outbound network request or parse executes as a side effect of a resource read.
+- `research://arxiv/categories` returns only leaf category codes (no archive/group nodes with children of their own), each with its derived `code` and its `name` taken from the OAI-PMH response, sorted by `code`.
+- No per-item metadata resource template exists — confirm the registered resource list contains exactly `fulltext`, `markdown`, and `research://arxiv/categories`, per [Functional requirements → Resources](03-functional-requirements.md#resources).
 
 ## Cross-cutting: concurrency
 

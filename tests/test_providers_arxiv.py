@@ -48,6 +48,24 @@ def _entry(arxiv_id: str, title: str = "A Paper") -> str:
     return _ENTRY_TEMPLATE.format(arxiv_id=arxiv_id, title=title)
 
 
+_LIST_SETS_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <responseDate>2026-07-28T00:00:00Z</responseDate>
+  <request verb="ListSets">http://oaipmh.arxiv.org/oai</request>
+  <ListSets>
+    {sets}
+  </ListSets>
+</OAI-PMH>
+"""
+
+_SET_TEMPLATE = "<set><setSpec>{spec}</setSpec><setName>{name}</setName></set>"
+
+
+def _list_sets_feed(entries: list[tuple[str, str]]) -> bytes:
+    sets_xml = "".join(_SET_TEMPLATE.format(spec=spec, name=name) for spec, name in entries)
+    return _LIST_SETS_TEMPLATE.format(sets=sets_xml).encode("utf-8")
+
+
 def _provider_with_handler(
     handler: Callable[[httpx.Request], httpx.Response],
 ) -> tuple[ArxivProvider, httpx.AsyncClient]:
@@ -182,7 +200,7 @@ class TestArxivProviderListTopN:
         async def scenario():
             provider, client = _provider_with_handler(handler)
             async with client:
-                return await provider.list_top_n("cs.CL", 2)
+                return await provider.list_top_n(["cs.CL"], 2)
 
         result = asyncio.run(scenario())
         assert len(result["results"]) == 2
@@ -196,10 +214,98 @@ class TestArxivProviderListTopN:
         async def scenario():
             provider, client = _provider_with_handler(handler)
             async with client:
-                return await provider.list_top_n("cs.CL", 50)
+                return await provider.list_top_n(["cs.CL"], 50)
 
         result = asyncio.run(scenario())
         assert len(result["results"]) == 1
+
+    def test_single_include_category_produces_todays_bare_cat_query(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.params["search_query"] == "cat:cs.CL"
+            return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.list_top_n(["cs.CL"], 5)
+
+        asyncio.run(scenario())
+
+    def test_multiple_include_categories_are_and_joined(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.params["search_query"] == "cat:cs.CL AND cat:cs.LG"
+            return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.list_top_n(["cs.CL", "cs.LG"], 5)
+
+        asyncio.run(scenario())
+
+    def test_duplicate_include_categories_are_deduped(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.params["search_query"] == "cat:cs.CL"
+            return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.list_top_n(["cs.CL", "cs.CL"], 5)
+
+        asyncio.run(scenario())
+
+    def test_exclude_categories_are_andnot_joined(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.params["search_query"] == "cat:cs.CL ANDNOT cat:cs.CV"
+            return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.list_top_n(["cs.CL"], 5, exclude_categories=["cs.CV"])
+
+        asyncio.run(scenario())
+
+    def test_duplicate_exclude_categories_are_deduped(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.params["search_query"] == "cat:cs.CL ANDNOT cat:cs.CV"
+            return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.list_top_n(["cs.CL"], 5, exclude_categories=["cs.CV", "cs.CV"])
+
+        asyncio.run(scenario())
+
+    def test_omitted_exclude_categories_produces_no_andnot_clause(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert "ANDNOT" not in req.url.params["search_query"]
+            return httpx.Response(200, content=_feed([_entry("2106.09685v2")]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.list_top_n(["cs.CL"], 5)
+
+        asyncio.run(scenario())
+
+    def test_empty_include_categories_raises_invalid_request_without_network_call(self):
+        calls = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            calls.append(req)
+            return httpx.Response(200, content=_feed([]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                await provider.list_top_n([], 5)
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
+        assert calls == []
 
 
 class TestArxivProviderFetchMetadata:
@@ -673,3 +779,49 @@ class TestArxivProviderParseFullText:
             "has_more": False,
             "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown",
         }
+
+
+class TestArxivProviderListCategories:
+    """Tests for `ArxivProvider.list_categories`."""
+
+    def test_returns_only_leaf_categories_with_derived_codes_sorted_by_code(self):
+        entries = [
+            ("physics", "Physics"),
+            ("physics:hep-th", "High Energy Physics - Theory"),
+            ("physics:astro-ph", "Astrophysics"),
+            ("physics:astro-ph:CO", "Cosmology and Nongalactic Astrophysics"),
+            ("cs", "Computer Science"),
+            ("cs:cs", "Computer Science"),
+            ("cs:cs:LG", "Machine Learning"),
+        ]
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_list_sets_feed(entries))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.list_categories()
+
+        result = asyncio.run(scenario())
+        assert result == {
+            "categories": [
+                {"code": "astro-ph.CO", "name": "Cosmology and Nongalactic Astrophysics"},
+                {"code": "cs.LG", "name": "Machine Learning"},
+                {"code": "hep-th", "name": "High Energy Physics - Theory"},
+            ]
+        }
+
+    def test_calls_oai_pmh_list_sets_endpoint_over_https(self):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.scheme == "https"
+            assert req.url.host == "oaipmh.arxiv.org"
+            assert req.url.params["verb"] == "ListSets"
+            return httpx.Response(200, content=_list_sets_feed([("physics:hep-th", "High Energy Physics - Theory")]))
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                return await provider.list_categories()
+
+        asyncio.run(scenario())

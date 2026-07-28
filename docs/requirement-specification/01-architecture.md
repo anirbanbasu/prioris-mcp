@@ -22,7 +22,7 @@ The capability names below (`search`, `fetch_metadata`, ...) name the shared int
 | Capability | Description | Relative cost |
 |---|---|---|
 | `search` | Search items by keyword/query. | Light |
-| `list_top_n` | List the top-N items for a category, where "category" is a provider-defined grouping (e.g. an arXiv subject class). v1 implements this for arXiv only — see below. | Light |
+| `list_top_n` | List the top-N items across one or more provider-defined categories to include (and optionally exclude), where "category" is a provider-defined grouping (e.g. an arXiv subject class). v1 implements this for arXiv only — see below. | Light |
 | `fetch_metadata` | Fetch metadata (title, authors, abstract, identifiers, category, dates, links, ...) for one or more items in a single call — batching is worthwhile precisely because rate limiting (see below) makes N separate single-item calls costlier than one call for N identifiers. | Light |
 | `resolve_identifier` | Given an identifier already known to belong to this provider, resolve it to a fetchable URL in the target format (e.g. HTML, PDF), pinning a canonical version where the provider's identifiers are mutable. This is an internal, provider-native capability — see below. | Light |
 | `fetch_full_text` | Fetch the full text of a single item, in a given format, from its resolved URL. | Heavy (network I/O) |

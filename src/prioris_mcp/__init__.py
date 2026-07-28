@@ -41,7 +41,7 @@ class EnvVars:
 
     PRIORIS_MCP_RESPONSE_CACHE_TTL: int = env.int(
         name="PRIORIS_MCP_RESPONSE_CACHE_TTL",
-        default=30,  # in seconds
+        default=300,  # in seconds
         validate=Range(min=0, max=86400),  # 0 seconds to 1 day where 0 means caching is disabled
     )
 

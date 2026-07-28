@@ -29,8 +29,10 @@ class ResearchPublicationProvider(ABC):
     async def search(self, query: str, **kwargs: Any) -> dict[str, Any]:
         """Search items by keyword/query. See Functional requirements for the per-provider shape."""
 
-    async def list_top_n(self, category: str, n: int) -> dict[str, Any]:
-        """List the top-N items for a provider-defined category.
+    async def list_top_n(
+        self, include_categories: list[str], n: int, exclude_categories: list[str] | None = None
+    ) -> dict[str, Any]:
+        """List the top-N items across one or more provider-defined categories.
 
         Raises:
             CapabilityNotSupportedError: for a provider with no equivalent capability.

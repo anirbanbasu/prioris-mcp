@@ -34,7 +34,7 @@ class TestResearchPublicationProvider:
     def test_default_list_top_n_raises_capability_not_supported(self):
         async def scenario():
             provider = _StubProvider()
-            await provider.list_top_n("cs.CL", 5)
+            await provider.list_top_n(["cs.CL"], 5)
 
         with pytest.raises(CapabilityNotSupportedError):
             asyncio.run(scenario())

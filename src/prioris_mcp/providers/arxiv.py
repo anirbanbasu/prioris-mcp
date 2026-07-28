@@ -27,11 +27,16 @@ ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ARXIV_BASE_SPACING_SECONDS = 3.0
 ARXIV_MAX_RESULTS = 2000
 ARXIV_MAX_CUMULATIVE = 30000
+# Same avoid-the-redirect rationale as ARXIV_API_URL above: export.arxiv.org/oai2 301-redirects
+# here.
+ARXIV_OAI_URL = "https://oaipmh.arxiv.org/oai"
 
 _ATOM_NS = "http://www.w3.org/2005/Atom"
 _ARXIV_NS = "http://arxiv.org/schemas/atom"
 _OPENSEARCH_NS = "http://a9.com/-/spec/opensearch/1.1/"
 _NS = {"atom": _ATOM_NS, "arxiv": _ARXIV_NS, "opensearch": _OPENSEARCH_NS}
+_OAI_NS = "http://www.openarchives.org/OAI/2.0/"
+_OAI_NSMAP = {"oai": _OAI_NS}
 
 
 def _bare_id(identifier: str) -> str:
@@ -47,8 +52,8 @@ def _is_version_pinned(identifier: str) -> bool:
     return _bare_id(identifier) != identifier
 
 
-def _text(element, path: str) -> str | None:
-    found = element.find(path, _NS)
+def _text(element, path: str, ns: dict[str, str] = _NS) -> str | None:
+    found = element.find(path, ns)
     return found.text.strip() if found is not None and found.text else None
 
 
@@ -90,6 +95,31 @@ def _parse_feed(xml_bytes: bytes) -> tuple[list[dict], int]:
     return entries, total_results
 
 
+def _parse_list_sets(xml_bytes: bytes) -> list[dict]:
+    """Parse an OAI-PMH ListSets response into arXiv's queryable leaf categories.
+
+    A `setSpec` (e.g. "physics:astro-ph:CO") is only a real, queryable `cat:` value if no other
+    `setSpec` extends it with one more ":segment" - non-leaf entries like "physics" or
+    "physics:physics" are grouping nodes that return 0 hits for `cat:{...}` (verified live
+    against export.arxiv.org/api/query while drafting
+    docs/superpowers/specs/2026-07-28-arxiv-list-top-n-multi-category-design.md). A leaf's
+    actual category code drops the outermost archive segment and joins what remains with ".":
+    "physics:astro-ph:CO" -> "astro-ph.CO", "physics:hep-th" -> "hep-th".
+    """
+    root = safe_ET.fromstring(xml_bytes)
+    set_els = root.findall(".//oai:ListSets/oai:set", _OAI_NSMAP)
+    entries = [(_text(el, "oai:setSpec", _OAI_NSMAP), _text(el, "oai:setName", _OAI_NSMAP)) for el in set_els]
+    specs = {spec for spec, _ in entries if spec}
+    leaves = [(spec, name) for spec, name in entries if spec and not any(s.startswith(f"{spec}:") for s in specs)]
+    categories: list[dict[str, str]] = []
+    for spec, name in leaves:
+        parts = spec.split(":")
+        code = ".".join(parts[1:]) if len(parts) > 1 else spec
+        categories.append({"code": code, "name": name or ""})
+    categories.sort(key=lambda c: c["code"])
+    return categories
+
+
 class ArxivProvider(ResearchPublicationProvider):
     """arXiv implementation of `ResearchPublicationProvider`."""
 
@@ -112,6 +142,13 @@ class ArxivProvider(ResearchPublicationProvider):
     async def _get(self, params: dict) -> bytes:
         async def op() -> httpx.Response:
             return await provider_http.request(self._http_client, "GET", ARXIV_API_URL, params=params)
+
+        response = await self._queue.execute(op)
+        return response.content
+
+    async def _get_oai_sets(self) -> bytes:
+        async def op() -> httpx.Response:
+            return await provider_http.request(self._http_client, "GET", ARXIV_OAI_URL, params={"verb": "ListSets"})
 
         response = await self._queue.execute(op)
         return response.content
@@ -141,10 +178,18 @@ class ArxivProvider(ResearchPublicationProvider):
         entries, total_results = _parse_feed(await self._get(params))
         return {"results": entries, "total_results": total_results}
 
-    async def list_top_n(self, category: str, n: int) -> dict:
+    async def list_top_n(
+        self, include_categories: list[str], n: int, exclude_categories: list[str] | None = None
+    ) -> dict:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_list_top_n."""
+        if not include_categories:
+            raise InvalidRequestError("include_categories must contain at least one category")
+        included = list(dict.fromkeys(include_categories))  # preserve first-seen order
+        excluded = list(dict.fromkeys(exclude_categories or []))
+        query_parts = [" AND ".join(f"cat:{c}" for c in included)]
+        query_parts += [f"ANDNOT cat:{c}" for c in excluded]
         params = {
-            "search_query": f"cat:{category}",
+            "search_query": " ".join(query_parts),
             "start": 0,
             "max_results": n,
             "sortBy": "submittedDate",
@@ -152,6 +197,10 @@ class ArxivProvider(ResearchPublicationProvider):
         }
         entries, _ = _parse_feed(await self._get(params))
         return {"results": entries}
+
+    async def list_categories(self) -> dict:
+        """See docs/requirement-specification/06-interface-specification.md#arxiv-category-list-resource."""
+        return {"categories": _parse_list_sets(await self._get_oai_sets())}
 
     async def fetch_metadata(self, identifiers: list[str]) -> dict:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_fetch_metadata."""

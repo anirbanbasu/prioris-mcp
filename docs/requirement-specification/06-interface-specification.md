@@ -51,11 +51,25 @@ Every arXiv tool that returns article data (`search`, `list_top_n`, `fetch_metad
 
 ### `research_arxiv_list_top_n`
 
-**Input:** `category` (string, required — an arXiv subject class, e.g. `cs.CL`), `n` (integer, required — result count).
+**Input:** `include_categories` (list of strings, required, one or more — arXiv subject classes, e.g. `["cs.CL", "cs.LG"]`), `n` (integer, required — result count), `exclude_categories` (list of strings, optional — arXiv subject classes to exclude).
 
-**Underlying call:** `GET export.arxiv.org/api/query?search_query=cat:{category}&start=0&max_results={n}&sortBy=submittedDate&sortOrder=descending`. "Top N" is defined as the N most recently submitted items in that category — arXiv has no other notion of ranking within a category.
+**Underlying call:** `GET export.arxiv.org/api/query?search_query={query}&start=0&max_results={n}&sortBy=submittedDate&sortOrder=descending`, where `{query}` is `cat:{i1} AND cat:{i2} ... ANDNOT cat:{e1} ANDNOT cat:{e2} ...` — `include_categories` entries `AND`-joined, followed by an `ANDNOT cat:{e}` clause per `exclude_categories` entry (omitted entirely if `exclude_categories` is empty/absent). Both lists are deduplicated (order preserved) before building the query. "Top N" is defined as the N most recently submitted items matching that query — arXiv has no other notion of ranking within a category.
 
 **Output:** `{"results": [<arXiv metadata record>, ...]}`, up to `n` entries.
+
+**Validation:** an empty `include_categories` fails with `invalid_request` before any outbound call.
+
+### arXiv category-list resource
+
+**Resource URI:** `research://arxiv/categories` (static, no path parameters).
+
+**Underlying call:** `GET https://oaipmh.arxiv.org/oai?verb=ListSets` — arXiv's OAI-PMH `ListSets` verb, called directly at `oaipmh.arxiv.org` rather than `export.arxiv.org/oai2` (which 301-redirects there, same avoid-the-redirect rationale as `export.arxiv.org/api/query` above). Returns all categories in one response; confirmed live (183 entries) that it has no `resumptionToken`, so no pagination handling is needed.
+
+**Behaviour:** a `setSpec` in the OAI-PMH response (e.g. `physics:astro-ph:CO`) is only included if no other `setSpec` extends it with one more `:segment` — non-leaf entries (e.g. `physics`, `physics:physics`) are archive/group nodes, not real `cat:` values, and are excluded. A leaf's category `code` is derived by dropping the outermost segment and joining the rest with `.` (`physics:astro-ph:CO` → `astro-ph.CO`; `physics:hep-th`, a 2-segment leaf, → `hep-th`). `name` is the `setName` verbatim.
+
+**Output:** `{"categories": [{"code": <string>, "name": <string>}, ...]}`, sorted by `code`.
+
+**Caching:** covered by the standard `ResponseCachingMiddleware` `read_resource` path (`PRIORIS_MCP_RESPONSE_CACHE_TTL`), same as any other resource — no separate persistent cache.
 
 ### `research_arxiv_fetch_metadata`
 

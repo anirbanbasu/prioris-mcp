@@ -141,6 +141,17 @@ class TestArxivTools:
   </entry>
 </feed>""".encode()
 
+    def _categories_feed(self) -> bytes:
+        return b"""<?xml version="1.0" encoding="UTF-8"?>
+<OAI-PMH xmlns="http://www.openarchives.org/OAI/2.0/">
+  <responseDate>2026-07-28T00:00:00Z</responseDate>
+  <request verb="ListSets">http://oaipmh.arxiv.org/oai</request>
+  <ListSets>
+    <set><setSpec>physics</setSpec><setName>Physics</setName></set>
+    <set><setSpec>physics:hep-th</setSpec><setName>High Energy Physics - Theory</setName></set>
+  </ListSets>
+</OAI-PMH>"""
+
     def _server_and_client(self, handler, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
         # `monkeypatch.setattr` (not `setenv` + `importlib.reload`) is the pattern already used
         # by tests/test_storage.py for the same problem: `PRIORIS_MCP_STORAGE_DIR` is resolved
@@ -231,10 +242,80 @@ class TestArxivTools:
 
         async def scenario():
             async with client:
-                return await client.call_tool("research_arxiv_list_top_n", arguments={"category": "cs.CL", "n": 5})
+                return await client.call_tool(
+                    "research_arxiv_list_top_n", arguments={"include_categories": ["cs.CL"], "n": 5}
+                )
 
         result = asyncio.run(scenario())
         assert len(result.structured_content["results"]) == 1
+
+    def test_research_arxiv_list_top_n_and_joins_multiple_include_categories(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.params["search_query"] == "cat:cs.CL AND cat:cs.LG"
+            return httpx.Response(200, content=self._feed())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_arxiv_list_top_n", arguments={"include_categories": ["cs.CL", "cs.LG"], "n": 5}
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["results"]) == 1
+
+    def test_research_arxiv_list_top_n_andnot_joins_exclude_categories(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.params["search_query"] == "cat:cs.CL ANDNOT cat:cs.CV"
+            return httpx.Response(200, content=self._feed())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_arxiv_list_top_n",
+                    arguments={"include_categories": ["cs.CL"], "n": 5, "exclude_categories": ["cs.CV"]},
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["results"]) == 1
+
+    def test_research_arxiv_list_top_n_empty_include_categories_is_invalid_request(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_arxiv_list_top_n", arguments={"include_categories": [], "n": 5})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["error"] == "invalid_request"
+
+    def test_research_arxiv_categories_resource_returns_leaf_categories(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._categories_feed())
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.read_resource("research://arxiv/categories")
+
+        result = asyncio.run(scenario())
+        payload = json.loads(result[0].text)
+        assert payload == {"categories": [{"code": "hep-th", "name": "High Energy Physics - Theory"}]}
 
     def test_research_arxiv_fetch_metadata_returns_results(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
         def handler(req: httpx.Request) -> httpx.Response:
