@@ -19,7 +19,10 @@ from prioris_mcp.storage import StorageBackend
 
 logger = logging.getLogger(__name__)
 
-ARXIV_API_URL = "http://export.arxiv.org/api/query"
+# https, not http: export.arxiv.org 301-redirects every plain-http request to https, so calling
+# https:// directly avoids paying for that redirect round-trip on every arXiv API call (see
+# docs/requirement-specification/04-non-functional-requirements.md#provider_unavailable-failures-are-not-retried).
+ARXIV_API_URL = "https://export.arxiv.org/api/query"
 ARXIV_BASE_SPACING_SECONDS = 3.0
 ARXIV_MAX_RESULTS = 2000
 ARXIV_MAX_CUMULATIVE = 30000

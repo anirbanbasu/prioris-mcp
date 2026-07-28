@@ -24,7 +24,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Fixed
 
-- None documented yet.
+- `provider_unavailable` errors from a transport-level failure (timeout, connection error) now name the underlying exception type in the error message, instead of sometimes rendering as `"... failed: "` with nothing after the colon.
+- The outbound HTTP client's timeout is now configurable (`PRIORIS_MCP_HTTP_TIMEOUT_SECONDS`, default 30s) instead of httpx's own 5-second default, which was too tight for arXiv/Europe PMC under load and a likely cause of spurious `provider_unavailable` failures.
+- arXiv API calls now go to `https://export.arxiv.org/api/query` directly instead of `http://`, avoiding an extra redirect round-trip (`export.arxiv.org` 301-redirects every plain-`http` request to `https`) on every single arXiv API call.
 
 ### Security
 

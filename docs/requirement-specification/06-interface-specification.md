@@ -16,7 +16,7 @@ This page states the exact wire-level input/output contract for every v1 MCP too
 
 ## arXiv
 
-All arXiv tools call `http://export.arxiv.org/api/query`, which returns an Atom 1.0 feed. This is the same endpoint for search, listing, and single-item lookup — they differ only in which query parameters are set.
+All arXiv tools call `https://export.arxiv.org/api/query`, which returns an Atom 1.0 feed. This is the same endpoint for search, listing, and single-item lookup — they differ only in which query parameters are set. This must be called over `https`, not `http`: `export.arxiv.org` 301-redirects every plain-`http` request to `https`, so calling `http` directly would cost an extra round-trip on every single arXiv API call for no benefit.
 
 ### arXiv metadata record shape
 
