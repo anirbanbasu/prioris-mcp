@@ -29,6 +29,14 @@ site_author = "Anirban Basu"
 # Read more: https://zensical.org/docs/setup/basics/#site_url
 #site_url = "https://www.example.com/"
 
+# The repo_url and repo_name options add a repository link to the header.
+# For public GitHub/GitLab repos, the latest release tag plus star and fork
+# counts are fetched and rendered automatically once repo_url is set.
+#
+# Read more: https://zensical.org/docs/setup/repository/
+repo_url = "https://github.com/anirbanbasu/prioris-mcp"
+repo_name = "anirbanbasu/prioris-mcp"
+
 # The copyright notice appears in the page footer and can contain an HTML
 # fragment.
 #
@@ -300,7 +308,7 @@ toggle.name = "Switch to light mode"
 # ----------------------------------------------------------------------------
 # The "extra" section contains miscellaneous settings.
 # ----------------------------------------------------------------------------
-#[[project.extra.social]]
+[[project.extra.social]]
 icon = "fontawesome/brands/github"
 link = "https://github.com/anirbanbasu/prioris-mcp"
 
