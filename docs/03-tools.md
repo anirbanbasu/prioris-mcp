@@ -27,7 +27,7 @@ Every tool below returns a common envelope on failure: `{"error": "<code>", "mes
 | `research_arxiv_list_top_n` | List the *N* most recently submitted items in an arXiv subject category. | `category` (e.g. `cs.CL`), `n` | "Top N" means most recent, not most cited/viewed — arXiv has no other ranking. |
 | `research_arxiv_fetch_metadata` | Fetch metadata for one or more arXiv identifiers in a single call. | `arxiv_ids` (list) | Unrecognised IDs are reported in `not_found`, not a failure. |
 | `research_arxiv_fetch_full_text` | Fetch (or return the already-persisted) full text for an arXiv item. | `arxiv_id`, `format` (`pdf`\|`html`) | Unversioned IDs resolve to the current version first. `html` isn't available for every paper (arXiv's HTML rendering is a comparatively recent rollout). |
-| `research_arxiv_parse_full_text` | Convert already-fetched arXiv full text into Markdown. | `arxiv_id`, `format` | Never triggers a fetch itself — fetch first, or this fails with `not_found`. |
+| `research_arxiv_parse_full_text` | Convert already-fetched arXiv full text into one page of Markdown. | `arxiv_id`, `format`, `offset` (default 0), `limit` (default `PRIORIS_MCP_MAX_INLINE_CHARS`) | Never triggers a fetch itself — fetch first, or this fails with `not_found`. Returns `offset`/`limit`/`total_length`/`has_more` alongside `markdown` so a caller can page through content longer than the limit; see [Caching and rate limiting](#caching-and-rate-limiting) below. |
 
 All arXiv tools share a single outbound request queue, serialised to arXiv's documented limit of one request per 3 seconds.
 
@@ -38,7 +38,7 @@ All arXiv tools share a single outbound request queue, serialised to arXiv's doc
 | `research_europepmc_search` | Search Europe PMC by keyword/query. | `query`, `page_size` (default 25), `cursor_mark` (default `*`) | Paginate by passing the previous response's `next_cursor_mark` back in as `cursor_mark`. |
 | `research_europepmc_fetch_metadata` | Fetch metadata for one or more Europe PMC identifiers in a single call. | `identifiers` (list — bare PMCID or `{source}:{id}`) | Unrecognised identifiers are reported in `not_found`, not a failure. |
 | `research_europepmc_fetch_full_text` | Fetch (or return the already-persisted) JATS XML full text for a Europe PMC item. | `identifier` | No `format` parameter — Europe PMC's only directly-servable full-text format is XML. Fails with `format_unavailable` if Europe PMC doesn't host full text for that item itself. |
-| `research_europepmc_parse_full_text` | Convert already-fetched Europe PMC XML full text into Markdown. | `identifier` | Never triggers a fetch itself — fetch first, or this fails with `not_found`. |
+| `research_europepmc_parse_full_text` | Convert already-fetched Europe PMC XML full text into one page of Markdown. | `identifier`, `offset` (default 0), `limit` (default `PRIORIS_MCP_MAX_INLINE_CHARS`) | Never triggers a fetch itself — fetch first, or this fails with `not_found`. Returns `offset`/`limit`/`total_length`/`has_more` alongside `markdown`, same as arXiv's. |
 
 There is no `research_europepmc_list_top_n` — Europe PMC has no single classification field equivalent to arXiv's subject categories.
 
