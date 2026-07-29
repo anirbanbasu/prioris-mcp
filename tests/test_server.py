@@ -120,6 +120,22 @@ class TestMCPServer:
             PriorisMCP()
         assert "HTTPS certificate verification is DISABLED" in caplog.text
 
+    def test_registered_tool_names_include_localfile_and_storage_management(self):
+        """docs/requirement-specification/07-test-specification.md's cross-cutting acceptance criteria.
+
+        The registered tool metadata list must include the local-file and storage-management
+        tools, and must not include the capabilities this source deliberately lacks (search,
+        fetch_metadata, list_top_n - a local file has no catalogue to search or list).
+        """
+        tool_names = {t["fn"] for t in PriorisMCP.tools}
+        assert "research_localfile_fetch_full_text" in tool_names
+        assert "research_localfile_parse_full_text" in tool_names
+        assert "research_list_fetched" in tool_names
+        assert "research_delete_fetched" in tool_names
+        assert "research_localfile_search" not in tool_names
+        assert "research_localfile_fetch_metadata" not in tool_names
+        assert "research_localfile_list_top_n" not in tool_names
+
 
 class TestArxivTools:
     """End-to-end MCP tool tests for the arXiv provider, stubbing arXiv's HTTP API."""

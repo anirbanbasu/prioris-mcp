@@ -217,3 +217,15 @@ class TestLocalFileProviderParseFullText:
         # No file was ever fetched; parse must fail rather than reach into the filesystem itself.
         with pytest.raises(NotFoundError):
             asyncio.run(provider.parse_full_text("20260729-1430-a3f2"))
+
+
+class TestLocalFileProviderDeleteDoesNotTouchOriginal:
+    """docs/requirement-specification/07-test-specification.md#storage-management-acceptance-criteria."""
+
+    def test_delete_via_storage_backend_leaves_original_file_untouched(self, tmp_path: Path):
+        original = tmp_path / "paper.pdf"
+        original.write_bytes(PDF_BYTES)
+        provider = _provider(tmp_path)
+        fetched = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        asyncio.run(provider._storage.delete("localfile", fetched["id"], "pdf"))
+        assert original.read_bytes() == PDF_BYTES
