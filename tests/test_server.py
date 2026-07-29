@@ -774,6 +774,18 @@ startxref
         result = asyncio.run(scenario())
         assert result.structured_content["error"] == "invalid_request"
 
+    def test_reading_resource_with_unrecognised_localfile_id_is_not_found(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client, _root_dir = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.read_resource("research://localfile/20260729-1430-a3f2/pdf/fulltext")
+
+        with pytest.raises(McpError):
+            asyncio.run(scenario())
+
 
 class TestStorageManagementTools:
     """End-to-end MCP tool tests for research_list_fetched/research_delete_fetched."""

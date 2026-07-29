@@ -121,6 +121,12 @@ class TestLocalFileProviderContentValidation:
         with pytest.raises(FileTooLargeError):
             asyncio.run(provider.fetch_full_text("big.pdf"))
 
+    def test_unsupported_format_is_rejected(self, tmp_path: Path):
+        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
+        provider = _provider(tmp_path)
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(provider.fetch_full_text("paper.pdf", format="html"))
+
 
 class TestLocalFileProviderFetchFullText:
     """Content-hash canonicalisation and caller-facing ID - docs/requirement-specification/02-storage.md#content-hash-canonicalisation-for-the-local-filesystem-source."""

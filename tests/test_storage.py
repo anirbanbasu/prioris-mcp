@@ -327,6 +327,15 @@ class TestFilesystemStorageBackend:
         backend = FilesystemStorageBackend(tmp_path)
         assert asyncio.run(backend.delete("arxiv", "does-not-exist", "pdf")) is False
 
+    def test_delete_skips_non_matching_entries_when_nothing_matches(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("europepmc", "PMC1", "xml", b"a"))  # provider/format mismatch
+        asyncio.run(backend.write("arxiv", "other-id", "pdf", b"b"))  # same provider/format, identifier mismatch
+        deleted = asyncio.run(backend.delete("arxiv", "does-not-exist", "pdf"))
+        assert deleted is False
+        assert asyncio.run(backend.exists("europepmc", "PMC1", "xml")) is True
+        assert asyncio.run(backend.exists("arxiv", "other-id", "pdf")) is True
+
     def test_read_manifest_returns_none_when_absent(self, tmp_path: Path):
         backend = FilesystemStorageBackend(tmp_path)
         assert asyncio.run(backend.read_manifest("arxiv", "2601.05525v2", "pdf")) is None
@@ -341,6 +350,12 @@ class TestFilesystemStorageBackend:
     def test_find_canonical_identifier_returns_none_when_absent(self, tmp_path: Path):
         backend = FilesystemStorageBackend(tmp_path)
         assert asyncio.run(backend.find_canonical_identifier("localfile", "20260729-1430-a3f2", "pdf")) is None
+
+    def test_find_canonical_identifier_skips_non_matching_provider_or_format(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("europepmc", "PMC1", "xml", b"a", public_identifier="other-public-id"))
+        result = asyncio.run(backend.find_canonical_identifier("localfile", "some-id", "pdf"))
+        assert result is None
 
     def test_find_canonical_identifier_resolves_public_id_to_storage_key(self, tmp_path: Path):
         backend = FilesystemStorageBackend(tmp_path)
