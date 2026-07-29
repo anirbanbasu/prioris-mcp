@@ -4,7 +4,7 @@ icon: lucide/wrench
 
 # Functional requirements
 
-This page maps the `ResearchPublicationProvider` capabilities defined in [Architecture](01-architecture.md) onto the concrete MCP tools and resources exposed for the two v1 providers, arXiv and Europe PMC, per the [storage](02-storage.md) semantics already established.
+This page maps the `ResearchPublicationProvider` capabilities defined in [Architecture](01-architecture.md) onto the concrete MCP tools and resources exposed for the three v1 sources — arXiv, Europe PMC, and the local filesystem — per the [storage](02-storage.md) semantics already established. The local filesystem source implements a deliberately narrower subset of tools than arXiv/Europe PMC (see [Local filesystem tools](#local-filesystem-tools)); [Storage management tools](#storage-management-tools) are grouping-level, applying across all three.
 
 This page states **behavioural requirements** — what each tool must accept conceptually, and what guarantees it makes (error semantics, cost tier, persistence side effects) — not literal wire-level parameter names or JSON schemas. Exact input/output schemas belong in the [interface specification](06-interface-specification.md), written once the arXiv and Europe PMC APIs have actually been read during implementation; pinning them down here risks the SRS being wrong in a way implementation would then have to chase.
 
@@ -32,6 +32,17 @@ Unlike the other five capabilities, `resolve_identifier` is exposed as a **singl
 Cost: light — routing is, at most, a DOI redirect plus a provider-native resolution call, neither of which downloads full text.
 
 The per-provider native resolution this delegates to (what would have been `research_arxiv_resolve_identifier` / `research_europepmc_resolve_identifier`) is **not** itself an MCP tool — it's internal, used by `research_resolve_identifier` and by each provider's own `fetch_full_text`.
+
+## Storage management tools
+
+`research_list_fetched` and `research_delete_fetched` are the other grouping-level tools (see [Architecture → `list_fetched`/`delete_fetched`](01-architecture.md#list_fetched-delete_fetched-grouping-level)): unlike `resolve_identifier`, they aren't split per-provider because they don't validate anything provider-specific — they just enumerate or remove manifest entries the storage abstraction already recorded, uniformly across whichever provider produced them.
+
+| Tool | Requirement | Cost |
+|---|---|---|
+| `research_list_fetched` | Must accept optional `provider` and `format` filters; returns persisted manifest entries (provider, identifier, format, fetch timestamp, size) matching those filters, or all entries if neither filter is given. Must not trigger a fetch or parse. | Light |
+| `research_delete_fetched` | Must accept **one or more** `(provider, identifier, format)` entries in a single call; removes each matching persisted entry, returning which were deleted and which were not found — it must not fail the whole call just because some requested entries no longer exist, the same partial-failure tolerance `fetch_metadata` already has. | Light |
+
+This is the primary, storage-abstraction-safe way to recover from a mistaken fetch (e.g. the wrong arXiv ID, or a local file fetched by accident) without depending on `StorageBackend` happening to be filesystem-based — see [Architecture → `list_fetched`/`delete_fetched`](01-architecture.md#list_fetched-delete_fetched-grouping-level) for why bypassing the abstraction (e.g. deleting files directly) isn't a substitute. It is distinct from the deferred, disk-pressure-driven [retention/eviction](02-storage.md#future-retention-and-redistribution-aware-persistence) policy, which v1 does not implement at all.
 
 ## Search and listing results carry full metadata
 
@@ -62,6 +73,17 @@ There is no `research_europepmc_list_top_n` — Europe PMC has no single classif
 
 Europe PMC's [RESTful Web Service documentation](https://europepmc.org/RestfulWebService) does not publish a specific numeric rate limit. In its absence, **the Europe PMC provider self-imposes the same limit as arXiv — max 1 request per 3 seconds** — as a conservative, externally-justified default rather than an arbitrary invented figure, documented here so it isn't a silent implementation choice. This should be revisited if EBI publishes explicit guidance of its own.
 
+## Local filesystem tools
+
+Deliberately narrower than the arXiv/Europe PMC tool sets — only `fetch_full_text` and `parse_full_text` exist for this source; there is no `research_localfile_search`, `research_localfile_list_top_n`, or `research_localfile_fetch_metadata`, and this source is never reachable through `research_resolve_identifier` (see [Architecture → Local filesystem source](01-architecture.md#local-filesystem-source) for why).
+
+| Tool | Requirement | Cost |
+|---|---|---|
+| `research_localfile_fetch_full_text` | Must accept a file path **relative to the configured root directory** (`PRIORIS_MCP_LOCAL_FILE_ROOT`, default the server's current working directory — see [Security → Local filesystem access](05-security.md#local-filesystem-access-is-confined-to-an-operator-configured-root)); rejects a path that escapes the root (via `..` or a symlink) before touching the filesystem. Reads the file, validates it is actually a PDF by content sniffing (not by trusting the `.pdf` extension), and rejects a file exceeding a configurable maximum size (`PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`, default 10MB) before persisting it. Computes a content hash of the file's current bytes and uses it as the storage key (see [Storage → Content-hash canonicalisation](02-storage.md#content-hash-canonicalisation-for-the-local-filesystem-source)); returns a server-assigned caller-facing identifier (see [Storage → Caller-facing identifiers](02-storage.md#caller-facing-identifiers-for-sources-without-one)) alongside the same `location`/`format`/`size_bytes`/`served_from_storage`/`resource_uri` shape the other providers' `fetch_full_text` returns. Re-fetching the same path with unchanged content reuses the existing caller-facing identifier rather than minting a new one. | Light (local disk I/O, not network) |
+| `research_localfile_parse_full_text` | Must accept the caller-facing identifier returned by `research_localfile_fetch_full_text` (not the original path), plus optional `offset`/`limit`; returns one bounded page of Markdown plus the resource URI for direct re-reads, using the same PDF parser backend `research_arxiv_parse_full_text` uses. Fails with the single "not found" error if the identifier isn't in the manifest — it never re-reads the original path itself, and never triggers a `fetch_full_text` call. | Heavy (CPU) on a first parse; light if already persisted |
+
+Neither tool is subject to a rate limit or a serialised outbound queue (see [Architecture → Local filesystem source](01-architecture.md#local-filesystem-source)) — there is no outbound request to throttle.
+
 ## Resources
 
 Three resource templates expose read-only content, as an alternative to re-invoking a tool:
@@ -74,6 +96,8 @@ Three resource templates expose read-only content, as an alternative to re-invok
 
 The first two are read-only and never trigger a fetch or a parse — reading one that doesn't exist yet is a normal "not found," not an error the caller needs special handling for beyond "go call the tool first." `research_*_fetch_full_text` and `research_*_parse_full_text` return the corresponding resource URI in their output specifically so a caller can re-read the same content later without re-invoking the tool.
 
+For `provider=localfile`, `{identifier}` is the server-assigned caller-facing identifier `research_localfile_fetch_full_text` returned (see [Storage → Caller-facing identifiers](02-storage.md#caller-facing-identifiers-for-sources-without-one)), never the original file path — the path isn't segment-safe (it can contain `/`) and isn't a stable identity for content that can change on disk.
+
 `research://arxiv/categories` is different in kind: it has no corresponding tool call and nothing to persist to `StorageBackend` — it's a direct, response-cache-backed read of arXiv's category taxonomy (see [Architecture → Caching and rate limiting](01-architecture.md#caching-and-rate-limiting)), included as a resource rather than a tool because it's reference data to read, not an action with inputs to invoke.
 
-Per-item metadata (title, authors, abstract, ...) is still **not** exposed as a resource: it's only ever response-cached (TTL-bound via `ResponseCachingMiddleware`), never written to `StorageBackend`, so there's no stable "it's just there" location for it the way there is for full text and Markdown — a metadata resource would be indistinguishable from just calling the tool again. `research://arxiv/categories` doesn't run into this problem because it isn't per-item metadata; it's a single, provider-wide taxonomy lookup.
+Per-item metadata (title, authors, abstract, ...) is still **not** exposed as a resource: it's only ever response-cached (TTL-bound via `ResponseCachingMiddleware`), never written to `StorageBackend`, so there's no stable "it's just there" location for it the way there is for full text and Markdown — a metadata resource would be indistinguishable from just calling the tool again. `research://arxiv/categories` doesn't run into this problem because it isn't per-item metadata; it's a single, provider-wide taxonomy lookup. The local filesystem source has no metadata resource at all, for the same reason it has no `fetch_metadata` tool (see [Local filesystem tools](#local-filesystem-tools)) — there's no authoritative metadata to expose in the first place.

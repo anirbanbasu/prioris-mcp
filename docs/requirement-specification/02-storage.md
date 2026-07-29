@@ -17,8 +17,12 @@ icon: lucide/hard-drive
 | `exists` | Whether a given item, in a given format, has already been persisted. |
 | `write` | Persist content for a given item/format; returns a location/reference. |
 | `read` | Retrieve previously persisted content for a given item/format. |
+| `list` | Enumerate persisted manifest entries, optionally filtered by provider/format. |
+| `delete` | Remove a persisted item/format (and its manifest entry) if present. |
 
 `fetch_full_text` checks `exists` before performing a network fetch, and can return the already-persisted copy instead of downloading again. This is the mechanism that avoids redundant downloads for full text — it lives in the storage abstraction itself, not in the server's generic response-caching middleware, which is a poor fit for potentially large binary documents.
+
+`list` and `delete` back the grouping-level `research_list_fetched`/`research_delete_fetched` MCP tools (see [Architecture → `list_fetched`/`delete_fetched`](01-architecture.md#list_fetched-delete_fetched-grouping-level)) — a caller-driven way to enumerate or remove specific entries (e.g. correcting a mistakenly-fetched wrong identifier), distinct from the deferred, disk-pressure-driven [retention/eviction](#future-retention-and-redistribution-aware-persistence) policy below. Both operate on whichever manifest entries already exist, for any provider, without touching content that isn't already persisted.
 
 `parse_full_text` follows the same pattern one level up: it checks `exists` for the *parsed* Markdown first and returns it if present; only if that's missing does it check `exists` for the source full text, parse it (CPU-heavy), `write` the Markdown, and return it. It never triggers a `fetch_full_text` itself (see [Architecture](01-architecture.md)) — if the source full text isn't there either, it fails with a "not found" error.
 
@@ -49,6 +53,30 @@ A pinned identifier is a safe, permanent storage key on its own — its content 
 - Resolving "what's current" is a light, metadata-level check, done on every unversioned request regardless of whether anything changed; that per-call cost is the accepted price of never silently serving stale full text, and it's far cheaper than the full-text download it protects against re-serving incorrectly.
 
 Content hashing of the downloaded bytes is a separate concern — useful as an optional integrity check (e.g. detecting a truncated download) — but it does not substitute for version resolution, since it can only detect a change after paying for the download it was meant to avoid.
+
+### Content-hash canonicalisation for the local filesystem source
+
+The [local filesystem source](01-architecture.md#local-filesystem-source) has no equivalent of `resolve_identifier`, because it has no external authority asserting what "the current version" of a given disk path is — unlike arXiv, where an unversioned identifier's mutability is a known, bounded fact (it always means "whatever arXiv currently says is latest"), a local file's mutability is unbounded and unannounced: it can be edited or replaced at any time with nothing to notify PriorisMCP.
+
+Content hashing, dismissed above as insufficient *on its own* for network sources (it can only detect staleness after paying for the download), is exactly sufficient here, because reading a local file to hash it is not the expensive operation being protected against — copying it into storage is. Every `fetch_full_text` call for this source reads the file's current bytes and computes their SHA-256 hash unconditionally, then uses `(provider="localfile", content_hash, format="pdf")` as the storage key: this *is* the canonicalisation step, taking the place `resolve_identifier` fills for arXiv, just performed inline by the local filesystem source's `fetch_full_text` rather than exposed as a separate capability. If the hash already exists in storage, `write` is skipped (a no-op re-fetch); if the file's content has changed since any previous fetch, this produces a new hash and therefore a new, independent storage entry, leaving whatever entry an earlier fetch produced untouched and still validly readable — the same guarantee a pinned arXiv version already provides, arrived at by hashing actual content instead of trusting an external version number.
+
+### Caller-facing identifiers for sources without one
+
+Storage keys are hashed specifically so they're safe to use as a path segment (see [Storage keys are hashed](#storage-keys-are-hashed-not-built-from-the-raw-identifier) above) — but a content hash, while segment-safe, is not something a caller can usefully reuse in conversation, and the local filesystem source's caller-supplied *path* is not segment-safe in the first place (a relative path like `papers/foo.pdf` contains `/`, which is ambiguous inside the `research://{provider}/{identifier}/{format}/...` resource template — the same class of problem `/`-containing DOIs already motivated hashing to avoid, just at the public-identifier layer rather than the internal storage-key layer).
+
+The local filesystem source therefore assigns a third, distinct value — a **caller-facing identifier** — at `fetch_full_text` time: a minute-resolution timestamp plus a short random suffix (e.g. `20260729-1430-a3f2`), segment-safe and legible enough for a caller to recognise in a conversation transcript, without needing either the original path or the content hash to refer back to it. This is what `fetch_full_text` returns to the caller, what appears in the resource URI, and what `parse_full_text` subsequently takes as its input — not the path (which the caller may no longer have to hand, and which is only ever an input to `fetch_full_text`) and not the content hash (which is an internal storage-key implementation detail, never surfaced).
+
+This gives three distinct values, each with one job, for the local filesystem source specifically:
+
+| Value | Role | Where it's used |
+|---|---|---|
+| Path | What the caller supplies | Input to `fetch_full_text` only |
+| Content hash | Internal storage key | Never surfaced to the caller |
+| Caller-facing ID | Public identifier | Returned by `fetch_full_text`; input to `parse_full_text`; appears in resource URIs; looked up via the manifest (see below) |
+
+A manifest entry (see [Storage keys are hashed](#storage-keys-are-hashed-not-built-from-the-raw-identifier) above) maps each caller-facing ID to its content hash and format, so `parse_full_text` can resolve an ID back to the right storage entry without needing the original path again. Re-fetching an unchanged file (same hash) reuses its existing caller-facing ID rather than minting a new one, so a caller who already has an ID for that content keeps using the same one; a changed file (new hash) gets a new ID, consistent with [Content-hash canonicalisation](#content-hash-canonicalisation-for-the-local-filesystem-source) above never repointing an existing identifier at different content.
+
+Collision handling for the caller-facing ID needs no shared, persistent counter: on generating an ID, the manifest is checked for that exact value, and a new random suffix is drawn and rechecked in the rare case of a collision — the minute-resolution timestamp already scopes the collision space to whatever falls within the same minute, and a 4-character base-36 suffix (~1.68M values) keeps that risk low even under a burst of concurrent fetches within one minute.
 
 ## v1: local filesystem backend
 

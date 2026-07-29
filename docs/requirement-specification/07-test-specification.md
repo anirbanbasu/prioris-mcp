@@ -12,6 +12,8 @@ Each criterion below is phrased as a "given/must" statement intended to map onto
 
 Tests must not perform live network calls against arXiv or Europe PMC: both to respect the rate limits this spec itself requires the server to honour, and for deterministic, offline CI. HTTP responses at the upstream layer are stubbed to match the exact Atom/JSON shapes confirmed live in [Interface specification](06-interface-specification.md). This is separate from the existing in-process `Client`/`FastMCP` pattern described in `CLAUDE.md`, which covers the MCP protocol layer, not the upstream HTTP calls a tool makes internally.
 
+The local filesystem source has no upstream to stub — its tests instead use real files under a temporary directory configured as `PRIORIS_MCP_LOCAL_FILE_ROOT` (e.g. via `tmp_path`), including a symlink fixture pointing outside that directory for the containment-escape criteria below.
+
 ## arXiv acceptance criteria
 
 | Tool | Criteria |
@@ -37,6 +39,22 @@ Tests must not perform live network calls against arXiv or Europe PMC: both to r
 
 There is no `research_europepmc_list_top_n` to test against — confirm its absence from the registered tool list, matching [Functional requirements](03-functional-requirements.md#europe-pmc-tools).
 
+## Local filesystem acceptance criteria
+
+| Tool | Criteria |
+|---|---|
+| `research_localfile_fetch_full_text` | A path resolving to a valid, within-size-limit PDF under the configured root succeeds, returning a caller-facing `id`, `served_from_storage: false`, and a `resource_uri`. A second call with the same path and unchanged content returns `served_from_storage: true` and the **same** `id` as the first call, without a second `write`. A second call with the same path but changed content (different bytes) returns a **different** `id`, and the first call's `id` remains independently readable afterward. A path that is absolute, or that escapes the root via `..` or a symlink (verified by pointing a symlink inside the root at a file outside it), fails with `invalid_request` — and no file outside the root is ever read, not merely that the error code is correct. A path with nothing at it fails with `not_found`. A file exceeding `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` fails with `file_too_large` before its full content is read into memory. A file that is not actually a PDF (verified via content, not extension — e.g. a `.pdf`-named text file) fails with `invalid_request`. |
+| `research_localfile_parse_full_text` | An already-fetched `id` returns `markdown` and `resource_uri`, using the same PDF parser backend as `research_arxiv_parse_full_text`. An unrecognised or never-fetched `id` fails with `not_found` and must not re-read any path from disk or trigger `fetch_full_text` — assert no filesystem read of the original path occurs beyond the manifest lookup. |
+
+**No rate limiting:** confirm neither tool is routed through a per-provider outbound queue and that no outbound network request occurs for either — per [Architecture → Local filesystem source](01-architecture.md#local-filesystem-source).
+
+## Storage management acceptance criteria
+
+| Tool | Criteria |
+|---|---|
+| `research_list_fetched` | With no filters, returns entries for every persisted `(provider, identifier, format)` across all three sources. A `provider` filter returns only that provider's entries; adding a `format` filter narrows further. Returns `entries: []` when nothing matches, not an error. Never triggers a fetch or parse — assert no outbound network request or filesystem read of source content occurs. |
+| `research_delete_fetched` | A batch naming one or more entries currently in storage removes each (subsequent `research_list_fetched`/`parse_full_text` no longer finds them) and reports them in `deleted`. A batch mixing present and already-absent entries deletes the present ones and reports the rest in `not_found` — the call as a whole must not fail. An all-absent batch returns `deleted: []` and every requested entry in `not_found`. Deleting a `localfile` entry does not touch anything outside the storage abstraction (e.g. the original file the entry was fetched from, if it still exists on disk, is untouched). |
+
 ## `research_resolve_identifier` acceptance criteria
 
 - An arXiv ID input resolves directly to the arXiv provider, with no DOI redirect round-trip.
@@ -51,6 +69,7 @@ There is no `research_europepmc_list_top_n` to test against — confirm its abse
 - `research://{provider}/{identifier}/{format}/markdown` behaves the same way relative to `parse_full_text`.
 - Reading either of the above resources must never itself trigger a fetch or a parse — assert no outbound network request or parse executes as a side effect of a resource read.
 - `research://arxiv/categories` returns only leaf category codes (no archive/group nodes with children of their own), each with its derived `code` and its `name` taken from the OAI-PMH response, sorted by `code`.
+- `research://localfile/{id}/pdf/fulltext` and `research://localfile/{id}/pdf/markdown` behave identically to the arXiv/Europe PMC cases above, keyed on the caller-facing `id` returned by `research_localfile_fetch_full_text` — reading either never re-resolves or re-reads the original file path.
 - No per-item metadata resource template exists — confirm the registered resource list contains exactly `fulltext`, `markdown`, and `research://arxiv/categories`, per [Functional requirements → Resources](03-functional-requirements.md#resources).
 
 ## Cross-cutting: concurrency
@@ -60,13 +79,16 @@ Per [Non-functional requirements](04-non-functional-requirements.md#concurrency)
 - Concurrent calls to the same provider's tools are serialised at the outbound-request level (restates the per-tool rate-limiting criteria above as the one general property they share).
 - Two concurrent `fetch_full_text` calls for the identical `(provider, canonical identifier, format)` key result in exactly one outbound network fetch; the second call waits and receives the same result rather than starting a redundant download.
 - Two concurrent `parse_full_text` calls for the identical `(provider, identifier, format)` key result in exactly one parse execution; the second call waits and receives the same Markdown rather than re-parsing.
+- Two concurrent `research_localfile_fetch_full_text` calls for the same path with unchanged content result in exactly one `write` and both calls returning the same caller-facing `id` — the content-hash check-then-write must not race the same way [Storage must de-duplicate in-flight work](04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work) already requires for network-fetched content.
 
 ## Cross-cutting: security
 
 Per [Security](05-security.md):
 
 - The DOI-allowlist criterion under `research_resolve_identifier` above is the primary test for [Untrusted identifiers must not drive unconstrained outbound requests](05-security.md#untrusted-identifiers-must-not-drive-unconstrained-outbound-requests).
-- `parse_full_text`, given a malformed or pathological document (a corrupt PDF, a deeply nested or oversized HTML/XML document), must fail with a bounded, typed error within a defined time/resource budget rather than hang or crash the process. This page does not pin down the exact budget (timeout, max size) — that's an implementation detail — but a test must exist asserting *some* bound is enforced, not merely that valid documents parse correctly.
+- The path-traversal and symlink-escape criteria under `research_localfile_fetch_full_text` above are the primary tests for [Local filesystem access is confined to an operator-configured root](05-security.md#local-filesystem-access-is-confined-to-an-operator-configured-root) — both must assert that no read of the out-of-root target occurs, not merely that the error code is correct.
+- The non-PDF-content and oversized-file criteria under `research_localfile_fetch_full_text` above are the primary tests for the local-file additions to [Fetched content is untrusted input to `parse_full_text`](05-security.md#fetched-content-is-untrusted-input-to-parse_full_text) — content sniffing and the size cap must both be enforced before anything is persisted.
+- `parse_full_text`, given a malformed or pathological document (a corrupt PDF, a deeply nested or oversized HTML/XML document), must fail with a bounded, typed error within a defined time/resource budget rather than hang or crash the process. This page does not pin down the exact budget (timeout, max size) — that's an implementation detail — but a test must exist asserting *some* bound is enforced, not merely that valid documents parse correctly. This applies to a locally-supplied PDF that passes the format sniff but is otherwise pathological (e.g. a valid-looking header wrapping a decompression bomb), not just to network-fetched documents.
 - Per [Security → PriorisMCP's own HTTP ingress surface](05-security.md#priorismcps-own-http-ingress-surface): with no environment override, a `streamable-http`/`http`-transport server must (a) bind to `localhost`, not a wildcard interface, and (b) reject a CORS preflight/request from an arbitrary non-localhost `Origin` — `PRIORIS_MCP_ASGI_CORS_ALLOWED_ORIGINS` must not default to `["*"]`. These are ASGI/HTTP-layer assertions (e.g. via an ASGI test client against `http_app()`), distinct from the in-process MCP `Client`/`FastMCP` pattern used for the tool-level tests above.
 
 ## Test implementation notes

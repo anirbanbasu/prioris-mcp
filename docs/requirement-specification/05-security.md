@@ -14,9 +14,27 @@ v1 targets unauthenticated, open-access providers only (see [SRS overview → Sc
 
 This must be implemented as a strict allowlist on the resulting domain (arxiv.org, europepmc.org/NCBI PMC) checked **before** any further request is made against it, not as "fetch the landing page, then decide what to do with it." A caller-influenced identifier must never be able to cause PriorisMCP to issue a request to an arbitrary host — including internal/private network addresses — as a side effect of resolution. The existing functional requirement (fail closed with "unsupported provider") already produces the right behaviour; this page states the security rationale for why that must hold even if the functional requirement is later relaxed (e.g. to add a new supported provider) — any addition must extend the allowlist deliberately, not open resolution up to whatever a redirect happens to return.
 
+## Local filesystem access is confined to an operator-configured root
+
+The [local filesystem source](01-architecture.md#local-filesystem-source) is the same class of risk as the section above, applied to local disk instead of the network: a caller-supplied path must never be able to make PriorisMCP read a file outside what the operator intended to expose, the same way a caller-supplied identifier must never drive a request to an arbitrary host.
+
+- The server is configured with a root directory (`PRIORIS_MCP_LOCAL_FILE_ROOT`, defaulting to the server process's current working directory if unset — see [Configuration](../02-configuration.md)) that bounds every path `research_localfile_fetch_full_text` will read.
+- A caller supplies a path **relative to that root only** — never an absolute path, and never one containing `..` segments that would climb out of it.
+- The resolved path must be checked for containment **after** resolving symlinks, not before: a symlink inside the root that points outside it (e.g. to `/etc/passwd` or the user's SSH keys) must be rejected, not silently followed. Checking containment against the unresolved path alone would miss exactly this case.
+- A path that fails containment fails with a validation error before any file is opened — the same "fail closed before touching the resource" principle the DOI allowlist above already applies to network requests.
+
+This is a materially larger attack surface than the DOI allowlist above if left unbounded: an MCP client is (per [SRS overview → Scope](index.md#v1)) typically an LLM acting on a user's or an attacker-influenced prompt's instructions, and an unconstrained local-path parameter would let it read any file the server process has permission to read, not just PDFs the operator intended to expose.
+
 ## Fetched content is untrusted input to `parse_full_text`
 
 Full text persisted by `fetch_full_text` originates from external sources and is later fed into `parse_full_text`. Even though v1's providers (arXiv, Europe PMC) are trusted in the sense of being deliberately chosen, documented APIs, the documents they serve are third-party content (uploaded by their own authors/publishers) that PriorisMCP does not control the shape of.
+
+This applies equally to the [local filesystem source](01-architecture.md#local-filesystem-source), even though its content never crosses the network: a file on disk is still content PriorisMCP did not produce and cannot assume the shape of — it could be a genuine PDF, a mislabelled file of some other type, or a deliberately pathological one. `research_localfile_fetch_full_text` must therefore, before persisting anything:
+
+- **Sniff the actual format from content, not the filename.** A `.pdf` extension is a caller's claim, not a guarantee — the file must be validated as a PDF by its content (e.g. its leading magic bytes) before being written to storage, and rejected with a typed error otherwise.
+- **Enforce a maximum file size** before reading the whole file into memory or persisting it — a configurable limit (`PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`, default 10MB, sized to what the PDF parser backend can reasonably process — see [Non-functional requirements → Dependency selection](04-non-functional-requirements.md#dependency-selection)) rather than an unbounded read of whatever the caller's path points at.
+
+Both checks happen before `write`, so a rejected file never reaches storage at all — consistent with `parse_full_text`'s own bounded-failure requirement below, which still applies in full once a local file's content has been persisted and is handed to the same PDF parser backend arXiv's full text already goes through.
 
 `parse_full_text` must treat this content as untrusted input: malformed, unusually large, or pathological documents (e.g. a PDF crafted to be maximally expensive to parse) must fail as a bounded, typed error rather than crash the server process or hang it indefinitely. This is a robustness requirement on the parsing path specifically, distinct from the general error-handling already described for missing content in [Architecture → `parse_full_text`](01-architecture.md#parse_full_text).
 
@@ -29,6 +47,12 @@ A single such call is harmless. But nothing in a per-call bound stops repeated c
 This must be closed by bounding how many JATS transforms are ever *actually executing* at once, independent of how many `parse_full_text` calls have been made or abandoned: a fixed-size gate held for a transform's true lifetime (acquired before the CPU-bound work starts, released only when it actually finishes, in a `finally`), not one tied to the calling task's own cancellation — `anyio`'s `to_thread.run_sync(limiter=...)` looks like it would do this, but its capacity limiter is released as soon as the *caller* is cancelled/abandons, not when the worker thread actually finishes, so it does not bound concurrently-running abandoned threads at all. Calls beyond the cap block waiting for a slot rather than starting a new transform outright, and are themselves still subject to the same per-call bound above — so a caller that can't acquire a slot in time still fails as a clean, typed error rather than queuing indefinitely.
 
 The cap (`PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS` — see [Configuration](../02-configuration.md)) is configurable, but is capped at the host's CPU count regardless of configuration: this is CPU-bound native work, so oversubscribing beyond available cores only makes the worst case worse without any offsetting throughput benefit.
+
+## URL-based fetching is explicitly deferred, not silently assumed
+
+The [local filesystem source](01-architecture.md#local-filesystem-source) was considered for direct URL fetching too — letting a caller hand it a URL already reachable through the user's own out-of-band authentication (e.g. a paywalled paper's direct link, after logging in through a browser) — but this is explicitly **out of scope for v1** (see [SRS overview → Out of scope](index.md#out-of-scope-for-v1)), stated here so it isn't mistaken for an oversight later.
+
+The reason is the same shape of risk [Untrusted identifiers must not drive unconstrained outbound requests](#untrusted-identifiers-must-not-drive-unconstrained-outbound-requests) already closes for `research_resolve_identifier`: a tool that fetches a caller-supplied URL lets an MCP client direct PriorisMCP's own network egress at an arbitrary host, including internal/private network addresses (SSRF), as a side effect of what looks like a content-retrieval request. Unlike the DOI case, no domain allowlist is available here — the entire premise is supporting arbitrary publisher domains the user has their own access to, which is precisely the set of hosts an allowlist would need to exclude to be meaningful. Adding this later would need its own security design (e.g. private-IP-range blocking, redirect re-validation against the same blocklist, scheme restriction to `https`) written and reviewed before the capability exists, not assumed to fall out of the local-file design above.
 
 ## Authenticated sources are explicitly deferred, not silently assumed
 

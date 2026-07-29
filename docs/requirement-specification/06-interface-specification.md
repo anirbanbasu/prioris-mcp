@@ -6,13 +6,15 @@ icon: lucide/plug
 
 This page states the exact wire-level input/output contract for every v1 MCP tool and resource named in [Functional requirements](03-functional-requirements.md), grounded in the arXiv and Europe PMC APIs as they actually behave — verified live against `export.arxiv.org`, `arxiv.org`, and `www.ebi.ac.uk/europepmc` while drafting this page, not recalled from memory. Where a detail depends on upstream API behaviour, the upstream call it derives from is stated alongside it.
 
+The [local filesystem tools](#local-filesystem) and [storage management tools](#storage-management) below have no upstream API to ground against — their exact shape is a PriorisMCP design decision, not something confirmed live against a third party, so they carry no "underlying call" line.
+
 ## Conventions
 
 **Identifiers.** An arXiv identifier is a bare or version-suffixed arXiv ID (`2106.09685` or `2106.09685v2`), or the older, pre-2007 category-prefixed form (`hep-th/9901001` or `hep-th/9901001v1`) — both shapes remain valid arXiv identifiers and both are recognised by `research_resolve_identifier`'s routing. A Europe PMC identifier is the composite `{source}:{id}` form Europe PMC itself uses internally (e.g. `MED:26551875`), with a bare PMCID (`PMC4767193`) also accepted as shorthand since it's unambiguous on its own (implicitly `SRC:PMC`).
 
-**Errors.** Every tool returns a common error envelope on failure: `{"error": "<code>", "message": "<human-readable detail>"}`. Error codes used across this page: `not_found` (identifier not recognised by the provider, or requested format not persisted — see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text)), `format_unavailable` (identifier is valid but doesn't offer the requested format — e.g. an older arXiv paper with no native HTML rendering), `unsupported_provider` (see [Architecture → Identifier routing](01-architecture.md#identifier-routing-grouping-level)), `invalid_request` (caller-supplied arguments fail a tool's own validation before any outbound call — e.g. `research_arxiv_search`'s `max_results`/cumulative bounds below, or an unsupported `format` passed to `research_resolve_identifier`), `rate_limited` (the provider's outbound queue exhausted its bounded backoff after repeated 429s from the source — see [Non-functional requirements → Rate-limit breaches](04-non-functional-requirements.md#rate-limit-breaches-are-handled-inside-the-providers-queue-not-by-the-caller); any tool calling out to arXiv or Europe PMC can surface this, not just one specific tool), `provider_unavailable` (a timeout, connection failure, or 5xx from the source — surfaced immediately, with no retry, unlike `rate_limited` — see [Non-functional requirements → `provider_unavailable` failures are not retried](04-non-functional-requirements.md#provider_unavailable-failures-are-not-retried)).
+**Errors.** Every tool returns a common error envelope on failure: `{"error": "<code>", "message": "<human-readable detail>"}`. Error codes used across this page: `not_found` (identifier not recognised by the provider, requested format not persisted, or — for `research_localfile_fetch_full_text` — no file exists at the given path — see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text)), `format_unavailable` (identifier is valid but doesn't offer the requested format — e.g. an older arXiv paper with no native HTML rendering), `unsupported_provider` (see [Architecture → Identifier routing](01-architecture.md#identifier-routing-grouping-level)), `invalid_request` (caller-supplied arguments fail a tool's own validation before any outbound call or filesystem write — e.g. `research_arxiv_search`'s `max_results`/cumulative bounds below, an unsupported `format` passed to `research_resolve_identifier`, or a `research_localfile_fetch_full_text` path that escapes the configured root or doesn't sniff as a PDF), `file_too_large` (`research_localfile_fetch_full_text`'s path resolves to a file exceeding `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`), `rate_limited` (the provider's outbound queue exhausted its bounded backoff after repeated 429s from the source — see [Non-functional requirements → Rate-limit breaches](04-non-functional-requirements.md#rate-limit-breaches-are-handled-inside-the-providers-queue-not-by-the-caller); any tool calling out to arXiv or Europe PMC can surface this, not just one specific tool), `provider_unavailable` (a timeout, connection failure, or 5xx from the source — surfaced immediately, with no retry, unlike `rate_limited` — see [Non-functional requirements → `provider_unavailable` failures are not retried](04-non-functional-requirements.md#provider_unavailable-failures-are-not-retried)).
 
-**Resource URIs.** Both `fetch_full_text` and `parse_full_text` return the resource URI templates from [Functional requirements → Resources](03-functional-requirements.md#resources), instantiated for that call, e.g. `research://arxiv/2106.09685v2/pdf/fulltext` or `research://europepmc/MED:26551875/xml/markdown`.
+**Resource URIs.** Both `fetch_full_text` and `parse_full_text` return the resource URI templates from [Functional requirements → Resources](03-functional-requirements.md#resources), instantiated for that call, e.g. `research://arxiv/2106.09685v2/pdf/fulltext`, `research://europepmc/MED:26551875/xml/markdown`, or `research://localfile/20260729-1430-a3f2/pdf/fulltext`.
 
 **Pagination.** `parse_full_text` and the `.../markdown` resource template both accept `offset`/`limit` (integers, optional) and return one bounded page of Markdown rather than the whole string — see [Non-functional requirements → Inline text is paginated, not returned whole](04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole). Every `parse_full_text` output below includes `offset`, `limit`, `total_length`, and `has_more` alongside `markdown`, even though the per-tool sections list only `markdown`/`resource_uri` for brevity.
 
@@ -158,6 +160,52 @@ Taken from a `resultType=core` search/lookup response:
 ### Rate limiting
 
 Europe PMC publishes no numeric rate limit; per [Functional requirements → Europe PMC tools](03-functional-requirements.md#europe-pmc-tools), it self-imposes arXiv's same 1-request-per-3-seconds policy through the same serialised queue described in [Non-functional requirements](04-non-functional-requirements.md), including the same adaptive-backoff-then-`rate_limited` behaviour on a 429, and the same immediate, un-retried `provider_unavailable` on a timeout, connection failure, or 5xx.
+
+## Local filesystem
+
+**Conventions.** The identifier for this source is the server-assigned **caller-facing identifier** (see [Storage → Caller-facing identifiers](02-storage.md#caller-facing-identifiers-for-sources-without-one)), format `YYYYMMDD-HHmm-XXXX` (minute-resolution timestamp, `-`, 4-character lowercase base-36 random suffix — e.g. `20260729-1430-a3f2`), never the original file path — `research_localfile_fetch_full_text` is the only tool that takes a path.
+
+### `research_localfile_fetch_full_text`
+
+**Input:** `path` (string, required — relative to `PRIORIS_MCP_LOCAL_FILE_ROOT`; must not be absolute and must not contain a `..` segment that would escape the root once symlinks are resolved).
+
+**Behaviour:**
+
+1. Resolve `path` against the configured root, resolving symlinks, and verify the result stays within the root — fails with `invalid_request` (no filesystem read beyond a `stat` to resolve the path) otherwise, per [Security → Local filesystem access](05-security.md#local-filesystem-access-is-confined-to-an-operator-configured-root).
+2. If nothing exists at the resolved path, fail with `not_found`.
+3. Check the file's size (a `stat`, not a read). If it exceeds `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` (default 10MB — see [Configuration](../02-configuration.md)), fail with `file_too_large` without reading any of its bytes.
+4. Sniff the content to confirm it is a PDF (e.g. the `%PDF-` magic prefix); fail with `invalid_request` if it is not, regardless of the path's extension.
+5. Compute the SHA-256 hash of the bytes. Check whether `(provider="localfile", content_hash, format="pdf")` already exists in storage (see [Storage → Content-hash canonicalisation](02-storage.md#content-hash-canonicalisation-for-the-local-filesystem-source)):
+      - If it exists, reuse the caller-facing identifier already on record for that hash; skip the `write`.
+      - If not, mint a new caller-facing identifier (retrying on the rare manifest collision — see [Storage → Caller-facing identifiers](02-storage.md#caller-facing-identifiers-for-sources-without-one)), `write` the content, and record the manifest entry (caller-facing ID, content hash, format, original path, fetch timestamp, size).
+
+**Output:** `{"id": <caller-facing identifier>, "location": <reference>, "format": "pdf", "size_bytes": <int>, "served_from_storage": <bool>, "resource_uri": "research://localfile/{id}/pdf/fulltext"}`.
+
+### `research_localfile_parse_full_text`
+
+**Input:** `id` (string, required — the caller-facing identifier returned by `research_localfile_fetch_full_text`), `offset` (integer, optional, default 0), `limit` (integer, optional, default `PRIORIS_MCP_MAX_INLINE_CHARS`).
+
+**Output:** `{"markdown": <string>, "offset": <int>, "limit": <int>, "total_length": <int>, "has_more": <bool>, "resource_uri": "research://localfile/{id}/pdf/markdown"}`, or `not_found` if `id` isn't in the manifest (see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text) — never triggers a fetch, and never re-reads the original path).
+
+### Rate limiting
+
+Not applicable — see [Architecture → Local filesystem source](01-architecture.md#local-filesystem-source). Neither tool goes through a per-provider outbound queue.
+
+## Storage management
+
+### `research_list_fetched`
+
+**Input:** `provider` (`"arxiv"` \| `"europepmc"` \| `"localfile"`, optional — omitting it lists all providers), `format` (string, optional — further filters within the selected provider(s)).
+
+**Output:** `{"entries": [{"provider": <string>, "identifier": <string>, "format": <string>, "fetched_at": <ISO 8601 string>, "size_bytes": <int>}, ...]}`.
+
+### `research_delete_fetched`
+
+**Input:** `entries` (list of `{"provider": <string>, "identifier": <string>, "format": <string>}`, required, one or more).
+
+**Behaviour:** removes each matching persisted entry (both the content and its manifest record) from `StorageBackend`. An entry naming a `(provider, identifier, format)` combination not currently in storage is reported in `not_found`, not treated as a failure of the whole call — the same partial-failure tolerance `research_arxiv_fetch_metadata`/`research_europepmc_fetch_metadata` already have for unrecognised identifiers.
+
+**Output:** `{"deleted": [<entry>, ...], "not_found": [<entry>, ...]}`, using the same entry shape as the input.
 
 ## `research_resolve_identifier`
 
