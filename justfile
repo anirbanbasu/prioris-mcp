@@ -48,6 +48,14 @@ type-check:
     @echo "Type checking complete."
 
 export PRIORIS_MCP_TRANSPORT := "streamable-http"
+# Set CORS allowed origins for the ASGI application to the MCP Inspector's default host and port
+export PRIORIS_MCP_ASGI_CORS_ALLOWED_ORIGINS := "http://localhost:6274"
+
+# Run the prioris-mcp application with the specified transport
+run-streamable-http:
+    @echo "Running prioris-mcp with $PRIORIS_MCP_TRANSPORT transport..."
+    @uv run prioris-mcp
+    @echo "prioris-mcp shut down."
 
 # Run tests with coverage reporting
 test-coverage:
