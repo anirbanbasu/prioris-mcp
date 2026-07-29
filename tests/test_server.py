@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import ssl
+from pathlib import Path
 
 import httpx
 import pytest
@@ -673,3 +674,163 @@ class TestEuropePmcTools:
         assert result.structured_content["offset"] == 0
         assert result.structured_content["limit"] == 5
         assert result.structured_content["has_more"] is True
+
+
+class TestLocalFileTools:
+    """End-to-end MCP tool tests for the local filesystem provider - no HTTP stubbing needed."""
+
+    # A structurally valid minimal PDF, not just a "%PDF-" magic-prefix stub: unlike the other
+    # tests in this module (which only need to survive fetch_full_text's magic-byte sniff),
+    # test_fetch_then_parse_then_read_resources below also calls research_localfile_parse_full_text,
+    # which feeds the content to the real, unmocked liteparse backend - see the identical fixture
+    # and comment in tests/test_providers_localfile.py.
+    _PDF_BYTES = b"""%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 44 >>
+stream
+BT /F1 24 Tf 20 100 Td (Hello World) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+0
+%%EOF"""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        root_dir = tmp_path / "root"
+        root_dir.mkdir()
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_LOCAL_FILE_ROOT", root_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60), root_dir
+
+    def test_fetch_then_parse_then_read_resources(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client, root_dir = self._server_and_client(tmp_path, monkeypatch)
+        (root_dir / "paper.pdf").write_bytes(self._PDF_BYTES)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text", arguments={"path": "paper.pdf"}
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                fulltext_resource = await client.read_resource(f"research://localfile/{caller_facing_id}/pdf/fulltext")
+                parse_result = await client.call_tool(
+                    "research_localfile_parse_full_text", arguments={"id": caller_facing_id}
+                )
+                markdown_resource = await client.read_resource(f"research://localfile/{caller_facing_id}/pdf/markdown")
+                return fetch_result, fulltext_resource, parse_result, markdown_resource
+
+        fetch_result, fulltext_resource, parse_result, markdown_resource = asyncio.run(scenario())
+        assert fetch_result.structured_content["served_from_storage"] is False
+        assert fulltext_resource[0].blob or fulltext_resource[0].text
+        assert "markdown" in parse_result.structured_content
+        assert markdown_resource[0].text is not None
+
+    def test_path_escaping_root_fails_invalid_request(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client, _root_dir = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_localfile_fetch_full_text", arguments={"path": "../outside.pdf"}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["error"] == "invalid_request"
+
+
+class TestStorageManagementTools:
+    """End-to-end MCP tool tests for research_list_fetched/research_delete_fetched."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        root_dir = tmp_path / "root"
+        root_dir.mkdir()
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_LOCAL_FILE_ROOT", root_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60), root_dir
+
+    def test_list_fetched_returns_entries_after_a_fetch(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client, root_dir = self._server_and_client(tmp_path, monkeypatch)
+        (root_dir / "paper.pdf").write_bytes(b"%PDF-1.4 fake content")
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_localfile_fetch_full_text", arguments={"path": "paper.pdf"})
+                return await client.call_tool("research_list_fetched", arguments={})
+
+        result = asyncio.run(scenario())
+        entries = result.structured_content["entries"]
+        assert len(entries) == 1
+        assert entries[0]["provider"] == "localfile"
+        assert entries[0]["format"] == "pdf"
+
+    def test_list_fetched_with_no_matches_returns_empty_list(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client, _ = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_list_fetched", arguments={"provider": "arxiv"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["entries"] == []
+
+    def test_delete_fetched_removes_entry_and_reports_it(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client, root_dir = self._server_and_client(tmp_path, monkeypatch)
+        (root_dir / "paper.pdf").write_bytes(b"%PDF-1.4 fake content")
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text", arguments={"path": "paper.pdf"}
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                delete_result = await client.call_tool(
+                    "research_delete_fetched",
+                    arguments={"entries": [{"provider": "localfile", "identifier": caller_facing_id, "format": "pdf"}]},
+                )
+                list_after = await client.call_tool("research_list_fetched", arguments={})
+                return delete_result, list_after
+
+        delete_result, list_after = asyncio.run(scenario())
+        assert len(delete_result.structured_content["deleted"]) == 1
+        assert delete_result.structured_content["not_found"] == []
+        assert list_after.structured_content["entries"] == []
+
+    def test_delete_fetched_reports_not_found_without_failing_whole_call(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client, _ = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_delete_fetched",
+                    arguments={"entries": [{"provider": "arxiv", "identifier": "does-not-exist", "format": "pdf"}]},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["deleted"] == []
+        assert len(result.structured_content["not_found"]) == 1

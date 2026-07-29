@@ -30,6 +30,7 @@ from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
 from prioris_mcp.providers.arxiv import ARXIV_BASE_SPACING_SECONDS, ArxivProvider
 from prioris_mcp.providers.europepmc import EUROPEPMC_BASE_SPACING_SECONDS, EuropePmcProvider
 from prioris_mcp.providers.identifier_routing import resolve_research_identifier
+from prioris_mcp.providers.localfile import LocalFileProvider
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
 
@@ -75,6 +76,22 @@ class PriorisMCP(MCPMixin):
             "annotations": {"readOnlyHint": True},
         },
         {"fn": "research_resolve_identifier", "tags": ["research"], "annotations": {"readOnlyHint": True}},
+        {
+            "fn": "research_localfile_fetch_full_text",
+            "tags": ["research", "localfile"],
+            "annotations": {"readOnlyHint": True},
+        },
+        {
+            "fn": "research_localfile_parse_full_text",
+            "tags": ["research", "localfile"],
+            "annotations": {"readOnlyHint": True},
+        },
+        {"fn": "research_list_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
+        {
+            "fn": "research_delete_fetched",
+            "tags": ["research", "storage"],
+            "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        },
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -119,6 +136,13 @@ class PriorisMCP(MCPMixin):
             queue=europepmc_queue,
             http_client=self._http_client,
             xml_backend=jats_backend,
+            default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
+        )
+        self._localfile_provider = LocalFileProvider(
+            storage=self._storage,
+            pdf_backend=pdf_backend,
+            root_dir=EnvVars.PRIORIS_MCP_LOCAL_FILE_ROOT,
+            max_size_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
         )
 
@@ -253,9 +277,79 @@ class PriorisMCP(MCPMixin):
             )
         )
 
+    async def research_localfile_fetch_full_text(
+        self,
+        ctx: Context,
+        path: Annotated[
+            str, Field(description="File path relative to PRIORIS_MCP_LOCAL_FILE_ROOT; must not escape it")
+        ],
+    ) -> dict:
+        """Read, validate, and persist a local PDF, returning a server-assigned caller-facing ID."""
+        return await call_returning_envelope(self._localfile_provider.fetch_full_text(path))
+
+    async def research_localfile_parse_full_text(
+        self,
+        ctx: Context,
+        id: Annotated[
+            str, Field(description="The caller-facing identifier returned by research_localfile_fetch_full_text")
+        ],
+        offset: Annotated[int, Field(default=0, description="Zero-based character offset into the Markdown")] = 0,
+        limit: Annotated[
+            int | None,
+            Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
+        ] = None,
+    ) -> dict:
+        """Convert an already-fetched local PDF's full text into one page of Markdown."""
+        return await call_returning_envelope(self._localfile_provider.parse_full_text(id, offset=offset, limit=limit))
+
+    async def research_list_fetched(
+        self,
+        ctx: Context,
+        provider: Annotated[
+            Literal["arxiv", "europepmc", "localfile"] | None,
+            Field(default=None, description="Restrict to one provider; omit to list all providers"),
+        ] = None,
+        format: Annotated[str | None, Field(default=None, description="Further restrict to one format")] = None,
+    ) -> dict:
+        """Enumerate persisted (provider, identifier, format) manifest entries; never triggers a fetch."""
+        entries = await self._storage.list(provider, format)
+        return {"entries": entries}
+
+    async def research_delete_fetched(
+        self,
+        ctx: Context,
+        entries: Annotated[
+            list[dict[str, str]],
+            Field(description="One or more {provider, identifier, format} entries to remove"),
+        ],
+    ) -> dict:
+        """Remove one or more persisted entries, tolerating entries no longer present."""
+        deleted: list[dict[str, str]] = []
+        not_found: list[dict[str, str]] = []
+        for entry in entries:
+            removed = await self._storage.delete(entry["provider"], entry["identifier"], entry["format"])
+            (deleted if removed else not_found).append(entry)
+        return {"deleted": deleted, "not_found": not_found}
+
+    async def _resolve_storage_identifier(self, provider: str, identifier: str, format: str) -> str:
+        """Translate a caller-facing identifier into its storage-key identifier.
+
+        Only the local filesystem source's caller-facing ID differs from its storage key (a
+        content hash) - see
+        docs/requirement-specification/02-storage.md#caller-facing-identifiers-for-sources-without-one;
+        every other provider's identifier already *is* its storage key.
+        """
+        if provider != "localfile":
+            return identifier
+        canonical = await self._storage.find_canonical_identifier("localfile", identifier, format)
+        if canonical is None:
+            raise FileNotFoundError(identifier)
+        return canonical
+
     async def read_fulltext_resource(self, provider: str, identifier: str, format: str) -> bytes:
         """Read persisted full text for (provider, identifier, format); a plain not-found if absent."""
-        return await self._storage.read(provider, identifier, format)
+        storage_identifier = await self._resolve_storage_identifier(provider, identifier, format)
+        return await self._storage.read(provider, storage_identifier, format)
 
     async def read_markdown_resource(
         self, provider: str, identifier: str, format: str, offset: int = 0, limit: int | None = None
@@ -266,7 +360,8 @@ class PriorisMCP(MCPMixin):
         docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole
         - `limit` defaults to `PRIORIS_MCP_MAX_INLINE_CHARS` when unset.
         """
-        markdown_bytes = await self._storage.read(provider, identifier, f"{format}-markdown")
+        storage_identifier = await self._resolve_storage_identifier(provider, identifier, format)
+        markdown_bytes = await self._storage.read(provider, storage_identifier, f"{format}-markdown")
         page = paginate_text(
             markdown_bytes.decode("utf-8"), offset, limit if limit is not None else EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS
         )
@@ -309,6 +404,11 @@ def app() -> FastMCP:  # pragma: no cover
                 enabled=EnvVars.PRIORIS_MCP_RESPONSE_CACHE_TTL > 0,
             ),
             call_tool_settings=CallToolSettings(
+                # research_localfile_* and research_list_fetched/research_delete_fetched are
+                # deliberately excluded: the local file source re-hashes file content on every
+                # call by design (a file can change on disk without notice - see
+                # docs/requirement-specification/01-architecture.md#local-filesystem-source), and
+                # list/delete must reflect live storage state, not a cached snapshot.
                 included_tools=[
                     "research_arxiv_search",
                     "research_arxiv_list_top_n",
