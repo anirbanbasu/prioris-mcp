@@ -24,10 +24,20 @@ class _StubProvider(ResearchPublicationProvider):
         return {"markdown": "", "resource_uri": "x"}
 
 
+class _PartialCapabilityProvider(ResearchPublicationProvider):
+    """A source implementing only fetch_full_text/parse_full_text - the local filesystem shape."""
+
+    async def fetch_full_text(self, identifier: str, format: str) -> dict:
+        return {"location": "x", "format": format, "size_bytes": 0, "served_from_storage": False}
+
+    async def parse_full_text(self, identifier: str, format: str, offset: int = 0, limit: int | None = None) -> dict:
+        return {"markdown": "", "resource_uri": "x"}
+
+
 class TestResearchPublicationProvider:
     """Shared ABC every research-publication provider implements."""
 
-    def test_cannot_instantiate_without_implementing_abstract_methods(self):
+    def test_cannot_instantiate_without_implementing_required_capabilities(self):
         with pytest.raises(TypeError):
             ResearchPublicationProvider()  # type: ignore[abstract]
 
@@ -50,5 +60,24 @@ class TestResearchPublicationProvider:
             assert fetched["format"] == "pdf"
             parsed = await provider.parse_full_text("a", "pdf")
             assert parsed == {"markdown": "", "resource_uri": "x"}
+
+        asyncio.run(scenario())
+
+    def test_partial_capability_provider_can_be_instantiated(self):
+        """A source like the local filesystem one only implements fetch_full_text/parse_full_text."""
+        provider = _PartialCapabilityProvider()
+        assert isinstance(provider, ResearchPublicationProvider)
+
+    def test_partial_capability_provider_defaults_raise_capability_not_supported(self):
+        async def scenario():
+            provider = _PartialCapabilityProvider()
+            for coro in (
+                provider.search("q"),
+                provider.fetch_metadata(["a"]),
+                provider.resolve_identifier("a", "pdf"),
+                provider.list_top_n(["cs.CL"], 5),
+            ):
+                with pytest.raises(CapabilityNotSupportedError):
+                    await coro
 
         asyncio.run(scenario())
