@@ -12,7 +12,8 @@ class _InMemoryStorageBackend(StorageBackend):
     """Minimal concrete backend for exercising StorageBackend.get_or_create in isolation.
 
     Isolated from any filesystem behaviour (that's tested separately against
-    FilesystemStorageBackend).
+    FilesystemStorageBackend). `list`/`delete`/`read_manifest`/`find_canonical_identifier` are
+    not exercised by these tests, so they're implemented minimally rather than fully.
     """
 
     def __init__(self) -> None:
@@ -23,7 +24,14 @@ class _InMemoryStorageBackend(StorageBackend):
         return self._storage_key(provider, identifier, format) in self._data
 
     async def write(
-        self, provider: str, identifier: str, format: str, content: bytes, *, original_identifier: str | None = None
+        self,
+        provider: str,
+        identifier: str,
+        format: str,
+        content: bytes,
+        *,
+        original_identifier: str | None = None,
+        public_identifier: str | None = None,
     ) -> str:
         key = self._storage_key(provider, identifier, format)
         self._data[key] = content
@@ -31,6 +39,18 @@ class _InMemoryStorageBackend(StorageBackend):
 
     async def read(self, provider: str, identifier: str, format: str) -> bytes:
         return self._data[self._storage_key(provider, identifier, format)]
+
+    async def list(self, provider: str | None = None, format: str | None = None) -> list[dict]:
+        return []
+
+    async def delete(self, provider: str, identifier: str, format: str) -> bool:
+        return False
+
+    async def read_manifest(self, provider: str, identifier: str, format: str) -> dict | None:
+        return None
+
+    async def find_canonical_identifier(self, provider: str, public_identifier: str, format: str) -> str | None:
+        return None
 
 
 class TestKeyedAsyncLockManager:
@@ -205,7 +225,9 @@ class TestFilesystemStorageBackend:
             "provider": "arxiv",
             "canonical_identifier": "2601.05525v2",
             "original_identifier": "2601.05525",
+            "public_identifier": None,
             "format": "pdf",
+            "size_bytes": len(b"content"),
             "fetched_at": manifest["fetched_at"],  # asserted separately below
         }
         # fetched_at must be a real, parseable ISO-8601 UTC timestamp
@@ -219,6 +241,16 @@ class TestFilesystemStorageBackend:
         key = FilesystemStorageBackend._storage_key("arxiv", "2601.05525v2", "pdf")
         manifest = json.loads((tmp_path / f"{key}.json").read_text())
         assert manifest["original_identifier"] is None
+        assert manifest["public_identifier"] is None
+
+    def test_write_with_public_identifier_stores_it(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(
+            backend.write("localfile", "content-hash-abc", "pdf", b"content", public_identifier="20260729-1430-a3f2")
+        )
+        key = FilesystemStorageBackend._storage_key("localfile", "content-hash-abc", "pdf")
+        manifest = json.loads((tmp_path / f"{key}.json").read_text())
+        assert manifest["public_identifier"] == "20260729-1430-a3f2"
 
     def test_read_missing_content_raises_file_not_found(self, tmp_path: Path):
         backend = FilesystemStorageBackend(tmp_path)
@@ -240,6 +272,81 @@ class TestFilesystemStorageBackend:
         backend = FilesystemStorageBackend()
         assert backend._base_dir == tmp_path / "from-env"
         assert (tmp_path / "from-env").is_dir()
+
+    def test_list_returns_all_entries_with_no_filters(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("arxiv", "2601.05525v2", "pdf", b"aaa"))
+        asyncio.run(backend.write("europepmc", "PMC123", "xml", b"bb"))
+        entries = asyncio.run(backend.list())
+        assert {(e["provider"], e["identifier"], e["format"], e["size_bytes"]) for e in entries} == {
+            ("arxiv", "2601.05525v2", "pdf", 3),
+            ("europepmc", "PMC123", "xml", 2),
+        }
+
+    def test_list_filters_by_provider(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("arxiv", "2601.05525v2", "pdf", b"a"))
+        asyncio.run(backend.write("europepmc", "PMC123", "xml", b"b"))
+        entries = asyncio.run(backend.list(provider="arxiv"))
+        assert [e["identifier"] for e in entries] == ["2601.05525v2"]
+
+    def test_list_filters_by_provider_and_format(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("arxiv", "2601.05525v2", "pdf", b"a"))
+        asyncio.run(backend.write("arxiv", "2601.05525v2", "html", b"b"))
+        entries = asyncio.run(backend.list(provider="arxiv", format="html"))
+        assert [e["format"] for e in entries] == ["html"]
+
+    def test_list_reports_public_identifier_when_set(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("localfile", "content-hash-abc", "pdf", b"a", public_identifier="20260729-1430-a3f2"))
+        entries = asyncio.run(backend.list(provider="localfile"))
+        assert entries[0]["identifier"] == "20260729-1430-a3f2"
+
+    def test_list_returns_empty_when_nothing_matches(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        assert asyncio.run(backend.list(provider="arxiv")) == []
+
+    def test_delete_removes_content_and_manifest_and_returns_true(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("arxiv", "2601.05525v2", "pdf", b"a"))
+        deleted = asyncio.run(backend.delete("arxiv", "2601.05525v2", "pdf"))
+        assert deleted is True
+        assert asyncio.run(backend.exists("arxiv", "2601.05525v2", "pdf")) is False
+        assert list(tmp_path.glob("*.json")) == []
+        assert list(tmp_path.glob("*.data")) == []
+
+    def test_delete_by_public_identifier(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("localfile", "content-hash-abc", "pdf", b"a", public_identifier="20260729-1430-a3f2"))
+        deleted = asyncio.run(backend.delete("localfile", "20260729-1430-a3f2", "pdf"))
+        assert deleted is True
+        assert asyncio.run(backend.exists("localfile", "content-hash-abc", "pdf")) is False
+
+    def test_delete_returns_false_when_nothing_matches(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        assert asyncio.run(backend.delete("arxiv", "does-not-exist", "pdf")) is False
+
+    def test_read_manifest_returns_none_when_absent(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        assert asyncio.run(backend.read_manifest("arxiv", "2601.05525v2", "pdf")) is None
+
+    def test_read_manifest_returns_parsed_manifest(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("localfile", "content-hash-abc", "pdf", b"a", public_identifier="20260729-1430-a3f2"))
+        manifest = asyncio.run(backend.read_manifest("localfile", "content-hash-abc", "pdf"))
+        assert manifest is not None
+        assert manifest["public_identifier"] == "20260729-1430-a3f2"
+
+    def test_find_canonical_identifier_returns_none_when_absent(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        assert asyncio.run(backend.find_canonical_identifier("localfile", "20260729-1430-a3f2", "pdf")) is None
+
+    def test_find_canonical_identifier_resolves_public_id_to_storage_key(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("localfile", "content-hash-abc", "pdf", b"a", public_identifier="20260729-1430-a3f2"))
+        canonical = asyncio.run(backend.find_canonical_identifier("localfile", "20260729-1430-a3f2", "pdf"))
+        assert canonical == "content-hash-abc"
 
     def test_get_or_create_works_end_to_end_against_the_real_filesystem(self, tmp_path: Path):
         backend = FilesystemStorageBackend(tmp_path)

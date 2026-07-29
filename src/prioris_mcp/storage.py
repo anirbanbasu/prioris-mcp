@@ -89,8 +89,16 @@ class StorageBackend(ABC):
         content: bytes,
         *,
         original_identifier: str | None = None,
+        public_identifier: str | None = None,
     ) -> str:
-        """Persist content for (provider, identifier, format); returns a location/reference."""
+        """Persist content for (provider, identifier, format); returns a location/reference.
+
+        `public_identifier` overrides the externally-visible identifier `list`/`delete` report
+        for this entry - defaults to `identifier` itself if unset. Used by sources whose
+        caller-facing identifier differs from the storage-key identifier (currently only the
+        local filesystem source - see
+        docs/requirement-specification/02-storage.md#caller-facing-identifiers-for-sources-without-one).
+        """
 
     @abstractmethod
     async def read(self, provider: str, identifier: str, format: str) -> bytes:
@@ -98,6 +106,48 @@ class StorageBackend(ABC):
 
         Raises:
             FileNotFoundError: if nothing has been persisted for this key.
+        """
+
+    @abstractmethod
+    async def list(self, provider: str | None = None, format: str | None = None) -> list[dict]:
+        """Enumerate persisted manifest entries, optionally filtered by provider/format.
+
+        Each entry is `{"provider", "identifier", "format", "fetched_at", "size_bytes"}` -
+        `identifier` is the externally-visible identifier (the entry's `public_identifier` if it
+        was written with one, else its storage-key identifier).
+        """
+
+    @abstractmethod
+    async def delete(self, provider: str, identifier: str, format: str) -> bool:
+        """Remove a persisted entry (content + manifest) matching (provider, identifier, format).
+
+        `identifier` is matched against the same externally-visible identifier `list` reports,
+        not necessarily the storage-key identifier `exists`/`read`/`write` use - see `list` above.
+
+        Returns:
+            True if a matching entry was found and removed, False otherwise.
+        """
+
+    @abstractmethod
+    async def read_manifest(self, provider: str, identifier: str, format: str) -> dict | None:
+        """Return the raw persisted manifest for (provider, identifier, format), or None if absent.
+
+        `identifier` here is the storage-key identifier (as `exists`/`write`/`read` use it), not
+        necessarily the externally-visible one `list`/`delete` use - see `list` above. Lets a
+        caller (currently only `LocalFileProvider`) check "has this exact content already been
+        persisted" and recover its `public_identifier` without a full `list` scan.
+        """
+
+    @abstractmethod
+    async def find_canonical_identifier(self, provider: str, public_identifier: str, format: str) -> str | None:
+        """Return the storage-key identifier whose recorded `public_identifier` matches.
+
+        Lets a source whose caller-facing identifier differs from its storage key (currently only
+        the local filesystem source, whose caller-facing ID differs from its content-hash storage
+        key - see
+        docs/requirement-specification/02-storage.md#caller-facing-identifiers-for-sources-without-one)
+        resolve a caller-supplied identifier back to the key `exists`/`write`/`read` use.
+        Returns None if no entry has that public identifier for (provider, format).
         """
 
     async def get_or_create(
@@ -108,6 +158,7 @@ class StorageBackend(ABC):
         factory: Callable[[], Awaitable[bytes]],
         *,
         original_identifier: str | None = None,
+        public_identifier: str | None = None,
     ) -> tuple[bytes, bool]:
         """Return persisted content for (provider, identifier, format), producing it via `factory` if absent.
 
@@ -124,7 +175,14 @@ class StorageBackend(ABC):
             if await self.exists(provider, identifier, format):
                 return await self.read(provider, identifier, format), True
             content = await factory()
-            await self.write(provider, identifier, format, content, original_identifier=original_identifier)
+            await self.write(
+                provider,
+                identifier,
+                format,
+                content,
+                original_identifier=original_identifier,
+                public_identifier=public_identifier,
+            )
             return content, False
 
 
@@ -156,6 +214,7 @@ class FilesystemStorageBackend(StorageBackend):
         content: bytes,
         *,
         original_identifier: str | None = None,
+        public_identifier: str | None = None,
     ) -> str:
         data_path = self._data_path(provider, identifier, format)
         manifest_path = self._manifest_path(provider, identifier, format)
@@ -163,7 +222,9 @@ class FilesystemStorageBackend(StorageBackend):
             "provider": provider,
             "canonical_identifier": identifier,
             "original_identifier": original_identifier,
+            "public_identifier": public_identifier,
             "format": format,
+            "size_bytes": len(content),
             "fetched_at": datetime.now(UTC).isoformat(),
         }
         await to_thread.run_sync(self._atomic_write, data_path, content)
@@ -172,6 +233,68 @@ class FilesystemStorageBackend(StorageBackend):
 
     async def read(self, provider: str, identifier: str, format: str) -> bytes:
         return await to_thread.run_sync(self._data_path(provider, identifier, format).read_bytes)
+
+    def _manifest_paths(self) -> list[Path]:
+        return sorted(self._base_dir.glob("*.json"))
+
+    async def list(self, provider: str | None = None, format: str | None = None) -> list[dict]:
+        def _list() -> list[dict]:
+            entries = []
+            for manifest_path in self._manifest_paths():
+                manifest = json.loads(manifest_path.read_text())
+                if provider is not None and manifest["provider"] != provider:
+                    continue
+                if format is not None and manifest["format"] != format:
+                    continue
+                entries.append(
+                    {
+                        "provider": manifest["provider"],
+                        "identifier": manifest.get("public_identifier") or manifest["canonical_identifier"],
+                        "format": manifest["format"],
+                        "fetched_at": manifest["fetched_at"],
+                        "size_bytes": manifest["size_bytes"],
+                    }
+                )
+            return entries
+
+        return await to_thread.run_sync(_list)
+
+    async def delete(self, provider: str, identifier: str, format: str) -> bool:
+        def _delete() -> bool:
+            for manifest_path in self._manifest_paths():
+                manifest = json.loads(manifest_path.read_text())
+                if manifest["provider"] != provider or manifest["format"] != format:
+                    continue
+                public_id = manifest.get("public_identifier") or manifest["canonical_identifier"]
+                if public_id != identifier:
+                    continue
+                manifest_path.with_suffix(".data").unlink(missing_ok=True)
+                manifest_path.unlink(missing_ok=True)
+                return True
+            return False
+
+        return await to_thread.run_sync(_delete)
+
+    async def read_manifest(self, provider: str, identifier: str, format: str) -> dict | None:
+        def _read() -> dict | None:
+            manifest_path = self._manifest_path(provider, identifier, format)
+            if not manifest_path.exists():
+                return None
+            return json.loads(manifest_path.read_text())
+
+        return await to_thread.run_sync(_read)
+
+    async def find_canonical_identifier(self, provider: str, public_identifier: str, format: str) -> str | None:
+        def _find() -> str | None:
+            for manifest_path in self._manifest_paths():
+                manifest = json.loads(manifest_path.read_text())
+                if manifest["provider"] != provider or manifest["format"] != format:
+                    continue
+                if manifest.get("public_identifier") == public_identifier:
+                    return manifest["canonical_identifier"]
+            return None
+
+        return await to_thread.run_sync(_find)
 
     @staticmethod
     def _atomic_write(path: Path, content: bytes) -> None:
