@@ -14,6 +14,7 @@ from urllib.parse import quote
 from anyio import to_thread
 
 from prioris_mcp.errors import FileTooLargeError, InvalidRequestError, NotFoundError
+from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers.base import ResearchPublicationProvider
 from prioris_mcp.storage import KeyedAsyncLockManager, StorageBackend
@@ -136,14 +137,38 @@ class LocalFileProvider(ResearchPublicationProvider):
             if await self._storage.find_canonical_identifier("localfile", candidate, "pdf") is None:
                 return candidate
 
-    # invalid-method-override: see fetch_full_text above for why this source's signature diverges
-    # from base.py's generic one.
-    async def parse_full_text(  # ty: ignore[invalid-method-override]
-        self, path: str, format: str = "pdf", offset: int = 0, limit: int | None = None
+    # No format choice exists for this source (always "pdf") - see providers/europepmc.py's
+    # parse_full_text for the same no-format-parameter shape (also unannotated: giving `format`
+    # a default value here doesn't trigger ty's invalid-method-override check, unlike
+    # fetch_full_text's first-positional-parameter rename above).
+    async def parse_full_text(
+        self, identifier: str, format: str = "pdf", offset: int = 0, limit: int | None = None
     ) -> dict:
         """See docs/requirement-specification/06-interface-specification.md#research_localfile_parse_full_text.
 
-        Not yet implemented - Task 6's job. `fetch_full_text` (this task, Task 4/5) must land
-        first since parsing operates on content `fetch_full_text` has already persisted.
+        Never re-reads the original path and never triggers fetch_full_text - `identifier` is
+        looked up purely via the storage manifest (docs/requirement-specification/01-architecture.md#parse_full_text).
         """
-        raise NotImplementedError
+        content_hash = await self._storage.find_canonical_identifier("localfile", identifier, "pdf")
+        if content_hash is None:
+            raise NotFoundError(f"Local file identifier not recognised: {identifier}")
+
+        async def factory() -> bytes:
+            source_content = await self._storage.read("localfile", content_hash, "pdf")
+            markdown = await self._pdf_backend.to_markdown(source_content)
+            return markdown.encode("utf-8")
+
+        markdown_bytes, _ = await self._storage.get_or_create(
+            "localfile", content_hash, "pdf-markdown", factory, public_identifier=identifier
+        )
+        page = paginate_text(
+            markdown_bytes.decode("utf-8"), offset, limit if limit is not None else self._default_inline_char_limit
+        )
+        return {
+            "markdown": page["content"],
+            "offset": page["offset"],
+            "limit": page["limit"],
+            "total_length": page["total_length"],
+            "has_more": page["has_more"],
+            "resource_uri": f"research://localfile/{quote(identifier, safe='')}/pdf/markdown",
+        }
