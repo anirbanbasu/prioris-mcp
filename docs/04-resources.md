@@ -14,6 +14,8 @@ Alongside its tools, PriorisMCP exposes three read-only MCP resources.
 
 `{provider}` is `arxiv` or `europepmc`; `{identifier}` is the *canonical* identifier (version-pinned for arXiv, `PMC:{pmcid}` for Europe PMC) that the corresponding `fetch_full_text`/`parse_full_text` call resolved to — not necessarily the identifier originally passed to that call; `{format}` is the source format (`pdf`, `html`, `xml`).
 
+For `provider=localfile`, `{identifier}` is the server-assigned caller-facing identifier `research_localfile_fetch_full_text` returned — never the original file path, which isn't segment-safe (it can contain `/`) and isn't a stable identity for content that can change on disk.
+
 The markdown resource's optional `offset`/`limit` query parameters mirror `parse_full_text`'s own pagination (same defaults, same `offset`/`limit`/`total_length`/`has_more` fields in the response) — see [Tools → arXiv tools](03-tools.md#arxiv-tools). A caller can page through previously-parsed content this way without re-invoking the tool.
 
 `research_*_fetch_full_text` and `research_*_parse_full_text` both return the exact `resource_uri` for their result, so a caller doesn't need to construct these URIs by hand.

@@ -18,6 +18,7 @@ Every tool below returns a common envelope on failure: `{"error": "<code>", "mes
 | `invalid_request` | Caller-supplied arguments fail validation before any outbound call (e.g. an arXiv search exceeding arXiv's own result-count bounds, or an unsupported `format` passed to `research_resolve_identifier`). |
 | `rate_limited` | The provider's outbound queue exhausted its backoff budget after repeated `429`s from the source. |
 | `provider_unavailable` | A timeout, connection failure, or `5xx` from the source — surfaced immediately, never retried. |
+| `file_too_large` | `research_localfile_fetch_full_text`'s path resolves to a file exceeding `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`. |
 
 ## arXiv tools
 
@@ -52,8 +53,28 @@ Europe PMC publishes no numeric rate limit; the provider self-imposes the same o
 
 This is the one capability exposed at the grouping level rather than per-provider — see [Architecture → Identifier routing](requirement-specification/01-architecture.md#identifier-routing-grouping-level).
 
+## Local filesystem tools
+
+| Tool | Description | Key inputs | Notes |
+|---|---|---|---|
+| `research_localfile_fetch_full_text` | Read, validate, and persist a local PDF, relative to `PRIORIS_MCP_LOCAL_FILE_ROOT`. | `path` | Rejects an absolute path or one escaping the root (via `..` or a symlink) with `invalid_request`, before any file is opened. Validates content as a PDF by its magic bytes, not its extension. Re-fetching unchanged content reuses the same server-assigned `id`; changed content gets a new one. |
+| `research_localfile_parse_full_text` | Convert an already-fetched local PDF's full text into one page of Markdown. | `id`, `offset` (default 0), `limit` (default `PRIORIS_MCP_MAX_INLINE_CHARS`) | `id` is the caller-facing identifier `research_localfile_fetch_full_text` returned, not the original path. Never re-reads the original path or triggers a fetch — fails with `not_found` if `id` isn't recognised. |
+
+Deliberately narrower than the arXiv/Europe PMC tool sets — no search, listing, metadata, or identifier resolution for this source (see [Architecture → Local filesystem source](requirement-specification/01-architecture.md#local-filesystem-source)). Neither tool is subject to rate limiting — there's no outbound network request to throttle.
+
+## Storage management tools
+
+| Tool | Description | Key inputs | Notes |
+|---|---|---|---|
+| `research_list_fetched` | Enumerate persisted `(provider, identifier, format)` manifest entries. | `provider` (optional), `format` (optional) | Never triggers a fetch or parse. Omitting both filters lists every persisted entry across all three sources. |
+| `research_delete_fetched` | Remove one or more persisted entries. | `entries` (list of `{provider, identifier, format}`) | Tolerates entries no longer present — reports them in `not_found` rather than failing the whole call. Only removes the storage entry itself; never touches a local filesystem source's original file. |
+
+Grouping-level, like `research_resolve_identifier` — not split per provider, since neither tool validates anything provider-specific (see [Architecture → `list_fetched`/`delete_fetched`](requirement-specification/01-architecture.md#list_fetched-delete_fetched-grouping-level)).
+
 ## Caching and rate limiting
 
 `research_*_search`, `research_*_list_top_n`, and `research_*_fetch_metadata` responses are covered by the server's response-caching middleware (`PRIORIS_MCP_RESPONSE_CACHE_TTL`, see [Configuration](02-configuration.md)). `fetch_full_text` and `parse_full_text` are backed by persistent storage instead (see [Resources](04-resources.md)) — a repeat call returns the already-persisted content (`served_from_storage: true`) without a second network fetch or parse.
 
 Response shapes are still evolving alongside the SRS — prefer the [Interface specification](requirement-specification/06-interface-specification.md) as the source of truth for exact wire-level fields.
+
+`research_localfile_fetch_full_text`/`research_localfile_parse_full_text` and `research_list_fetched`/`research_delete_fetched` are excluded from the response cache entirely — the local file source re-hashes file content on every call by design, and list/delete must reflect live storage state.
