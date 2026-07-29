@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from prioris_mcp.errors import (
+    FileTooLargeError,
     FormatUnavailableError,
     InvalidRequestError,
     NotFoundError,
@@ -23,6 +24,7 @@ class TestToErrorEnvelope:
             (FormatUnavailableError("x"), "format_unavailable"),
             (UnsupportedProviderError("x"), "unsupported_provider"),
             (InvalidRequestError("x"), "invalid_request"),
+            (FileTooLargeError("x"), "file_too_large"),
             (RateLimitedError("x"), "rate_limited"),
             (ProviderUnavailableError("x"), "provider_unavailable"),
         ],

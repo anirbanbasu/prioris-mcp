@@ -101,6 +101,21 @@ class EnvVars:
         os.cpu_count() or 4,
     )
 
+    PRIORIS_MCP_LOCAL_FILE_ROOT = env.path(
+        "PRIORIS_MCP_LOCAL_FILE_ROOT",
+        # Bounds every path research_localfile_fetch_full_text will read - see
+        # docs/requirement-specification/05-security.md#local-filesystem-access-is-confined-to-an-operator-configured-root.
+        default=Path.cwd(),
+    )
+
+    PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES = env.int(
+        "PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES",
+        # Sized to what the PDF parser backend can reasonably process - see
+        # docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text.
+        default=10 * 1024 * 1024,
+        validate=Range(min=1),
+    )
+
 
 logging.basicConfig(
     level=EnvVars.PRIORIS_MCP_LOG_LEVEL,

@@ -39,11 +39,19 @@ class InvalidRequestError(Exception):
     """
 
 
+class FileTooLargeError(Exception):
+    """A local file exceeds PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES.
+
+    Maps to the `file_too_large` error code.
+    """
+
+
 _ERROR_CODES: dict[type[Exception], str] = {
     NotFoundError: "not_found",
     FormatUnavailableError: "format_unavailable",
     UnsupportedProviderError: "unsupported_provider",
     InvalidRequestError: "invalid_request",
+    FileTooLargeError: "file_too_large",
     RateLimitedError: "rate_limited",
     ProviderUnavailableError: "provider_unavailable",
 }
