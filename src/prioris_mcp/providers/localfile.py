@@ -3,9 +3,13 @@
 See docs/requirement-specification/01-architecture.md#local-filesystem-source.
 """
 
+import hashlib
 import logging
+import random
 import string
+from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from anyio import to_thread
 
@@ -88,7 +92,49 @@ class LocalFileProvider(ResearchPublicationProvider):
         content = await to_thread.run_sync(resolved_path.read_bytes)
         if not content.startswith(PDF_MAGIC_PREFIX):
             raise InvalidRequestError(f"File does not sniff as a PDF: {path}")
-        raise NotImplementedError  # replaced in the next step
+
+        content_hash = hashlib.sha256(content).hexdigest()
+
+        async with self._mint_locks.acquire(content_hash):
+            existing_manifest = await self._storage.read_manifest("localfile", content_hash, "pdf")
+            if existing_manifest is not None:
+                caller_facing_id = existing_manifest["public_identifier"]
+                served_from_storage = True
+            else:
+                caller_facing_id = await self._mint_caller_facing_id()
+                await self._storage.write(
+                    "localfile",
+                    content_hash,
+                    "pdf",
+                    content,
+                    original_identifier=path,
+                    public_identifier=caller_facing_id,
+                )
+                served_from_storage = False
+
+        return {
+            "id": caller_facing_id,
+            "location": f"localfile:{content_hash}:pdf",
+            "format": "pdf",
+            "size_bytes": size_bytes,
+            "served_from_storage": served_from_storage,
+            "resource_uri": f"research://localfile/{quote(caller_facing_id, safe='')}/pdf/fulltext",
+        }
+
+    async def _mint_caller_facing_id(self) -> str:
+        """Mint a minute-resolution-timestamp + random-suffix ID, retrying on manifest collision.
+
+        See docs/requirement-specification/02-storage.md#caller-facing-identifiers-for-sources-without-one -
+        no shared counter is needed: the timestamp already scopes the collision space, and a
+        4-character base-36 suffix (~1.68M values) keeps collision risk low even under a burst of
+        concurrent fetches within the same minute.
+        """
+        timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M")
+        while True:
+            suffix = "".join(random.choices(_SUFFIX_ALPHABET, k=4))
+            candidate = f"{timestamp}-{suffix}"
+            if await self._storage.find_canonical_identifier("localfile", candidate, "pdf") is None:
+                return candidate
 
     # invalid-method-override: see fetch_full_text above for why this source's signature diverges
     # from base.py's generic one.

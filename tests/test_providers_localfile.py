@@ -1,4 +1,5 @@
 import asyncio
+import re
 from pathlib import Path
 
 import pytest
@@ -88,3 +89,55 @@ class TestLocalFileProviderContentValidation:
         provider = _provider(tmp_path, max_size_bytes=len(PDF_BYTES) - 1)
         with pytest.raises(FileTooLargeError):
             asyncio.run(provider.fetch_full_text("big.pdf"))
+
+
+class TestLocalFileProviderFetchFullText:
+    """Content-hash canonicalisation and caller-facing ID - docs/requirement-specification/02-storage.md#content-hash-canonicalisation-for-the-local-filesystem-source."""
+
+    def test_first_fetch_mints_a_caller_facing_id(self, tmp_path: Path):
+        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
+        provider = _provider(tmp_path)
+        result = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        assert re.fullmatch(r"\d{8}-\d{4}-[0-9a-z]{4}", result["id"])
+        assert result["served_from_storage"] is False
+        assert result["resource_uri"] == f"research://localfile/{result['id']}/pdf/fulltext"
+        assert result["size_bytes"] == len(PDF_BYTES)
+
+    def test_second_fetch_of_unchanged_content_reuses_the_same_id(self, tmp_path: Path):
+        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
+        provider = _provider(tmp_path)
+        first = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        second = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        assert second["id"] == first["id"]
+        assert second["served_from_storage"] is True
+
+    def test_changed_content_gets_a_new_id_and_old_id_remains_valid(self, tmp_path: Path):
+        path = tmp_path / "paper.pdf"
+        path.write_bytes(PDF_BYTES)
+        provider = _provider(tmp_path)
+        first = asyncio.run(provider.fetch_full_text("paper.pdf"))
+
+        path.write_bytes(PDF_BYTES + b" more content")
+        second = asyncio.run(provider.fetch_full_text("paper.pdf"))
+
+        assert second["id"] != first["id"]
+        assert second["served_from_storage"] is False
+        # The first id's content is still independently readable.
+        first_manifest_identifier = asyncio.run(
+            provider._storage.find_canonical_identifier("localfile", first["id"], "pdf")
+        )
+        assert asyncio.run(provider._storage.read("localfile", first_manifest_identifier, "pdf")) == PDF_BYTES
+
+    def test_concurrent_fetches_of_same_unchanged_content_write_once_and_share_an_id(self, tmp_path: Path):
+        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
+        provider = _provider(tmp_path)
+
+        async def scenario():
+            return await asyncio.gather(
+                provider.fetch_full_text("paper.pdf"),
+                provider.fetch_full_text("paper.pdf"),
+            )
+
+        first, second = asyncio.run(scenario())
+        assert first["id"] == second["id"]
+        assert {first["served_from_storage"], second["served_from_storage"]} == {True, False}
