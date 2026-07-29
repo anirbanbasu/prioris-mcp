@@ -224,6 +224,11 @@ class TestLocalFileProviderParseFullText:
         with pytest.raises(NotFoundError):
             asyncio.run(provider.parse_full_text("20260729-1430-a3f2"))
 
+    def test_unsupported_format_is_rejected(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(provider.parse_full_text("20260729-1430-a3f2", format="html"))
+
 
 class TestLocalFileProviderDeleteDoesNotTouchOriginal:
     """docs/requirement-specification/07-test-specification.md#storage-management-acceptance-criteria."""

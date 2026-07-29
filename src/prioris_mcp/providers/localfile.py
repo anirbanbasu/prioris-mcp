@@ -149,6 +149,8 @@ class LocalFileProvider(ResearchPublicationProvider):
         Never re-reads the original path and never triggers fetch_full_text - `identifier` is
         looked up purely via the storage manifest (docs/requirement-specification/01-architecture.md#parse_full_text).
         """
+        if format != "pdf":
+            raise InvalidRequestError(f"Unsupported format for local filesystem source: {format}")
         content_hash = await self._storage.find_canonical_identifier("localfile", identifier, "pdf")
         if content_hash is None:
             raise NotFoundError(f"Local file identifier not recognised: {identifier}")
