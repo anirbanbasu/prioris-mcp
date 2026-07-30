@@ -24,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Fixed
 
-- None documented yet.
+- Fixed issue #10 through PR #14.
 
 ### Security
 
