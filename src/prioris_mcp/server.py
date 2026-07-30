@@ -20,7 +20,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 from prioris_mcp import PACKAGE_NAME, EnvVars
-from prioris_mcp.errors import call_returning_envelope
+from prioris_mcp.errors import InvalidRequestError, call_returning_envelope
 from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
 from prioris_mcp.mixin import MCPMixin
 from prioris_mcp.pagination import paginate_text
@@ -323,10 +323,23 @@ class PriorisMCP(MCPMixin):
             Field(description="One or more {provider, identifier, format} entries to remove"),
         ],
     ) -> dict:
-        """Remove one or more persisted entries, tolerating entries no longer present."""
+        """Remove one or more persisted entries, tolerating entries no longer present.
+
+        Does not cascade: deleting a source entry (e.g. format="pdf") leaves its derived
+        `parse_full_text` output (format="pdf-markdown") in place as its own manifest entry,
+        since `StorageBackend` has no notion that one format is "derived from" another. To
+        remove everything stored for a fetch+parse, pass one entry per format explicitly - e.g.
+        both {"format": "pdf", ...} and {"format": "pdf-markdown", ...}.
+        """
+        return await call_returning_envelope(self._delete_fetched(entries))
+
+    async def _delete_fetched(self, entries: list[dict[str, str]]) -> dict:
         deleted: list[dict[str, str]] = []
         not_found: list[dict[str, str]] = []
         for entry in entries:
+            for key in ("provider", "identifier", "format"):
+                if key not in entry:
+                    raise InvalidRequestError(f"entry missing required key {key!r}: {entry!r}")
             removed = await self._storage.delete(entry["provider"], entry["identifier"], entry["format"])
             (deleted if removed else not_found).append(entry)
         return {"deleted": deleted, "not_found": not_found}
