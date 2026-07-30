@@ -205,6 +205,8 @@ Not applicable — see [Architecture → Local filesystem source](01-architectur
 
 **Behaviour:** removes each matching persisted entry (both the content and its manifest record) from `StorageBackend`. An entry naming a `(provider, identifier, format)` combination not currently in storage is reported in `not_found`, not treated as a failure of the whole call — the same partial-failure tolerance `research_arxiv_fetch_metadata`/`research_europepmc_fetch_metadata` already have for unrecognised identifiers.
 
+**Does not cascade:** `StorageBackend` is format-agnostic — it has no notion that a `parse_full_text`-produced `<format>-markdown` entry (e.g. `pdf-markdown`) is "derived from" its source format (e.g. `pdf`). Deleting the source entry leaves the derived Markdown entry in place: still listed by `research_list_fetched`, still readable, still independently deletable. A caller that wants to fully remove everything stored for a fetch+parse must delete each format explicitly — e.g. once with `format="pdf"` and once with `format="pdf-markdown"`.
+
 **Output:** `{"deleted": [<entry>, ...], "not_found": [<entry>, ...]}`, using the same entry shape as the input.
 
 ## `research_resolve_identifier`

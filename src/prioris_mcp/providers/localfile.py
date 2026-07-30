@@ -55,6 +55,11 @@ class LocalFileProvider(ResearchPublicationProvider):
         # Guards the check-existing-hash-then-mint-then-write sequence in fetch_full_text so two
         # concurrent calls for the same content never both mint a caller-facing ID or both write -
         # see docs/requirement-specification/07-test-specification.md#cross-cutting-concurrency.
+        # This lock is keyed per content hash, so it does NOT cover concurrent fetches of
+        # *different* content: those can theoretically mint colliding caller-facing IDs (same
+        # minute-resolution timestamp, same random suffix) since the retry loop only re-checks
+        # against already-persisted manifests, not other in-flight mints. Negligible odds
+        # (~1/36^4 per same-minute, different-content, truly-concurrent pair); an accepted risk.
         self._mint_locks = KeyedAsyncLockManager()
 
     def _resolve_within_root(self, path: str) -> Path:

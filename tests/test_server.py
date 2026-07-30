@@ -862,3 +862,48 @@ class TestStorageManagementTools:
         result = asyncio.run(scenario())
         assert result.structured_content["deleted"] == []
         assert len(result.structured_content["not_found"]) == 1
+
+    def test_delete_fetched_reports_invalid_request_for_entry_missing_a_key(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client, _ = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_delete_fetched",
+                    arguments={"entries": [{"provider": "arxiv", "identifier": "does-not-exist"}]},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["error"] == "invalid_request"
+
+    def test_delete_fetched_does_not_cascade_to_derived_markdown_entry(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client, root_dir = self._server_and_client(tmp_path, monkeypatch)
+        (root_dir / "paper.pdf").write_bytes(TestLocalFileTools._PDF_BYTES)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text", arguments={"path": "paper.pdf"}
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+                list_after_parse = await client.call_tool("research_list_fetched", arguments={})
+                delete_result = await client.call_tool(
+                    "research_delete_fetched",
+                    arguments={"entries": [{"provider": "localfile", "identifier": caller_facing_id, "format": "pdf"}]},
+                )
+                list_after_delete = await client.call_tool("research_list_fetched", arguments={})
+                return list_after_parse, delete_result, list_after_delete
+
+        list_after_parse, delete_result, list_after_delete = asyncio.run(scenario())
+        formats_after_parse = {entry["format"] for entry in list_after_parse.structured_content["entries"]}
+        assert formats_after_parse == {"pdf", "pdf-markdown"}
+
+        assert len(delete_result.structured_content["deleted"]) == 1
+
+        formats_after_delete = {entry["format"] for entry in list_after_delete.structured_content["entries"]}
+        assert formats_after_delete == {"pdf-markdown"}
