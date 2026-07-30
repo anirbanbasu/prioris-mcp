@@ -3,15 +3,14 @@
 See docs/requirement-specification/01-architecture.md#local-filesystem-source.
 """
 
+import base64
+import binascii
 import hashlib
 import logging
 import random
 import string
 from datetime import UTC, datetime
-from pathlib import Path
 from urllib.parse import quote
-
-from anyio import to_thread
 
 from prioris_mcp.errors import FileTooLargeError, InvalidRequestError, NotFoundError
 from prioris_mcp.pagination import paginate_text
@@ -31,7 +30,7 @@ _SUFFIX_ALPHABET = string.digits + string.ascii_lowercase
 
 
 class LocalFileProvider(ResearchPublicationProvider):
-    """Reads/parses a caller-supplied local PDF; implements only fetch_full_text/parse_full_text.
+    """Parses caller-sent PDF bytes; implements only fetch_full_text/parse_full_text.
 
     No canonical identifier exists to resolve (see
     docs/requirement-specification/01-architecture.md#local-filesystem-source) - `search`,
@@ -43,13 +42,11 @@ class LocalFileProvider(ResearchPublicationProvider):
         self,
         storage: StorageBackend,
         pdf_backend: ParserBackend,
-        root_dir: Path,
         max_size_bytes: int,
         default_inline_char_limit: int = 20000,
     ) -> None:
         self._storage = storage
         self._pdf_backend = pdf_backend
-        self._root_dir = root_dir.resolve()
         self._max_size_bytes = max_size_bytes
         self._default_inline_char_limit = default_inline_char_limit
         # Guards the check-existing-hash-then-mint-then-write sequence in fetch_full_text so two
@@ -62,42 +59,38 @@ class LocalFileProvider(ResearchPublicationProvider):
         # (~1/36^4 per same-minute, different-content, truly-concurrent pair); an accepted risk.
         self._mint_locks = KeyedAsyncLockManager()
 
-    def _resolve_within_root(self, path: str) -> Path:
-        """Resolve `path` against the configured root and verify it stays within it.
-
-        Containment is checked *after* resolving symlinks (`Path.resolve()` follows them), not
-        before, so a symlink inside the root pointing outside it is caught - see
-        docs/requirement-specification/05-security.md#local-filesystem-access-is-confined-to-an-operator-configured-root.
-        An absolute `path` is rejected outright: `Path(root) / Path(absolute)` in pathlib
-        discards `root` entirely and evaluates to the absolute path, which would otherwise
-        silently bypass containment.
-        """
-        if Path(path).is_absolute():
-            raise InvalidRequestError(f"path must be relative to the configured root, got absolute path: {path}")
-        candidate = (self._root_dir / path).resolve()
-        if candidate != self._root_dir and self._root_dir not in candidate.parents:
-            raise InvalidRequestError(f"path escapes the configured root: {path}")
-        return candidate
-
     # invalid-method-override: base.py's fetch_full_text(identifier, format) is generic; this
-    # source's first argument is a filesystem path, not an opaque identifier, and format has
-    # exactly one valid value - see providers/arxiv.py's search() override for the same pattern.
-    async def fetch_full_text(self, path: str, format: str = "pdf") -> dict:  # ty: ignore[invalid-method-override]
+    # source's first argument is caller-sent base64 content, not an opaque identifier, and format
+    # has exactly one valid value - see providers/arxiv.py's search() override for the same pattern.
+    async def fetch_full_text(  # ty: ignore[invalid-method-override]
+        self, content_base64: str, filename: str | None = None, format: str = "pdf"
+    ) -> dict:
         """See docs/requirement-specification/06-interface-specification.md#research_localfile_fetch_full_text."""
         if format != "pdf":
             raise InvalidRequestError(f"Unsupported format for local filesystem source: {format}")
-        resolved_path = self._resolve_within_root(path)
-        if not await to_thread.run_sync(resolved_path.is_file):
-            raise NotFoundError(f"No file at path: {path}")
-        size_bytes = await to_thread.run_sync(lambda: resolved_path.stat().st_size)
-        if size_bytes > self._max_size_bytes:
+
+        # Reject an oversized payload by its base64-encoded length alone, before decoding: base64
+        # has fixed, standard overhead (encoded length = 4 * ceil(n / 3) for n raw bytes), so this
+        # bounds worst-case decoded size without ever materialising more than the configured cap -
+        # see docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text.
+        max_b64_length = 4 * -(-self._max_size_bytes // 3)
+        if len(content_base64) > max_b64_length:
             raise FileTooLargeError(
-                f"{path} is {size_bytes} bytes, exceeding PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES "
+                f"content_base64 is too long to decode within PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES "
                 f"({self._max_size_bytes} bytes)"
             )
-        content = await to_thread.run_sync(resolved_path.read_bytes)
+        try:
+            content = base64.b64decode(content_base64, validate=True)
+        except binascii.Error as exc:
+            raise InvalidRequestError(f"content_base64 is not valid base64: {exc}") from exc
+
+        if len(content) > self._max_size_bytes:
+            raise FileTooLargeError(
+                f"Decoded content is {len(content)} bytes, exceeding PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES "
+                f"({self._max_size_bytes} bytes)"
+            )
         if not content.startswith(PDF_MAGIC_PREFIX):
-            raise InvalidRequestError(f"File does not sniff as a PDF: {path}")
+            raise InvalidRequestError("content_base64 does not decode to something that sniffs as a PDF")
 
         content_hash = hashlib.sha256(content).hexdigest()
 
@@ -113,7 +106,7 @@ class LocalFileProvider(ResearchPublicationProvider):
                     content_hash,
                     "pdf",
                     content,
-                    original_identifier=path,
+                    original_identifier=filename,
                     public_identifier=caller_facing_id,
                 )
                 served_from_storage = False
@@ -122,7 +115,7 @@ class LocalFileProvider(ResearchPublicationProvider):
             "id": caller_facing_id,
             "location": f"localfile:{content_hash}:pdf",
             "format": "pdf",
-            "size_bytes": size_bytes,
+            "size_bytes": len(content),
             "served_from_storage": served_from_storage,
             "resource_uri": f"research://localfile/{quote(caller_facing_id, safe='')}/pdf/fulltext",
         }
