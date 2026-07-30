@@ -307,6 +307,36 @@ class TestFilesystemStorageBackend:
         backend = FilesystemStorageBackend(tmp_path)
         assert asyncio.run(backend.list(provider="arxiv")) == []
 
+    def test_list_tolerates_legacy_manifest_missing_size_bytes(self, tmp_path: Path):
+        """Regression test for issue #10.
+
+        Manifests written before commit 52ecfc0 lack `size_bytes`/`public_identifier`;
+        `list()` must not raise `KeyError` on them.
+        """
+        backend = FilesystemStorageBackend(tmp_path)
+        key = FilesystemStorageBackend._storage_key("arxiv", "2601.05525v2", "pdf")
+        (tmp_path / f"{key}.data").write_bytes(b"legacy content")
+        legacy_manifest = {
+            "provider": "arxiv",
+            "canonical_identifier": "2601.05525v2",
+            "original_identifier": None,
+            "format": "pdf",
+            "fetched_at": "2026-07-01T00:00:00+00:00",
+        }
+        (tmp_path / f"{key}.json").write_text(json.dumps(legacy_manifest))
+
+        entries = asyncio.run(backend.list())
+
+        assert entries == [
+            {
+                "provider": "arxiv",
+                "identifier": "2601.05525v2",
+                "format": "pdf",
+                "fetched_at": "2026-07-01T00:00:00+00:00",
+                "size_bytes": len(b"legacy content"),
+            }
+        ]
+
     def test_delete_removes_content_and_manifest_and_returns_true(self, tmp_path: Path):
         backend = FilesystemStorageBackend(tmp_path)
         asyncio.run(backend.write("arxiv", "2601.05525v2", "pdf", b"a"))

@@ -246,13 +246,17 @@ class FilesystemStorageBackend(StorageBackend):
                     continue
                 if format is not None and manifest["format"] != format:
                     continue
+                size_bytes = manifest.get("size_bytes")
+                if size_bytes is None:
+                    data_path = manifest_path.with_suffix(".data")
+                    size_bytes = data_path.stat().st_size if data_path.exists() else 0
                 entries.append(
                     {
                         "provider": manifest["provider"],
                         "identifier": manifest.get("public_identifier") or manifest["canonical_identifier"],
                         "format": manifest["format"],
                         "fetched_at": manifest["fetched_at"],
-                        "size_bytes": manifest["size_bytes"],
+                        "size_bytes": size_bytes,
                     }
                 )
             return entries
