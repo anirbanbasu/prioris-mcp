@@ -12,6 +12,8 @@ import string
 from datetime import UTC, datetime
 from urllib.parse import quote
 
+from anyio import to_thread
+
 from prioris_mcp.errors import FileTooLargeError, InvalidRequestError, NotFoundError
 from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
@@ -69,9 +71,11 @@ class LocalFileProvider(ResearchPublicationProvider):
         if format != "pdf":
             raise InvalidRequestError(f"Unsupported format for local filesystem source: {format}")
 
-        # Reject an oversized payload by its base64-encoded length alone, before decoding: base64
-        # has fixed, standard overhead (encoded length = 4 * ceil(n / 3) for n raw bytes), so this
-        # bounds worst-case decoded size without ever materialising more than the configured cap -
+        # Reject a grossly oversized payload by its base64-encoded length alone, before decoding:
+        # base64 has fixed, standard overhead (encoded length = 4 * ceil(n / 3) for n raw bytes),
+        # so this bounds the decode to roughly the configured cap - but base64's 3-byte/4-char
+        # rounding means a payload that passes this check can still decode to up to 2 bytes over
+        # the cap, which the post-decode check below catches exactly -
         # see docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text.
         max_b64_length = 4 * -(-self._max_size_bytes // 3)
         if len(content_base64) > max_b64_length:
@@ -80,7 +84,7 @@ class LocalFileProvider(ResearchPublicationProvider):
                 f"({self._max_size_bytes} bytes)"
             )
         try:
-            content = base64.b64decode(content_base64, validate=True)
+            content = await to_thread.run_sync(base64.b64decode, content_base64, None, True)
         except binascii.Error as exc:
             raise InvalidRequestError(f"content_base64 is not valid base64: {exc}") from exc
 
@@ -92,7 +96,7 @@ class LocalFileProvider(ResearchPublicationProvider):
         if not content.startswith(PDF_MAGIC_PREFIX):
             raise InvalidRequestError("content_base64 does not decode to something that sniffs as a PDF")
 
-        content_hash = hashlib.sha256(content).hexdigest()
+        content_hash = await to_thread.run_sync(lambda: hashlib.sha256(content).hexdigest())
 
         async with self._mint_locks.acquire(content_hash):
             existing_manifest = await self._storage.read_manifest("localfile", content_hash, "pdf")
