@@ -248,8 +248,10 @@ class FilesystemStorageBackend(StorageBackend):
                     continue
                 size_bytes = manifest.get("size_bytes")
                 if size_bytes is None:
-                    data_path = manifest_path.with_suffix(".data")
-                    size_bytes = data_path.stat().st_size if data_path.exists() else 0
+                    try:
+                        size_bytes = manifest_path.with_suffix(".data").stat().st_size
+                    except FileNotFoundError:
+                        size_bytes = 0
                 entries.append(
                     {
                         "provider": manifest["provider"],

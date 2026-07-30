@@ -337,6 +337,36 @@ class TestFilesystemStorageBackend:
             }
         ]
 
+    def test_list_defaults_size_bytes_to_zero_when_data_file_missing(self, tmp_path: Path):
+        """Legacy manifest with no `.data` file falls back to `0` size.
+
+        Covers the case where the `.data` file is also absent (e.g. deleted concurrently);
+        `list()` must fall back to `0` rather than raising `FileNotFoundError`.
+        """
+        backend = FilesystemStorageBackend(tmp_path)
+        key = FilesystemStorageBackend._storage_key("arxiv", "2601.05525v2", "pdf")
+        legacy_manifest = {
+            "provider": "arxiv",
+            "canonical_identifier": "2601.05525v2",
+            "original_identifier": None,
+            "format": "pdf",
+            "fetched_at": "2026-07-01T00:00:00+00:00",
+        }
+        (tmp_path / f"{key}.json").write_text(json.dumps(legacy_manifest))
+        # No corresponding .data file written.
+
+        entries = asyncio.run(backend.list())
+
+        assert entries == [
+            {
+                "provider": "arxiv",
+                "identifier": "2601.05525v2",
+                "format": "pdf",
+                "fetched_at": "2026-07-01T00:00:00+00:00",
+                "size_bytes": 0,
+            }
+        ]
+
     def test_delete_removes_content_and_manifest_and_returns_true(self, tmp_path: Path):
         backend = FilesystemStorageBackend(tmp_path)
         asyncio.run(backend.write("arxiv", "2601.05525v2", "pdf", b"a"))
