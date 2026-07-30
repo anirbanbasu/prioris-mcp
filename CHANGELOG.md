@@ -12,7 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Changed
 
-- None documented yet.
+- **Breaking:** `research_localfile_fetch_full_text` now accepts `content_base64` (base64-encoded PDF bytes) and an optional `filename` hint instead of a server-side `path`, so "local" means local to the MCP client consistently across transports rather than local to wherever the server process happens to run (addresses [issue #6](https://github.com/anirbanbasu/prioris-mcp/issues/6), see "Fixed" section below). The `PRIORIS_MCP_LOCAL_FILE_ROOT` environment variable is removed as a result (no server-side path is resolved anymore); `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` still bounds the decoded content size.
 
 ### Deprecated
 
@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Fixed [issue #10](https://github.com/anirbanbasu/prioris-mcp/issues/10) through [PR #14](https://github.com/anirbanbasu/prioris-mcp/pull/14).
 - Fixed [issue #9](https://github.com/anirbanbasu/prioris-mcp/issues/9), [issue #8](https://github.com/anirbanbasu/prioris-mcp/issues/8) and [issue #7](https://github.com/anirbanbasu/prioris-mcp/issues/7) through [PR #15](https://github.com/anirbanbasu/prioris-mcp/pull/15).
+- Fixed [issue #6](https://github.com/anirbanbasu/prioris-mcp/issues/6) through [PR #16](https://github.com/anirbanbasu/prioris-mcp/pull/16).
 
 ### Security
 

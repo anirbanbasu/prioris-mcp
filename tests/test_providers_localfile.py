@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import re
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -7,7 +8,7 @@ import pytest
 
 from prioris_mcp.errors import FileTooLargeError, InvalidRequestError, NotFoundError
 from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
-from prioris_mcp.providers.localfile import LocalFileProvider
+from prioris_mcp.providers.localfile import PDF_MAGIC_PREFIX, LocalFileProvider
 from prioris_mcp.storage import FilesystemStorageBackend
 
 # A structurally valid minimal PDF, not just a "%PDF-" magic-prefix stub: earlier tasks only
@@ -42,120 +43,85 @@ startxref
 0
 %%EOF"""
 
+PDF_BASE64 = base64.b64encode(PDF_BYTES).decode("ascii")
 
-def _provider(tmp_path: Path, root: Path | None = None, max_size_bytes: int = 10_000_000) -> LocalFileProvider:
+
+def _provider(tmp_path: Path, max_size_bytes: int = 10_000_000) -> LocalFileProvider:
     storage = FilesystemStorageBackend(tmp_path / "storage")
     return LocalFileProvider(
         storage=storage,
         pdf_backend=LiteParsePdfBackend(),
-        root_dir=root if root is not None else tmp_path,
         max_size_bytes=max_size_bytes,
     )
-
-
-class TestLocalFileProviderPathContainment:
-    """Path validation - docs/requirement-specification/05-security.md#local-filesystem-access-is-confined-to-an-operator-configured-root."""
-
-    def test_absolute_path_is_rejected_without_reading_the_target(
-        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
-    ):
-        outside = tmp_path.parent / "outside.pdf"
-        outside.write_bytes(PDF_BYTES)
-        provider = _provider(tmp_path)
-        monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(AssertionError("must not read")))
-        with pytest.raises(InvalidRequestError):
-            asyncio.run(provider.fetch_full_text(str(outside)))
-
-    def test_dotdot_traversal_is_rejected_without_reading_the_target(
-        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
-    ):
-        root = tmp_path / "root"
-        root.mkdir()
-        outside = tmp_path / "outside.pdf"
-        outside.write_bytes(PDF_BYTES)
-        provider = _provider(tmp_path, root=root)
-        monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(AssertionError("must not read")))
-        with pytest.raises(InvalidRequestError):
-            asyncio.run(provider.fetch_full_text("../outside.pdf"))
-
-    def test_symlink_escape_is_rejected_without_reading_the_target(
-        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
-    ):
-        root = tmp_path / "root"
-        root.mkdir()
-        outside = tmp_path / "outside.pdf"
-        outside.write_bytes(PDF_BYTES)
-        symlink = root / "escape.pdf"
-        symlink.symlink_to(outside)
-        provider = _provider(tmp_path, root=root)
-        monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(AssertionError("must not read")))
-        with pytest.raises(InvalidRequestError):
-            asyncio.run(provider.fetch_full_text("escape.pdf"))
-
-    def test_missing_file_is_not_found(self, tmp_path: Path):
-        provider = _provider(tmp_path)
-        with pytest.raises(NotFoundError):
-            asyncio.run(provider.fetch_full_text("does-not-exist.pdf"))
-
-    def test_valid_relative_path_within_root_succeeds(self, tmp_path: Path):
-        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
-        provider = _provider(tmp_path)
-        result = asyncio.run(provider.fetch_full_text("paper.pdf"))
-        assert result["format"] == "pdf"
-        assert result["served_from_storage"] is False
 
 
 class TestLocalFileProviderContentValidation:
     """Content sniffing/size limit - docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text."""
 
-    def test_non_pdf_content_is_rejected_regardless_of_extension(self, tmp_path: Path):
-        (tmp_path / "fake.pdf").write_bytes(b"not actually a pdf")
+    def test_invalid_base64_is_rejected(self, tmp_path: Path):
         provider = _provider(tmp_path)
         with pytest.raises(InvalidRequestError):
-            asyncio.run(provider.fetch_full_text("fake.pdf"))
+            asyncio.run(provider.fetch_full_text("not-valid-base64!!!"))
 
-    def test_oversized_file_is_rejected_before_reading_content(self, tmp_path: Path):
-        big = tmp_path / "big.pdf"
-        big.write_bytes(PDF_BYTES)
-        provider = _provider(tmp_path, max_size_bytes=len(PDF_BYTES) - 1)
+    def test_non_pdf_content_is_rejected_regardless_of_filename(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+        payload = base64.b64encode(b"not actually a pdf").decode("ascii")
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(provider.fetch_full_text(payload, filename="fake.pdf"))
+
+    def test_oversized_payload_is_rejected_before_decoding(self, tmp_path: Path):
+        provider = _provider(tmp_path, max_size_bytes=1)
+        decode_spy = AsyncMock(side_effect=AssertionError("must not decode"))
+        with (
+            pytest.MonkeyPatch.context() as monkeypatch,
+            pytest.raises(FileTooLargeError),
+        ):
+            monkeypatch.setattr("prioris_mcp.providers.localfile.base64.b64decode", lambda *a, **k: decode_spy())
+            asyncio.run(provider.fetch_full_text(PDF_BASE64))
+        decode_spy.assert_not_called()
+
+    def test_decoded_content_exceeding_cap_is_rejected_even_when_encoded_length_passes(self, tmp_path: Path):
+        # base64's 3-bytes-in/4-chars-out ratio rounds the pre-decode ceiling up to the nearest
+        # multiple of 3, so an encoded length within that ceiling can still decode to slightly
+        # more than max_size_bytes - the decoded-length check below is what actually enforces the
+        # cap in that gap. 12 raw bytes -> 16 base64 chars, same as the ceiling for a 10-byte cap.
+        content = PDF_MAGIC_PREFIX + b"1234567"
+        assert len(content) == 12
+        payload = base64.b64encode(content).decode("ascii")
+        provider = _provider(tmp_path, max_size_bytes=10)
         with pytest.raises(FileTooLargeError):
-            asyncio.run(provider.fetch_full_text("big.pdf"))
+            asyncio.run(provider.fetch_full_text(payload))
 
     def test_unsupported_format_is_rejected(self, tmp_path: Path):
-        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
         provider = _provider(tmp_path)
         with pytest.raises(InvalidRequestError):
-            asyncio.run(provider.fetch_full_text("paper.pdf", format="html"))
+            asyncio.run(provider.fetch_full_text(PDF_BASE64, format="html"))
 
 
 class TestLocalFileProviderFetchFullText:
     """Content-hash canonicalisation and caller-facing ID - docs/requirement-specification/02-storage.md#content-hash-canonicalisation-for-the-local-filesystem-source."""
 
     def test_first_fetch_mints_a_caller_facing_id(self, tmp_path: Path):
-        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
         provider = _provider(tmp_path)
-        result = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        result = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
         assert re.fullmatch(r"\d{8}-\d{4}-[0-9a-z]{4}", result["id"])
         assert result["served_from_storage"] is False
         assert result["resource_uri"] == f"research://localfile/{result['id']}/pdf/fulltext"
         assert result["size_bytes"] == len(PDF_BYTES)
 
     def test_second_fetch_of_unchanged_content_reuses_the_same_id(self, tmp_path: Path):
-        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
         provider = _provider(tmp_path)
-        first = asyncio.run(provider.fetch_full_text("paper.pdf"))
-        second = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        first = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
+        second = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
         assert second["id"] == first["id"]
         assert second["served_from_storage"] is True
 
     def test_changed_content_gets_a_new_id_and_old_id_remains_valid(self, tmp_path: Path):
-        path = tmp_path / "paper.pdf"
-        path.write_bytes(PDF_BYTES)
         provider = _provider(tmp_path)
-        first = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        first = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
 
-        path.write_bytes(PDF_BYTES + b" more content")
-        second = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        changed_base64 = base64.b64encode(PDF_BYTES + b" more content").decode("ascii")
+        second = asyncio.run(provider.fetch_full_text(changed_base64, filename="paper.pdf"))
 
         assert second["id"] != first["id"]
         assert second["served_from_storage"] is False
@@ -166,18 +132,22 @@ class TestLocalFileProviderFetchFullText:
         assert asyncio.run(provider._storage.read("localfile", first_manifest_identifier, "pdf")) == PDF_BYTES
 
     def test_concurrent_fetches_of_same_unchanged_content_write_once_and_share_an_id(self, tmp_path: Path):
-        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
         provider = _provider(tmp_path)
 
         async def scenario():
             return await asyncio.gather(
-                provider.fetch_full_text("paper.pdf"),
-                provider.fetch_full_text("paper.pdf"),
+                provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"),
+                provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"),
             )
 
         first, second = asyncio.run(scenario())
         assert first["id"] == second["id"]
         assert {first["served_from_storage"], second["served_from_storage"]} == {True, False}
+
+    def test_filename_is_optional(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+        result = asyncio.run(provider.fetch_full_text(PDF_BASE64))
+        assert result["served_from_storage"] is False
 
 
 class TestLocalFileProviderParseFullText:
@@ -194,9 +164,8 @@ class TestLocalFileProviderParseFullText:
         read_bytes_spy.assert_not_called()
 
     def test_parses_already_fetched_content_and_returns_resource_uri(self, tmp_path: Path):
-        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
         provider = _provider(tmp_path)
-        fetched = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        fetched = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
         parsed = asyncio.run(provider.parse_full_text(fetched["id"]))
         assert parsed["resource_uri"] == f"research://localfile/{fetched['id']}/pdf/markdown"
         assert isinstance(parsed["markdown"], str)
@@ -204,9 +173,8 @@ class TestLocalFileProviderParseFullText:
         assert parsed["has_more"] is False
 
     def test_second_parse_of_same_id_does_not_reparse(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
-        (tmp_path / "paper.pdf").write_bytes(PDF_BYTES)
         provider = _provider(tmp_path)
-        fetched = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        fetched = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
         asyncio.run(provider.parse_full_text(fetched["id"]))
 
         original_to_markdown = provider._pdf_backend.to_markdown
@@ -233,10 +201,8 @@ class TestLocalFileProviderParseFullText:
 class TestLocalFileProviderDeleteDoesNotTouchOriginal:
     """docs/requirement-specification/07-test-specification.md#storage-management-acceptance-criteria."""
 
-    def test_delete_via_storage_backend_leaves_original_file_untouched(self, tmp_path: Path):
-        original = tmp_path / "paper.pdf"
-        original.write_bytes(PDF_BYTES)
+    def test_delete_via_storage_backend_removes_only_the_storage_copy(self, tmp_path: Path):
         provider = _provider(tmp_path)
-        fetched = asyncio.run(provider.fetch_full_text("paper.pdf"))
+        fetched = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
         asyncio.run(provider._storage.delete("localfile", fetched["id"], "pdf"))
-        assert original.read_bytes() == PDF_BYTES
+        assert asyncio.run(provider._storage.find_canonical_identifier("localfile", fetched["id"], "pdf")) is None

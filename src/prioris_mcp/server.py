@@ -141,7 +141,6 @@ class PriorisMCP(MCPMixin):
         self._localfile_provider = LocalFileProvider(
             storage=self._storage,
             pdf_backend=pdf_backend,
-            root_dir=EnvVars.PRIORIS_MCP_LOCAL_FILE_ROOT,
             max_size_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
         )
@@ -280,12 +279,13 @@ class PriorisMCP(MCPMixin):
     async def research_localfile_fetch_full_text(
         self,
         ctx: Context,
-        path: Annotated[
-            str, Field(description="File path relative to PRIORIS_MCP_LOCAL_FILE_ROOT; must not escape it")
-        ],
+        content_base64: Annotated[str, Field(description="Base64-encoded bytes of a PDF the caller already has")],
+        filename: Annotated[
+            str | None, Field(default=None, description="Optional caller-supplied filename, stored for reference only")
+        ] = None,
     ) -> dict:
-        """Read, validate, and persist a local PDF, returning a server-assigned caller-facing ID."""
-        return await call_returning_envelope(self._localfile_provider.fetch_full_text(path))
+        """Validate and persist caller-sent PDF bytes, returning a server-assigned caller-facing ID."""
+        return await call_returning_envelope(self._localfile_provider.fetch_full_text(content_base64, filename))
 
     async def research_localfile_parse_full_text(
         self,

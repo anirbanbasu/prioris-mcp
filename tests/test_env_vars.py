@@ -107,20 +107,6 @@ class TestJatsMaxConcurrentTransformsDefault:
         assert reloaded.EnvVars.PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS == 4
 
 
-class TestLocalFileRootDefault:
-    """EnvVars.PRIORIS_MCP_LOCAL_FILE_ROOT default and override."""
-
-    def test_defaults_to_current_working_directory(self, monkeypatch: "pytest.MonkeyPatch"):
-        monkeypatch.delenv("PRIORIS_MCP_LOCAL_FILE_ROOT", raising=False)
-        reloaded = importlib.reload(prioris_mcp)
-        assert reloaded.EnvVars.PRIORIS_MCP_LOCAL_FILE_ROOT == Path.cwd()
-
-    def test_explicit_override_wins(self, monkeypatch: "pytest.MonkeyPatch"):
-        monkeypatch.setenv("PRIORIS_MCP_LOCAL_FILE_ROOT", "/tmp/explicit-root")
-        reloaded = importlib.reload(prioris_mcp)
-        assert reloaded.EnvVars.PRIORIS_MCP_LOCAL_FILE_ROOT == Path("/tmp/explicit-root")
-
-
 class TestLocalFileMaxSizeBytesDefault:
     """EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES default and override."""
 

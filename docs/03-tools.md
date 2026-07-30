@@ -57,8 +57,8 @@ This is the one capability exposed at the grouping level rather than per-provide
 
 | Tool | Description | Key inputs | Notes |
 |---|---|---|---|
-| `research_localfile_fetch_full_text` | Read, validate, and persist a local PDF, relative to `PRIORIS_MCP_LOCAL_FILE_ROOT`. | `path` | Rejects an absolute path or one escaping the root (via `..` or a symlink) with `invalid_request`, before any file is opened. Validates content as a PDF by its magic bytes, not its extension. Re-fetching unchanged content reuses the same server-assigned `id`; changed content gets a new one. |
-| `research_localfile_parse_full_text` | Convert an already-fetched local PDF's full text into one page of Markdown. | `id`, `offset` (default 0), `limit` (default `PRIORIS_MCP_MAX_INLINE_CHARS`) | `id` is the caller-facing identifier `research_localfile_fetch_full_text` returned, not the original path. Never re-reads the original path or triggers a fetch — fails with `not_found` if `id` isn't recognised. |
+| `research_localfile_fetch_full_text` | Validate and persist caller-sent PDF bytes. | `content_base64`, `filename` (optional) | Rejects invalid base64, or a payload whose (encoded or decoded) size exceeds `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`, with `file_too_large`/`invalid_request`. Validates content as a PDF by its magic bytes, not `filename`'s extension. Re-fetching unchanged content reuses the same server-assigned `id`; changed content gets a new one. |
+| `research_localfile_parse_full_text` | Convert an already-fetched local PDF's full text into one page of Markdown. | `id`, `offset` (default 0), `limit` (default `PRIORIS_MCP_MAX_INLINE_CHARS`) | `id` is the caller-facing identifier `research_localfile_fetch_full_text` returned. Never triggers a fetch — fails with `not_found` if `id` isn't recognised. |
 
 Deliberately narrower than the arXiv/Europe PMC tool sets — no search, listing, metadata, or identifier resolution for this source (see [Architecture → Local filesystem source](requirement-specification/01-architecture.md#local-filesystem-source)). Neither tool is subject to rate limiting — there's no outbound network request to throttle.
 
