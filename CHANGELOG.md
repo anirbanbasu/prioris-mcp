@@ -24,7 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Fixed
 
-- Fixed issue #10 through PR #14.
+- Fixed [issue #10](https://github.com/anirbanbasu/prioris-mcp/issues/10) through [PR #14](https://github.com/anirbanbasu/prioris-mcp/pull/14).
 
 ### Security
 
