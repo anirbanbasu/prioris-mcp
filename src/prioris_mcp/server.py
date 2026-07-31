@@ -30,7 +30,7 @@ from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
 from prioris_mcp.providers.arxiv import ARXIV_BASE_SPACING_SECONDS, ArxivProvider
 from prioris_mcp.providers.europepmc import EUROPEPMC_BASE_SPACING_SECONDS, EuropePmcProvider
 from prioris_mcp.providers.identifier_routing import resolve_research_identifier
-from prioris_mcp.providers.localfile import LocalFileProvider
+from prioris_mcp.providers.localfile import LocalFileProvider, UploadSessionManager
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
 
@@ -85,6 +85,21 @@ class PriorisMCP(MCPMixin):
             "fn": "research_localfile_parse_full_text",
             "tags": ["research", "localfile"],
             "annotations": {"readOnlyHint": True},
+        },
+        {
+            "fn": "research_localfile_begin_upload",
+            "tags": ["research", "localfile"],
+            "annotations": {"readOnlyHint": False},
+        },
+        {
+            "fn": "research_localfile_upload_chunk",
+            "tags": ["research", "localfile"],
+            "annotations": {"readOnlyHint": False},
+        },
+        {
+            "fn": "research_localfile_finalize_upload",
+            "tags": ["research", "localfile"],
+            "annotations": {"readOnlyHint": False},
         },
         {"fn": "research_list_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
         {
@@ -143,6 +158,12 @@ class PriorisMCP(MCPMixin):
             pdf_backend=pdf_backend,
             max_size_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
+            upload_session_manager=UploadSessionManager(
+                ttl_seconds=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_SESSION_TTL_SECONDS,
+                max_chunk_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES,
+                max_total_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES,
+                max_concurrent=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS,
+            ),
         )
 
     async def research_arxiv_search(
@@ -284,7 +305,21 @@ class PriorisMCP(MCPMixin):
             str | None, Field(default=None, description="Optional caller-supplied filename, stored for reference only")
         ] = None,
     ) -> dict:
-        """Validate and persist caller-sent PDF bytes, returning a server-assigned caller-facing ID."""
+        """Validate and persist caller-sent PDF bytes, returning a server-assigned caller-facing ID.
+
+        Small-file path only - the whole payload must fit in one call. For files at risk of
+        hitting transport/relay size limits, use research_localfile_begin_upload +
+        research_localfile_upload_chunk + research_localfile_finalize_upload instead. This tool
+        is a deprecation candidate once the chunked flow is established, though it is not being
+        removed now.
+        """
+        if not getattr(self, "_warned_localfile_fetch_full_text_deprecation", False):
+            logger.warning(
+                "research_localfile_fetch_full_text is a deprecation candidate - see "
+                "research_localfile_begin_upload/research_localfile_upload_chunk/research_localfile_finalize_upload "
+                "for the chunked-upload alternative"
+            )
+            self._warned_localfile_fetch_full_text_deprecation = True
         return await call_returning_envelope(self._localfile_provider.fetch_full_text(content_base64, filename))
 
     async def research_localfile_parse_full_text(
@@ -301,6 +336,38 @@ class PriorisMCP(MCPMixin):
     ) -> dict:
         """Convert an already-fetched local PDF's full text into one page of Markdown."""
         return await call_returning_envelope(self._localfile_provider.parse_full_text(id, offset=offset, limit=limit))
+
+    async def research_localfile_begin_upload(
+        self,
+        ctx: Context,
+        filename: Annotated[
+            str | None, Field(default=None, description="Optional caller-supplied filename, stored for reference only")
+        ] = None,
+    ) -> dict:
+        """Start a new chunked upload session for a large local PDF; returns a session_id."""
+        return await call_returning_envelope(self._begin_upload(filename))
+
+    async def _begin_upload(self, filename: str | None) -> dict:
+        session_id = await self._localfile_provider.begin_upload(filename)
+        return {"session_id": session_id, "max_chunk_bytes": EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES}
+
+    async def research_localfile_upload_chunk(
+        self,
+        ctx: Context,
+        session_id: Annotated[str, Field(description="The session_id returned by research_localfile_begin_upload")],
+        index: Annotated[int, Field(description="Zero-based chunk index; chunks must arrive in strict order")],
+        chunk_base64: Annotated[str, Field(description="Base64-encoded bytes of this chunk")],
+    ) -> dict:
+        """Upload one chunk of a large local PDF to an in-progress upload session."""
+        return await call_returning_envelope(self._localfile_provider.upload_chunk(session_id, index, chunk_base64))
+
+    async def research_localfile_finalize_upload(
+        self,
+        ctx: Context,
+        session_id: Annotated[str, Field(description="The session_id returned by research_localfile_begin_upload")],
+    ) -> dict:
+        """Validate and persist a chunked upload session's reassembled content, same as fetch_full_text."""
+        return await call_returning_envelope(self._localfile_provider.finalize_upload(session_id))
 
     async def research_list_fetched(
         self,

@@ -81,6 +81,8 @@ The local filesystem source parses a PDF the caller already has — typically ob
 
 **Cost is light, not heavy**, unlike arXiv/Europe PMC's `fetch_full_text` — decoding caller-sent base64 is cheap, not a rate-limited network request, so the local filesystem source's `fetch_full_text` is not subject to [Caching and rate limiting](#caching-and-rate-limiting) below at all: there is no outbound request to rate-limit, and nothing for `ResponseCachingMiddleware` to usefully cache that the storage abstraction's own `exists` check doesn't already cover.
 
+For large files at risk of hitting transport/relay size ceilings (the `mcp` SDK's ~4 MiB HTTP body cap on `streamable-http`/`http`, or client-orchestration truncation on any transport), a session-based chunked upload flow (`research_localfile_begin_upload` / `research_localfile_upload_chunk` / `research_localfile_finalize_upload`) is available alongside the single-call `research_localfile_fetch_full_text` — see [Interface specification → Local filesystem](06-interface-specification.md#local-filesystem). Chunks are buffered in memory per session (not disk-spooled) and reassembled only at `finalize_upload`, which runs the exact same validation/persistence path as the single-call tool.
+
 ### Content model
 
 `fetch_full_text` returns a typed content result, not a bare blob — at minimum a **format** (e.g. PDF, HTML; ePub or others as providers require) alongside the content/location. arXiv, for instance, exposes both PDF and HTML full text for the same item, so the interface treats format as a first-class, provider/item-dependent property rather than assuming one fixed format across all sources.

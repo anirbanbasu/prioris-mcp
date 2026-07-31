@@ -12,7 +12,7 @@ The [local filesystem tools](#local-filesystem) and [storage management tools](#
 
 **Identifiers.** An arXiv identifier is a bare or version-suffixed arXiv ID (`2106.09685` or `2106.09685v2`), or the older, pre-2007 category-prefixed form (`hep-th/9901001` or `hep-th/9901001v1`) — both shapes remain valid arXiv identifiers and both are recognised by `research_resolve_identifier`'s routing. A Europe PMC identifier is the composite `{source}:{id}` form Europe PMC itself uses internally (e.g. `MED:26551875`), with a bare PMCID (`PMC4767193`) also accepted as shorthand since it's unambiguous on its own (implicitly `SRC:PMC`).
 
-**Errors.** Every tool returns a common error envelope on failure: `{"error": "<code>", "message": "<human-readable detail>"}`. Error codes used across this page: `not_found` (identifier not recognised by the provider, or requested format not persisted — see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text); `research_localfile_fetch_full_text` never returns `not_found` since it doesn't resolve anything, only decodes what the caller sent), `format_unavailable` (identifier is valid but doesn't offer the requested format — e.g. an older arXiv paper with no native HTML rendering), `unsupported_provider` (see [Architecture → Identifier routing](01-architecture.md#identifier-routing-grouping-level)), `invalid_request` (caller-supplied arguments fail a tool's own validation before any outbound call or storage write — e.g. `research_arxiv_search`'s `max_results`/cumulative bounds below, an unsupported `format` passed to `research_resolve_identifier`, or a `research_localfile_fetch_full_text` `content_base64` that isn't valid base64 or doesn't sniff as a PDF once decoded), `file_too_large` (`research_localfile_fetch_full_text`'s `content_base64` decodes to more than `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`, checked both before and after decoding), `rate_limited` (the provider's outbound queue exhausted its bounded backoff after repeated 429s from the source — see [Non-functional requirements → Rate-limit breaches](04-non-functional-requirements.md#rate-limit-breaches-are-handled-inside-the-providers-queue-not-by-the-caller); any tool calling out to arXiv or Europe PMC can surface this, not just one specific tool), `provider_unavailable` (a timeout, connection failure, or 5xx from the source — surfaced immediately, with no retry, unlike `rate_limited` — see [Non-functional requirements → `provider_unavailable` failures are not retried](04-non-functional-requirements.md#provider_unavailable-failures-are-not-retried)).
+**Errors.** Every tool returns a common error envelope on failure: `{"error": "<code>", "message": "<human-readable detail>"}`. Error codes used across this page: `not_found` (identifier not recognised by the provider, or requested format not persisted — see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text); `research_localfile_fetch_full_text` never returns `not_found` since it doesn't resolve anything, only decodes what the caller sent), `format_unavailable` (identifier is valid but doesn't offer the requested format — e.g. an older arXiv paper with no native HTML rendering), `unsupported_provider` (see [Architecture → Identifier routing](01-architecture.md#identifier-routing-grouping-level)), `invalid_request` (caller-supplied arguments fail a tool's own validation before any outbound call or storage write — e.g. `research_arxiv_search`'s `max_results`/cumulative bounds below, an unsupported `format` passed to `research_resolve_identifier`, or a `research_localfile_fetch_full_text` `content_base64` that isn't valid base64 or doesn't sniff as a PDF once decoded), `file_too_large` (`research_localfile_fetch_full_text`'s `content_base64` decodes to more than `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`, checked both before and after decoding; `research_localfile_upload_chunk`/`research_localfile_finalize_upload` can also surface `not_found`, `invalid_request`, and `file_too_large` for the equivalent per-chunk and reassembled-total cases — see [Local filesystem](#local-filesystem) below), `rate_limited` (the provider's outbound queue exhausted its bounded backoff after repeated 429s from the source — see [Non-functional requirements → Rate-limit breaches](04-non-functional-requirements.md#rate-limit-breaches-are-handled-inside-the-providers-queue-not-by-the-caller); any tool calling out to arXiv or Europe PMC can surface this, not just one specific tool), `provider_unavailable` (a timeout, connection failure, or 5xx from the source — surfaced immediately, with no retry, unlike `rate_limited` — see [Non-functional requirements → `provider_unavailable` failures are not retried](04-non-functional-requirements.md#provider_unavailable-failures-are-not-retried)).
 
 **Resource URIs.** Both `fetch_full_text` and `parse_full_text` return the resource URI templates from [Functional requirements → Resources](03-functional-requirements.md#resources), instantiated for that call, e.g. `research://arxiv/2106.09685v2/pdf/fulltext`, `research://europepmc/MED:26551875/xml/markdown`, or `research://localfile/20260729-1430-a3f2/pdf/fulltext`.
 
@@ -190,6 +190,38 @@ Europe PMC publishes no numeric rate limit; per [Functional requirements → Eur
 ### Rate limiting
 
 Not applicable — see [Architecture → Local filesystem source](01-architecture.md#local-filesystem-source). Neither tool goes through a per-provider outbound queue.
+
+### `research_localfile_begin_upload`
+
+**Input:** `filename` (string, optional — stored for the session, forwarded to the manifest's `original_identifier` at finalize; never used to resolve a server-side path).
+
+**Output:** `{"session_id": <string>, "max_chunk_bytes": <int>}` — `max_chunk_bytes` echoes `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES` so the caller can size chunks without needing to know the server's configuration out of band.
+
+**Errors:** `invalid_request` if `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS` open sessions already exist (checked after sweeping any TTL-expired sessions).
+
+### `research_localfile_upload_chunk`
+
+**Input:** `session_id` (string, required — from `research_localfile_begin_upload`), `index` (integer, required — zero-based, must equal the number of chunks already accepted for this session), `chunk_base64` (string, required — base64-encoded bytes of this chunk).
+
+**Behaviour:** No `total_chunks` parameter — chunks are required in strict sequential order, and the caller decides when to stop by calling `research_localfile_finalize_upload`.
+
+**Output:** `{"received_index": <int>, "bytes_so_far": <int>}`.
+
+**Errors:** `not_found` if `session_id` is unrecognised or has passed `PRIORIS_MCP_LOCAL_FILE_UPLOAD_SESSION_TTL_SECONDS` since its last chunk; `invalid_request` if `index` isn't exactly the next expected index, or `chunk_base64` isn't valid base64; `file_too_large` if this chunk exceeds `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES`, or the running total exceeds `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`.
+
+### `research_localfile_finalize_upload`
+
+**Input:** `session_id` (string, required).
+
+**Behaviour:** Concatenates all chunks received so far and runs the same magic-byte sniff, size check, content-hash canonicalisation, and persistence as `research_localfile_fetch_full_text` (see above) via a shared internal path. Removes the session whether it succeeds or fails — there is no retry-by-resubmitting-finalize; a caller whose finalize fails must call `research_localfile_begin_upload` again.
+
+**Output:** Same shape as `research_localfile_fetch_full_text`: `{"id": <caller-facing identifier>, "location": <reference>, "format": "pdf", "size_bytes": <int>, "served_from_storage": <bool>, "resource_uri": "research://localfile/{id}/pdf/fulltext"}`.
+
+**Errors:** `not_found` if `session_id` is unrecognised or expired; `invalid_request` if zero chunks were ever uploaded, or the reassembled content doesn't sniff as a PDF; `file_too_large` if the reassembled content exceeds `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`.
+
+### Note on `research_localfile_fetch_full_text`
+
+Kept unchanged in behaviour as the small-file path — no forced migration. It remains the simplest option for content well within `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` and comfortably under transport size ceilings, but it is a deprecation candidate now that the chunked flow above exists as the recommended alternative for large files, since the two paths otherwise converge on the same validation and persistence logic.
 
 ## Storage management
 
