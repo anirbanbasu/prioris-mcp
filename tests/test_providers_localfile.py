@@ -196,6 +196,82 @@ class TestUploadSessionManagerAppendChunk:
             asyncio.run(scenario())
 
 
+class TestUploadSessionManagerPopForFinalize:
+    """Popping a session's buffered content for finalize_upload."""
+
+    def test_pop_for_finalize_returns_concatenated_bytes(self):
+        manager = _session_manager()
+
+        async def scenario():
+            session_id = await manager.begin(filename=None)
+            await manager.append_chunk(session_id, 0, b"hello ")
+            await manager.append_chunk(session_id, 1, b"world")
+            return await manager.pop_for_finalize(session_id)
+
+        content = asyncio.run(scenario())
+        assert content == b"hello world"
+
+    def test_pop_for_finalize_removes_the_session_on_success(self):
+        manager = _session_manager()
+
+        async def scenario():
+            session_id = await manager.begin(filename=None)
+            await manager.append_chunk(session_id, 0, b"hello")
+            await manager.pop_for_finalize(session_id)
+            # A second finalize on the same, now-removed, session must fail not_found.
+            await manager.pop_for_finalize(session_id)
+
+        with pytest.raises(NotFoundError):
+            asyncio.run(scenario())
+
+    def test_pop_for_finalize_with_zero_chunks_raises_invalid_request_and_removes_session(self):
+        manager = _session_manager()
+
+        async def begin_and_pop_empty():
+            session_id = await manager.begin(filename=None)
+            await manager.pop_for_finalize(session_id)
+            return session_id
+
+        try:
+            asyncio.run(begin_and_pop_empty())
+        except InvalidRequestError:
+            pass
+        else:
+            pytest.fail("expected InvalidRequestError")
+
+        # Re-derive session_id isn't possible after the exception path above discarded it inside
+        # the coroutine, so instead assert removal via a fresh session with a captured id.
+        async def begin_pop_empty_then_pop_again():
+            sid = await manager.begin(filename=None)
+            try:
+                await manager.pop_for_finalize(sid)
+            except InvalidRequestError:
+                pass
+            await manager.pop_for_finalize(sid)  # session must already be gone -> not_found
+
+        with pytest.raises(NotFoundError):
+            asyncio.run(begin_pop_empty_then_pop_again())
+
+    def test_pop_for_finalize_on_unknown_session_raises_not_found(self):
+        manager = _session_manager()
+        with pytest.raises(NotFoundError):
+            asyncio.run(manager.pop_for_finalize("nonexistent-session"))
+
+    def test_pop_for_finalize_on_expired_session_raises_not_found(self, monkeypatch: "pytest.MonkeyPatch"):
+        manager = _session_manager(ttl_seconds=1.0)
+        current_time = [1000.0]
+        monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+
+        async def scenario():
+            session_id = await manager.begin(filename=None)
+            await manager.append_chunk(session_id, 0, b"hello")
+            current_time[0] += 2.0
+            await manager.pop_for_finalize(session_id)
+
+        with pytest.raises(NotFoundError):
+            asyncio.run(scenario())
+
+
 class TestLocalFileProviderContentValidation:
     """Content sniffing/size limit - docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text."""
 

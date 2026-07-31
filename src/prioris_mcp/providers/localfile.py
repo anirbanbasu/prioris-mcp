@@ -136,6 +136,26 @@ class UploadSessionManager:
             session.last_touched = time.monotonic()
             return len(session.chunks)
 
+    async def pop_for_finalize(self, session_id: str) -> bytes:
+        """Remove and return a session's fully buffered content.
+
+        Removes the session whether it succeeds or raises `InvalidRequestError` (empty buffer) -
+        there is no retry-by-resubmitting-finalize; a caller must `begin_upload` again.
+
+        Raises:
+            NotFoundError: `session_id` is unknown or has expired past its TTL.
+            InvalidRequestError: zero chunks were ever appended.
+        """
+        async with self._session_locks.acquire(session_id):
+            async with self._registry_guard.acquire("_registry"):
+                self.sweep_expired()
+                session = self._sessions.pop(session_id, None)
+            if session is None:
+                raise NotFoundError(f"Upload session not recognised: {session_id}")
+            if len(session.chunks) == 0:
+                raise InvalidRequestError("finalize_upload called with zero chunks uploaded")
+            return bytes(session.chunks)
+
 
 class LocalFileProvider(ResearchPublicationProvider):
     """Parses caller-sent PDF bytes; implements only fetch_full_text/parse_full_text.
