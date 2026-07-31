@@ -201,7 +201,7 @@ class LocalFileProvider(ResearchPublicationProvider):
         # base64 has fixed, standard overhead (encoded length = 4 * ceil(n / 3) for n raw bytes),
         # so this bounds the decode to roughly the configured cap - but base64's 3-byte/4-char
         # rounding means a payload that passes this check can still decode to up to 2 bytes over
-        # the cap, which the post-decode check below catches exactly -
+        # the cap, which the post-decode check inside `_validate_and_persist` catches exactly -
         # see docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text.
         max_b64_length = 4 * -(-self._max_size_bytes // 3)
         if len(content_base64) > max_b64_length:
@@ -214,13 +214,24 @@ class LocalFileProvider(ResearchPublicationProvider):
         except binascii.Error as exc:
             raise InvalidRequestError(f"content_base64 is not valid base64: {exc}") from exc
 
+        return await self._validate_and_persist(content, filename)
+
+    async def _validate_and_persist(self, content: bytes, filename: str | None) -> dict:
+        """Post-decode validation, content-hash canonicalisation, and persistence.
+
+        Shared by `fetch_full_text` (content decoded from a single `content_base64` argument) and
+        `finalize_upload` (content decoded from a concatenated chunk buffer) - see
+        docs/superpowers/specs/2026-07-31-localfile-chunked-upload-design.md. This is what
+        guarantees identical validation (magic-byte sniff, size cap, hash-based dedup) applies to
+        both paths with no separate check needed for the chunked one.
+        """
         if len(content) > self._max_size_bytes:
             raise FileTooLargeError(
                 f"Decoded content is {len(content)} bytes, exceeding PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES "
                 f"({self._max_size_bytes} bytes)"
             )
         if not content.startswith(PDF_MAGIC_PREFIX):
-            raise InvalidRequestError("content_base64 does not decode to something that sniffs as a PDF")
+            raise InvalidRequestError("content does not decode to something that sniffs as a PDF")
 
         content_hash = await to_thread.run_sync(lambda: hashlib.sha256(content).hexdigest())
 
