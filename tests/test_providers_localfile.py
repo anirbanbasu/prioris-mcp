@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import random
 import re
 import time
 from pathlib import Path
@@ -128,6 +129,24 @@ class TestUploadSessionManagerBegin:
 
         second_session_id = asyncio.run(scenario())
         assert isinstance(second_session_id, str)
+
+    def test_begin_retries_on_session_id_collision(self, monkeypatch: "pytest.MonkeyPatch"):
+        manager = _session_manager()
+        # First begin() draws "aaaaaaaaaaaa" and registers it. Second begin() draws the same
+        # value again (a collision with the already-open session), forcing the `while` loop in
+        # `begin` to redraw once more before landing on the distinct "bbbbbbbbbbbb".
+        draws = iter(["aaaaaaaaaaaa", "aaaaaaaaaaaa", "bbbbbbbbbbbb"])
+        monkeypatch.setattr(random, "choices", lambda population, k: list(next(draws)))
+
+        async def scenario():
+            first_id = await manager.begin(filename=None)
+            second_id = await manager.begin(filename=None)
+            return first_id, second_id
+
+        first_id, second_id = asyncio.run(scenario())
+        assert first_id == "aaaaaaaaaaaa"
+        assert second_id == "bbbbbbbbbbbb"
+        assert first_id != second_id
 
 
 class TestUploadSessionManagerAppendChunk:
