@@ -221,7 +221,7 @@ Not applicable — see [Architecture → Local filesystem source](01-architectur
 
 ### Note on `research_localfile_fetch_full_text`
 
-Kept unchanged in behaviour as the small-file path (no forced migration), but marked a deprecation candidate once the chunked flow above is established — see the design at `docs/superpowers/specs/2026-07-31-localfile-chunked-upload-design.md`.
+Kept unchanged in behaviour as the small-file path — no forced migration. It remains the simplest option for content well within `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` and comfortably under transport size ceilings, but it is a deprecation candidate now that the chunked flow above exists as the recommended alternative for large files, since the two paths otherwise converge on the same validation and persistence logic.
 
 ## Storage management
 
