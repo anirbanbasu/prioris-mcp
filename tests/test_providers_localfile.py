@@ -47,12 +47,24 @@ startxref
 PDF_BASE64 = base64.b64encode(PDF_BYTES).decode("ascii")
 
 
-def _provider(tmp_path: Path, max_size_bytes: int = 10_000_000) -> LocalFileProvider:
+def _provider(
+    tmp_path: Path,
+    max_size_bytes: int = 10_000_000,
+    upload_ttl_seconds: float = 300.0,
+    upload_max_chunk_bytes: int = 1_048_576,
+    upload_max_concurrent: int = 16,
+) -> LocalFileProvider:
     storage = FilesystemStorageBackend(tmp_path / "storage")
     return LocalFileProvider(
         storage=storage,
         pdf_backend=LiteParsePdfBackend(),
         max_size_bytes=max_size_bytes,
+        upload_session_manager=UploadSessionManager(
+            ttl_seconds=upload_ttl_seconds,
+            max_chunk_bytes=upload_max_chunk_bytes,
+            max_total_bytes=max_size_bytes,
+            max_concurrent=upload_max_concurrent,
+        ),
     )
 
 
@@ -199,17 +211,18 @@ class TestUploadSessionManagerAppendChunk:
 class TestUploadSessionManagerPopForFinalize:
     """Popping a session's buffered content for finalize_upload."""
 
-    def test_pop_for_finalize_returns_concatenated_bytes(self):
+    def test_pop_for_finalize_returns_concatenated_bytes_and_filename(self):
         manager = _session_manager()
 
         async def scenario():
-            session_id = await manager.begin(filename=None)
+            session_id = await manager.begin(filename="paper.pdf")
             await manager.append_chunk(session_id, 0, b"hello ")
             await manager.append_chunk(session_id, 1, b"world")
             return await manager.pop_for_finalize(session_id)
 
-        content = asyncio.run(scenario())
+        content, filename = asyncio.run(scenario())
         assert content == b"hello world"
+        assert filename == "paper.pdf"
 
     def test_pop_for_finalize_removes_the_session_on_success(self):
         manager = _session_manager()
@@ -423,3 +436,151 @@ class TestLocalFileProviderDeleteDoesNotTouchOriginal:
         fetched = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
         asyncio.run(provider._storage.delete("localfile", fetched["id"], "pdf"))
         assert asyncio.run(provider._storage.find_canonical_identifier("localfile", fetched["id"], "pdf")) is None
+
+
+def _chunks(content: bytes, chunk_size: int) -> list[bytes]:
+    return [content[i : i + chunk_size] for i in range(0, len(content), chunk_size)]
+
+
+class TestLocalFileProviderChunkedUpload:
+    """docs/superpowers/specs/2026-07-31-localfile-chunked-upload-design.md."""
+
+    def test_happy_path_matches_fetch_full_text_result(self, tmp_path: Path):
+        chunked_provider = _provider(tmp_path / "chunked")
+        whole_provider = _provider(tmp_path / "whole")
+
+        async def chunked_scenario():
+            session_id = await chunked_provider.begin_upload(filename="paper.pdf")
+            for index, chunk in enumerate(_chunks(PDF_BYTES, 20)):
+                await chunked_provider.upload_chunk(session_id, index, base64.b64encode(chunk).decode("ascii"))
+            return await chunked_provider.finalize_upload(session_id)
+
+        chunked_result = asyncio.run(chunked_scenario())
+        whole_result = asyncio.run(whole_provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
+
+        assert chunked_result["format"] == whole_result["format"] == "pdf"
+        assert chunked_result["size_bytes"] == whole_result["size_bytes"] == len(PDF_BYTES)
+        assert chunked_result["served_from_storage"] is False
+        assert re.fullmatch(r"\d{8}-\d{4}-[0-9a-z]{4}", chunked_result["id"])
+
+    def test_finalize_of_identical_content_already_fetched_dedupes(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+
+        async def scenario():
+            await provider.fetch_full_text(PDF_BASE64, filename="paper.pdf")
+            session_id = await provider.begin_upload(filename="paper.pdf")
+            for index, chunk in enumerate(_chunks(PDF_BYTES, 20)):
+                await provider.upload_chunk(session_id, index, base64.b64encode(chunk).decode("ascii"))
+            return await provider.finalize_upload(session_id)
+
+        result = asyncio.run(scenario())
+        assert result["served_from_storage"] is True
+
+    def test_upload_chunk_with_skipped_index_raises_invalid_request(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+
+        async def scenario():
+            session_id = await provider.begin_upload(filename=None)
+            await provider.upload_chunk(session_id, 0, base64.b64encode(PDF_BYTES[:10]).decode("ascii"))
+            await provider.upload_chunk(session_id, 2, base64.b64encode(PDF_BYTES[10:20]).decode("ascii"))
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
+
+    def test_upload_chunk_on_unknown_session_raises_not_found(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+        with pytest.raises(NotFoundError):
+            asyncio.run(provider.upload_chunk("nonexistent-session", 0, base64.b64encode(b"hello").decode("ascii")))
+
+    def test_finalize_upload_on_unknown_session_raises_not_found(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+        with pytest.raises(NotFoundError):
+            asyncio.run(provider.finalize_upload("nonexistent-session"))
+
+    def test_upload_chunk_on_expired_session_raises_not_found(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        provider = _provider(tmp_path, upload_ttl_seconds=1.0)
+        current_time = [1000.0]
+        monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+
+        async def scenario():
+            session_id = await provider.begin_upload(filename=None)
+            current_time[0] += 2.0
+            await provider.upload_chunk(session_id, 0, base64.b64encode(b"hello").decode("ascii"))
+
+        with pytest.raises(NotFoundError):
+            asyncio.run(scenario())
+
+    def test_upload_chunk_with_invalid_base64_raises_invalid_request(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+
+        async def scenario():
+            session_id = await provider.begin_upload(filename=None)
+            await provider.upload_chunk(session_id, 0, "not-valid-base64!!!")
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
+
+    def test_upload_chunk_over_max_chunk_bytes_raises_file_too_large(self, tmp_path: Path):
+        provider = _provider(tmp_path, upload_max_chunk_bytes=4)
+
+        async def scenario():
+            session_id = await provider.begin_upload(filename=None)
+            await provider.upload_chunk(session_id, 0, base64.b64encode(b"12345").decode("ascii"))
+
+        with pytest.raises(FileTooLargeError):
+            asyncio.run(scenario())
+
+    def test_cumulative_total_over_max_size_bytes_raises_file_too_large_without_full_decode(self, tmp_path: Path):
+        provider = _provider(tmp_path, max_size_bytes=8, upload_max_chunk_bytes=10)
+
+        async def scenario():
+            session_id = await provider.begin_upload(filename=None)
+            await provider.upload_chunk(session_id, 0, base64.b64encode(b"12345").decode("ascii"))
+            await provider.upload_chunk(session_id, 1, base64.b64encode(b"1234").decode("ascii"))
+
+        with pytest.raises(FileTooLargeError):
+            asyncio.run(scenario())
+
+    def test_begin_upload_at_max_concurrent_sessions_raises_invalid_request(self, tmp_path: Path):
+        provider = _provider(tmp_path, upload_max_concurrent=1)
+
+        async def scenario():
+            await provider.begin_upload(filename=None)
+            await provider.begin_upload(filename=None)
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
+
+    def test_begin_upload_succeeds_again_after_one_is_finalized(self, tmp_path: Path):
+        provider = _provider(tmp_path, upload_max_concurrent=1)
+
+        async def scenario():
+            session_id = await provider.begin_upload(filename=None)
+            for index, chunk in enumerate(_chunks(PDF_BYTES, 20)):
+                await provider.upload_chunk(session_id, index, base64.b64encode(chunk).decode("ascii"))
+            await provider.finalize_upload(session_id)
+            return await provider.begin_upload(filename=None)
+
+        second_session_id = asyncio.run(scenario())
+        assert isinstance(second_session_id, str)
+
+    def test_finalize_upload_with_zero_chunks_raises_invalid_request(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+
+        async def scenario():
+            session_id = await provider.begin_upload(filename=None)
+            await provider.finalize_upload(session_id)
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
+
+    def test_finalize_upload_on_non_pdf_content_raises_invalid_request(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+
+        async def scenario():
+            session_id = await provider.begin_upload(filename=None)
+            await provider.upload_chunk(session_id, 0, base64.b64encode(b"not actually a pdf").decode("ascii"))
+            await provider.finalize_upload(session_id)
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())

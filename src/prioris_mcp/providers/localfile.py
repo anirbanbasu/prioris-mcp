@@ -136,8 +136,8 @@ class UploadSessionManager:
             session.last_touched = time.monotonic()
             return len(session.chunks)
 
-    async def pop_for_finalize(self, session_id: str) -> bytes:
-        """Remove and return a session's fully buffered content.
+    async def pop_for_finalize(self, session_id: str) -> tuple[bytes, str | None]:
+        """Remove and return a session's fully buffered content plus its stored filename.
 
         Removes the session whether it succeeds or raises `InvalidRequestError` (empty buffer) -
         there is no retry-by-resubmitting-finalize; a caller must `begin_upload` again.
@@ -154,7 +154,7 @@ class UploadSessionManager:
                 raise NotFoundError(f"Upload session not recognised: {session_id}")
             if len(session.chunks) == 0:
                 raise InvalidRequestError("finalize_upload called with zero chunks uploaded")
-            return bytes(session.chunks)
+            return bytes(session.chunks), session.filename
 
 
 class LocalFileProvider(ResearchPublicationProvider):
@@ -171,12 +171,14 @@ class LocalFileProvider(ResearchPublicationProvider):
         storage: StorageBackend,
         pdf_backend: ParserBackend,
         max_size_bytes: int,
+        upload_session_manager: UploadSessionManager,
         default_inline_char_limit: int = 20000,
     ) -> None:
         self._storage = storage
         self._pdf_backend = pdf_backend
         self._max_size_bytes = max_size_bytes
         self._default_inline_char_limit = default_inline_char_limit
+        self._upload_sessions = upload_session_manager
         # Guards the check-existing-hash-then-mint-then-write sequence in fetch_full_text so two
         # concurrent calls for the same content never both mint a caller-facing ID or both write -
         # see docs/requirement-specification/07-test-specification.md#cross-cutting-concurrency.
@@ -313,3 +315,22 @@ class LocalFileProvider(ResearchPublicationProvider):
             "has_more": page["has_more"],
             "resource_uri": f"research://localfile/{quote(identifier, safe='')}/pdf/markdown",
         }
+
+    async def begin_upload(self, filename: str | None = None) -> str:
+        """See docs/requirement-specification/06-interface-specification.md#research_localfile_begin_upload."""
+        session_id = await self._upload_sessions.begin(filename)
+        return session_id
+
+    async def upload_chunk(self, session_id: str, index: int, chunk_base64: str) -> dict:
+        """See docs/requirement-specification/06-interface-specification.md#research_localfile_upload_chunk."""
+        try:
+            chunk = await to_thread.run_sync(base64.b64decode, chunk_base64, None, True)
+        except binascii.Error as exc:
+            raise InvalidRequestError(f"chunk_base64 is not valid base64: {exc}") from exc
+        bytes_so_far = await self._upload_sessions.append_chunk(session_id, index, chunk)
+        return {"received_index": index, "bytes_so_far": bytes_so_far}
+
+    async def finalize_upload(self, session_id: str) -> dict:
+        """See docs/requirement-specification/06-interface-specification.md#research_localfile_finalize_upload."""
+        content, filename = await self._upload_sessions.pop_for_finalize(session_id)
+        return await self._validate_and_persist(content, filename)
