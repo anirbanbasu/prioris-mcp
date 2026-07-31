@@ -18,7 +18,7 @@ Every tool below returns a common envelope on failure: `{"error": "<code>", "mes
 | `invalid_request` | Caller-supplied arguments fail validation before any outbound call (e.g. an arXiv search exceeding arXiv's own result-count bounds, or an unsupported `format` passed to `research_resolve_identifier`). |
 | `rate_limited` | The provider's outbound queue exhausted its backoff budget after repeated `429`s from the source. |
 | `provider_unavailable` | A timeout, connection failure, or `5xx` from the source — surfaced immediately, never retried. |
-| `file_too_large` | `research_localfile_fetch_full_text`'s path resolves to a file exceeding `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`. |
+| `file_too_large` | `research_localfile_fetch_full_text`'s decoded content exceeds `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`. Also covers the chunked-upload path: a single chunk over `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES` in `research_localfile_upload_chunk`, or a reassembled total over `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` in `research_localfile_upload_chunk`/`research_localfile_finalize_upload`. |
 
 ## arXiv tools
 
@@ -57,10 +57,13 @@ This is the one capability exposed at the grouping level rather than per-provide
 
 | Tool | Description | Key inputs | Notes |
 |---|---|---|---|
-| `research_localfile_fetch_full_text` | Validate and persist caller-sent PDF bytes. | `content_base64`, `filename` (optional) | Rejects invalid base64, or a payload whose (encoded or decoded) size exceeds `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`, with `file_too_large`/`invalid_request`. Validates content as a PDF by its magic bytes, not `filename`'s extension. Re-fetching unchanged content reuses the same server-assigned `id`; changed content gets a new one. |
-| `research_localfile_parse_full_text` | Convert an already-fetched local PDF's full text into one page of Markdown. | `id`, `offset` (default 0), `limit` (default `PRIORIS_MCP_MAX_INLINE_CHARS`) | `id` is the caller-facing identifier `research_localfile_fetch_full_text` returned. Never triggers a fetch — fails with `not_found` if `id` isn't recognised. |
+| `research_localfile_fetch_full_text` | Validate and persist caller-sent PDF bytes, in a single call. | `content_base64`, `filename` (optional) | Rejects invalid base64, or a payload whose (encoded or decoded) size exceeds `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`, with `file_too_large`/`invalid_request`. Validates content as a PDF by its magic bytes, not `filename`'s extension. Re-fetching unchanged content reuses the same server-assigned `id`; changed content gets a new one. **Deprecation candidate** now that the chunked-upload flow below exists for files at risk of hitting transport/relay size ceilings — kept unchanged as the small-file path for now, no forced migration. |
+| `research_localfile_parse_full_text` | Convert an already-fetched local PDF's full text into one page of Markdown. | `id`, `offset` (default 0), `limit` (default `PRIORIS_MCP_MAX_INLINE_CHARS`) | `id` is the caller-facing identifier `research_localfile_fetch_full_text`/`research_localfile_finalize_upload` returned. Never triggers a fetch — fails with `not_found` if `id` isn't recognised. |
+| `research_localfile_begin_upload` | Start a new chunked upload session for a large local PDF. | `filename` (optional) | Returns `session_id`. Fails `invalid_request` at `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS` open sessions. |
+| `research_localfile_upload_chunk` | Upload one chunk to an in-progress upload session. | `session_id`, `index`, `chunk_base64` | Chunks must arrive in strict sequential order (no `total_chunks` argument). Fails `not_found` on an unknown/expired session, `invalid_request` on an out-of-order index, `file_too_large` on an oversized chunk or cumulative total. |
+| `research_localfile_finalize_upload` | Reassemble a session's chunks and persist them, same validation as `research_localfile_fetch_full_text`. | `session_id` | Same output shape as `research_localfile_fetch_full_text`. Removes the session whether it succeeds or fails. |
 
-Deliberately narrower than the arXiv/Europe PMC tool sets — no search, listing, metadata, or identifier resolution for this source (see [Architecture → Local filesystem source](requirement-specification/01-architecture.md#local-filesystem-source)). Neither tool is subject to rate limiting — there's no outbound network request to throttle.
+Deliberately narrower than the arXiv/Europe PMC tool sets — no search, listing, metadata, or identifier resolution for this source (see [Architecture → Local filesystem source](requirement-specification/01-architecture.md#local-filesystem-source)). None of the five tools is subject to rate limiting — there's no outbound network request to throttle.
 
 ## Storage management tools
 
@@ -77,4 +80,4 @@ Grouping-level, like `research_resolve_identifier` — not split per provider, s
 
 Response shapes are still evolving alongside the SRS — prefer the [Interface specification](requirement-specification/06-interface-specification.md) as the source of truth for exact wire-level fields.
 
-`research_localfile_fetch_full_text`/`research_localfile_parse_full_text` and `research_list_fetched`/`research_delete_fetched` are excluded from the response cache entirely — the local file source re-hashes file content on every call by design, and list/delete must reflect live storage state.
+`research_localfile_fetch_full_text`/`research_localfile_parse_full_text`, `research_localfile_begin_upload`/`research_localfile_upload_chunk`/`research_localfile_finalize_upload`, and `research_list_fetched`/`research_delete_fetched` are excluded from the response cache entirely — the local file source re-hashes file content on every call by design, the chunked-upload tools mutate in-memory session state that must never be served stale, and list/delete must reflect live storage state.

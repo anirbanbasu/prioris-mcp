@@ -48,6 +48,16 @@ There is no `research_europepmc_list_top_n` to test against — confirm its abse
 
 **No rate limiting:** confirm neither tool is routed through a per-provider outbound queue and that no outbound network request occurs for either — per [Architecture → Local filesystem source](01-architecture.md#local-filesystem-source).
 
+**Chunked upload (`research_localfile_begin_upload` / `research_localfile_upload_chunk` / `research_localfile_finalize_upload`):**
+
+- Chunked upload happy path: `begin_upload` → sequential `upload_chunk` calls → `finalize_upload` produces the same result shape as `fetch_full_text`, including `served_from_storage` dedup.
+- `upload_chunk` with a skipped or repeated `index` fails `invalid_request`.
+- `upload_chunk`/`finalize_upload` on an unknown or TTL-expired `session_id` fails `not_found`.
+- `upload_chunk` with a chunk over `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES` fails `file_too_large`; cumulative total over `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` fails `file_too_large` without a full decode.
+- `begin_upload` at `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS` open sessions fails `invalid_request`; succeeds again once one is finalized or expires.
+- `finalize_upload` with zero chunks uploaded fails `invalid_request`.
+- `finalize_upload` on reassembled content that doesn't sniff as a PDF fails `invalid_request`, proving `_validate_and_persist` applies identically to both paths.
+
 ## Storage management acceptance criteria
 
 | Tool | Criteria |
