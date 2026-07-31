@@ -313,11 +313,13 @@ class PriorisMCP(MCPMixin):
         is a deprecation candidate once the chunked flow is established, though it is not being
         removed now.
         """
-        logger.warning(
-            "research_localfile_fetch_full_text is a deprecation candidate - see "
-            "research_localfile_begin_upload/research_localfile_upload_chunk/research_localfile_finalize_upload "
-            "for the chunked-upload alternative"
-        )
+        if not getattr(self, "_warned_localfile_fetch_full_text_deprecation", False):
+            logger.warning(
+                "research_localfile_fetch_full_text is a deprecation candidate - see "
+                "research_localfile_begin_upload/research_localfile_upload_chunk/research_localfile_finalize_upload "
+                "for the chunked-upload alternative"
+            )
+            self._warned_localfile_fetch_full_text_deprecation = True
         return await call_returning_envelope(self._localfile_provider.fetch_full_text(content_base64, filename))
 
     async def research_localfile_parse_full_text(
