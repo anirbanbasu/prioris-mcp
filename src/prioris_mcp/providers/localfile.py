@@ -131,8 +131,8 @@ class UploadSessionManager:
             # coinciding with concurrent activity on another session - narrow enough, and cheap
             # enough for the caller to recover from (retry the session), that it's an accepted
             # tradeoff rather than a reason to hold `_registry_guard` across the whole method (see
-            # `_mint_locks` above for a similar accepted-risk tradeoff on the same kind of
-            # check-then-release race).
+            # `LocalFileProvider._mint_locks` usage below for a similar accepted-risk tradeoff on the
+            # same kind of check-then-release race).
             session.last_touched = time.monotonic()
             return len(session.chunks)
 
