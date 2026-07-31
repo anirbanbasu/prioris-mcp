@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import re
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -8,7 +9,7 @@ import pytest
 
 from prioris_mcp.errors import FileTooLargeError, InvalidRequestError, NotFoundError
 from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
-from prioris_mcp.providers.localfile import PDF_MAGIC_PREFIX, LocalFileProvider
+from prioris_mcp.providers.localfile import PDF_MAGIC_PREFIX, LocalFileProvider, UploadSessionManager
 from prioris_mcp.storage import FilesystemStorageBackend
 
 # A structurally valid minimal PDF, not just a "%PDF-" magic-prefix stub: earlier tasks only
@@ -53,6 +54,68 @@ def _provider(tmp_path: Path, max_size_bytes: int = 10_000_000) -> LocalFileProv
         pdf_backend=LiteParsePdfBackend(),
         max_size_bytes=max_size_bytes,
     )
+
+
+def _session_manager(
+    ttl_seconds: float = 300.0,
+    max_chunk_bytes: int = 1_048_576,
+    max_total_bytes: int = 10_000_000,
+    max_concurrent: int = 16,
+) -> UploadSessionManager:
+    return UploadSessionManager(
+        ttl_seconds=ttl_seconds,
+        max_chunk_bytes=max_chunk_bytes,
+        max_total_bytes=max_total_bytes,
+        max_concurrent=max_concurrent,
+    )
+
+
+class TestUploadSessionManagerBegin:
+    """Session creation and the concurrent-session cap."""
+
+    def test_begin_mints_a_session_id(self):
+        manager = _session_manager()
+        session_id = asyncio.run(manager.begin(filename="paper.pdf"))
+        assert isinstance(session_id, str)
+        assert len(session_id) > 0
+
+    def test_begin_mints_distinct_ids_for_distinct_sessions(self):
+        manager = _session_manager()
+
+        async def scenario():
+            return await manager.begin(filename=None), await manager.begin(filename=None)
+
+        first, second = asyncio.run(scenario())
+        assert first != second
+
+    def test_filename_is_optional(self):
+        manager = _session_manager()
+        session_id = asyncio.run(manager.begin(filename=None))
+        assert isinstance(session_id, str)
+
+    def test_begin_at_max_concurrent_sessions_raises_invalid_request(self):
+        manager = _session_manager(max_concurrent=2)
+
+        async def scenario():
+            await manager.begin(filename=None)
+            await manager.begin(filename=None)
+            await manager.begin(filename=None)
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
+
+    def test_begin_succeeds_again_after_a_session_expires(self, monkeypatch: "pytest.MonkeyPatch"):
+        manager = _session_manager(max_concurrent=1, ttl_seconds=1.0)
+        current_time = [1000.0]
+        monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+
+        async def scenario():
+            await manager.begin(filename=None)
+            current_time[0] += 2.0  # past the 1-second TTL
+            return await manager.begin(filename=None)
+
+        second_session_id = asyncio.run(scenario())
+        assert isinstance(second_session_id, str)
 
 
 class TestLocalFileProviderContentValidation:

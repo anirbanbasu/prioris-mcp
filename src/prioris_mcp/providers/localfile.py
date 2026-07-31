@@ -9,6 +9,8 @@ import hashlib
 import logging
 import random
 import string
+import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from urllib.parse import quote
 
@@ -29,6 +31,61 @@ PDF_MAGIC_PREFIX = b"%PDF-"
 # Base-36: digits + lowercase letters, matching the caller-facing ID format documented in
 # docs/requirement-specification/06-interface-specification.md#local-filesystem.
 _SUFFIX_ALPHABET = string.digits + string.ascii_lowercase
+
+
+@dataclass
+class _UploadSession:
+    """In-memory buffer for one in-progress chunked upload."""
+
+    filename: str | None
+    chunks: bytearray = field(default_factory=bytearray)
+    next_index: int = 0
+    last_touched: float = field(default_factory=lambda: time.monotonic())
+
+
+class UploadSessionManager:
+    """Tracks in-progress chunked uploads for the local filesystem source.
+
+    See docs/superpowers/specs/2026-07-31-localfile-chunked-upload-design.md - sessions are
+    server-minted, buffered in memory (not disk-spooled), require strictly sequential chunk
+    indices, and are swept lazily (on `begin`) rather than by a background task.
+    """
+
+    def __init__(self, ttl_seconds: float, max_chunk_bytes: int, max_total_bytes: int, max_concurrent: int) -> None:
+        self._ttl_seconds = ttl_seconds
+        self._max_chunk_bytes = max_chunk_bytes
+        self._max_total_bytes = max_total_bytes
+        self._max_concurrent = max_concurrent
+        self._sessions: dict[str, _UploadSession] = {}
+        self._registry_guard = KeyedAsyncLockManager()
+        self._session_locks = KeyedAsyncLockManager()
+
+    def sweep_expired(self) -> None:
+        """Drop sessions untouched for longer than `ttl_seconds`. Not itself lock-guarded - callers hold `_registry_guard` first."""
+        now = time.monotonic()
+        expired = [
+            session_id
+            for session_id, session in self._sessions.items()
+            if now - session.last_touched > self._ttl_seconds
+        ]
+        for session_id in expired:
+            del self._sessions[session_id]
+
+    async def begin(self, filename: str | None) -> str:
+        """Mint a new session ID and register an empty buffer for it.
+
+        Raises:
+            InvalidRequestError: at `max_concurrent` open sessions even after sweeping expired ones.
+        """
+        async with self._registry_guard.acquire("_registry"):
+            self.sweep_expired()
+            if len(self._sessions) >= self._max_concurrent:
+                raise InvalidRequestError("too many concurrent uploads in progress, retry later")
+            session_id = "".join(random.choices(_SUFFIX_ALPHABET, k=12))
+            while session_id in self._sessions:
+                session_id = "".join(random.choices(_SUFFIX_ALPHABET, k=12))
+            self._sessions[session_id] = _UploadSession(filename=filename)
+            return session_id
 
 
 class LocalFileProvider(ResearchPublicationProvider):
