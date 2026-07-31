@@ -1,0 +1,67 @@
+name: MCP contract / compatibility issue
+description: A mismatch between the documented tool contract and the server's actual behavior, or a compatibility issue with an MCP client.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when a tool's name, arguments, return shape, or error behavior disagrees
+        with `docs/requirement-specification/06-interface-specification.md`, `docs/03-tools.md`,
+        or with what an MCP client (e.g. the [`prioris`](https://github.com/anirbanbasu/prioris)
+        Claude Code plugin) expects.
+
+  - type: input
+    id: server-version
+    attributes:
+      label: prioris-mcp version
+      placeholder: e.g. 0.1.0.post2
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: MCP client and version
+      placeholder: e.g. prioris plugin v0.2.0, Claude Code 1.x, MCP Inspector
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tool-area
+    attributes:
+      label: Which capability is affected?
+      options:
+        - arXiv search/fetch/parse
+        - Europe PMC search/fetch/parse
+        - Local filesystem fetch/parse
+        - Identifier resolution
+        - Storage management (list/delete)
+        - Response metadata (result.meta)
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-contract
+    attributes:
+      label: Expected contract
+      description: What the docs (or the client) currently expect — tool name, arguments, return shape.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-behavior
+    attributes:
+      label: Actual server behavior
+      description: What the server actually returned or how it actually behaved. Include the raw tool call/response if possible.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Which client(s) or workflows break as a result?
+    validations:
+      required: false

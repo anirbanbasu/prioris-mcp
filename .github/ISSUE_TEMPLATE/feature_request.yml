@@ -1,0 +1,59 @@
+name: Feature or new provider request
+description: Request a new provider, a new tool, or a server-level capability.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Note PriorisMCP's deliberate v1 scope (see
+        `docs/requirement-specification/index.md#out-of-scope-for-v1`): no authenticated
+        sources, no fetching arbitrary caller-supplied URLs, no server-side reads by path,
+        no manuscript drafting. Requests that fall into that territory will likely be
+        declined or deferred.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of request is this?
+      options:
+        - New research-publication provider (beyond arXiv / Europe PMC / local file)
+        - New provider grouping (e.g. patents)
+        - New tool on an existing provider
+        - Storage backend (e.g. S3/remote)
+        - Transport / protocol enhancement
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: What can't you currently do, and why does it matter?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What would the tool/provider/capability actually do? Include example tool calls if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope-check
+    attributes:
+      label: Scope check
+      options:
+        - label: This request is about looking up prior art (search/fetch/parse/storage) — not manuscript drafting.
+          required: true
+        - label: This does not require the server to fetch an arbitrary caller-supplied URL or read from the server's own filesystem by path (see the security rationale in docs/requirement-specification/05-security.md).
+          required: false

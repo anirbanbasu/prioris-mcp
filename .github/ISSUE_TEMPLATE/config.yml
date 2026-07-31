@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: prioris plugin issues
+    url: https://github.com/anirbanbasu/prioris/issues
+    about: If this is about the prioris Claude Code plugin (skills, slash commands) rather than the MCP server itself, file it there instead.

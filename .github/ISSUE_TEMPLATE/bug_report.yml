@@ -1,0 +1,110 @@
+name: Bug report
+description: Something in the PriorisMCP server isn't working as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. If this is a mismatch between the
+        server's documented tool contract and its actual behavior, use the
+        **MCP contract / compatibility issue** template instead — it asks more targeted
+        questions.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: The exact tool call (name + arguments) or command that triggers it.
+      placeholder: |
+        1. Called `research_arxiv_fetch_full_text` with identifier "2401.12345"
+        2. ...
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include any error messages, tool error envelopes, or unexpected output verbatim.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tool-area
+    attributes:
+      label: Which capability is affected?
+      options:
+        - arXiv search/fetch/parse
+        - Europe PMC search/fetch/parse
+        - Local filesystem fetch/parse
+        - Identifier resolution
+        - Storage management (list/delete)
+        - Rate limiting / backoff
+        - Response caching
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - stdio
+        - streamable-http
+        - http
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: server-version
+    attributes:
+      label: prioris-mcp version
+      placeholder: e.g. 0.1.0.post2 (see pyproject.toml, or the version stamped in the tool response's result.meta)
+    validations:
+      required: true
+
+  - type: input
+    id: mcp-client
+    attributes:
+      label: MCP client
+      placeholder: e.g. Claude Code, MCP Inspector, the prioris plugin
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or tool response (including result.meta)
+      render: shell
+    validations:
+      required: false
