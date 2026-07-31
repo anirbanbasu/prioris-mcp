@@ -110,6 +110,32 @@ class EnvVars:
         validate=Range(min=1),
     )
 
+    PRIORIS_MCP_LOCAL_FILE_UPLOAD_SESSION_TTL_SECONDS = env.float(
+        "PRIORIS_MCP_LOCAL_FILE_UPLOAD_SESSION_TTL_SECONDS",
+        # An upload session idle this long (no upload_chunk call) is treated as abandoned and
+        # swept lazily on the next begin_upload call - see
+        # docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text.
+        default=300.0,
+        validate=Range(min=1),
+    )
+
+    PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES = env.int(
+        "PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES",
+        # Comfortably under the mcp SDK's ~4 MiB HTTP body cap on streamable-http/http - a single
+        # oversized chunk is rejected outright rather than silently accepted and only caught by
+        # the cumulative-total check.
+        default=1024 * 1024,
+        validate=Range(min=1),
+    )
+
+    PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS = env.int(
+        "PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS",
+        # Bounds worst-case buffered memory (max_concurrent * PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES)
+        # between TTL sweeps.
+        default=16,
+        validate=Range(min=1),
+    )
+
 
 logging.basicConfig(
     level=EnvVars.PRIORIS_MCP_LOG_LEVEL,
