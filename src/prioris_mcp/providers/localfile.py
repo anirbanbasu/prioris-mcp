@@ -46,7 +46,7 @@ class _UploadSession:
 class UploadSessionManager:
     """Tracks in-progress chunked uploads for the local filesystem source.
 
-    See docs/superpowers/specs/2026-07-31-localfile-chunked-upload-design.md - sessions are
+    See docs/requirement-specification/06-interface-specification.md#local-filesystem - sessions are
     server-minted, buffered in memory (not disk-spooled), require strictly sequential chunk
     indices, and are swept lazily (on `begin`) rather than by a background task.
     """
