@@ -195,7 +195,7 @@ Not applicable — see [Architecture → Local filesystem source](01-architectur
 
 **Input:** `filename` (string, optional — stored for the session, forwarded to the manifest's `original_identifier` at finalize; never used to resolve a server-side path).
 
-**Output:** `{"session_id": <string>}`.
+**Output:** `{"session_id": <string>, "max_chunk_bytes": <int>}` — `max_chunk_bytes` echoes `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES` so the caller can size chunks without needing to know the server's configuration out of band.
 
 **Errors:** `invalid_request` if `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS` open sessions already exist (checked after sweeping any TTL-expired sessions).
 

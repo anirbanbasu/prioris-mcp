@@ -823,6 +823,17 @@ startxref
 
         return asyncio.run(scenario())
 
+    def test_begin_upload_returns_max_chunk_bytes(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES", 4096)
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_localfile_begin_upload", arguments={})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["max_chunk_bytes"] == 4096
+
     def test_chunked_upload_happy_path_matches_single_call_result(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
     ):

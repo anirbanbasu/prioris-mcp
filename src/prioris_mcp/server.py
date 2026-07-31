@@ -349,7 +349,7 @@ class PriorisMCP(MCPMixin):
 
     async def _begin_upload(self, filename: str | None) -> dict:
         session_id = await self._localfile_provider.begin_upload(filename)
-        return {"session_id": session_id}
+        return {"session_id": session_id, "max_chunk_bytes": EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES}
 
     async def research_localfile_upload_chunk(
         self,
