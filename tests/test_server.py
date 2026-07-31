@@ -130,11 +130,25 @@ class TestMCPServer:
         tool_names = {t["fn"] for t in PriorisMCP.tools}
         assert "research_localfile_fetch_full_text" in tool_names
         assert "research_localfile_parse_full_text" in tool_names
+        assert "research_localfile_begin_upload" in tool_names
+        assert "research_localfile_upload_chunk" in tool_names
+        assert "research_localfile_finalize_upload" in tool_names
         assert "research_list_fetched" in tool_names
         assert "research_delete_fetched" in tool_names
         assert "research_localfile_search" not in tool_names
         assert "research_localfile_fetch_metadata" not in tool_names
         assert "research_localfile_list_top_n" not in tool_names
+
+    def test_localfile_provider_uses_configured_upload_limits(self, monkeypatch: "pytest.MonkeyPatch"):
+        """The chunked-upload session manager must be built from EnvVars, not hardcoded defaults."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_LOCAL_FILE_UPLOAD_SESSION_TTL_SECONDS", 42.0)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES", 4096)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS", 3)
+        mcp_obj = PriorisMCP()
+        upload_sessions = mcp_obj._localfile_provider._upload_sessions
+        assert upload_sessions._ttl_seconds == 42.0
+        assert upload_sessions._max_chunk_bytes == 4096
+        assert upload_sessions._max_concurrent == 3
 
 
 class TestArxivTools:

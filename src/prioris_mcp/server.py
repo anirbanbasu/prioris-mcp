@@ -86,6 +86,21 @@ class PriorisMCP(MCPMixin):
             "tags": ["research", "localfile"],
             "annotations": {"readOnlyHint": True},
         },
+        {
+            "fn": "research_localfile_begin_upload",
+            "tags": ["research", "localfile"],
+            "annotations": {"readOnlyHint": False},
+        },
+        {
+            "fn": "research_localfile_upload_chunk",
+            "tags": ["research", "localfile"],
+            "annotations": {"readOnlyHint": False},
+        },
+        {
+            "fn": "research_localfile_finalize_upload",
+            "tags": ["research", "localfile"],
+            "annotations": {"readOnlyHint": False},
+        },
         {"fn": "research_list_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
         {
             "fn": "research_delete_fetched",
@@ -290,7 +305,19 @@ class PriorisMCP(MCPMixin):
             str | None, Field(default=None, description="Optional caller-supplied filename, stored for reference only")
         ] = None,
     ) -> dict:
-        """Validate and persist caller-sent PDF bytes, returning a server-assigned caller-facing ID."""
+        """Validate and persist caller-sent PDF bytes, returning a server-assigned caller-facing ID.
+
+        Small-file path only - the whole payload must fit in one call. For files at risk of
+        hitting transport/relay size limits, use research_localfile_begin_upload +
+        research_localfile_upload_chunk + research_localfile_finalize_upload instead. This tool
+        is a deprecation candidate once the chunked flow is established, though it is not being
+        removed now.
+        """
+        logger.warning(
+            "research_localfile_fetch_full_text is a deprecation candidate - see "
+            "research_localfile_begin_upload/research_localfile_upload_chunk/research_localfile_finalize_upload "
+            "for the chunked-upload alternative"
+        )
         return await call_returning_envelope(self._localfile_provider.fetch_full_text(content_base64, filename))
 
     async def research_localfile_parse_full_text(
@@ -307,6 +334,38 @@ class PriorisMCP(MCPMixin):
     ) -> dict:
         """Convert an already-fetched local PDF's full text into one page of Markdown."""
         return await call_returning_envelope(self._localfile_provider.parse_full_text(id, offset=offset, limit=limit))
+
+    async def research_localfile_begin_upload(
+        self,
+        ctx: Context,
+        filename: Annotated[
+            str | None, Field(default=None, description="Optional caller-supplied filename, stored for reference only")
+        ] = None,
+    ) -> dict:
+        """Start a new chunked upload session for a large local PDF; returns a session_id."""
+        return await call_returning_envelope(self._begin_upload(filename))
+
+    async def _begin_upload(self, filename: str | None) -> dict:
+        session_id = await self._localfile_provider.begin_upload(filename)
+        return {"session_id": session_id}
+
+    async def research_localfile_upload_chunk(
+        self,
+        ctx: Context,
+        session_id: Annotated[str, Field(description="The session_id returned by research_localfile_begin_upload")],
+        index: Annotated[int, Field(description="Zero-based chunk index; chunks must arrive in strict order")],
+        chunk_base64: Annotated[str, Field(description="Base64-encoded bytes of this chunk")],
+    ) -> dict:
+        """Upload one chunk of a large local PDF to an in-progress upload session."""
+        return await call_returning_envelope(self._localfile_provider.upload_chunk(session_id, index, chunk_base64))
+
+    async def research_localfile_finalize_upload(
+        self,
+        ctx: Context,
+        session_id: Annotated[str, Field(description="The session_id returned by research_localfile_begin_upload")],
+    ) -> dict:
+        """Validate and persist a chunked upload session's reassembled content, same as fetch_full_text."""
+        return await call_returning_envelope(self._localfile_provider.finalize_upload(session_id))
 
     async def research_list_fetched(
         self,
