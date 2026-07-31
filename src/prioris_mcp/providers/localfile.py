@@ -87,6 +87,41 @@ class UploadSessionManager:
             self._sessions[session_id] = _UploadSession(filename=filename)
             return session_id
 
+    async def append_chunk(self, session_id: str, index: int, chunk: bytes) -> int:
+        """Append one chunk to a session's buffer; returns the new cumulative byte count.
+
+        Raises:
+            NotFoundError: `session_id` is unknown or has expired past its TTL.
+            InvalidRequestError: `index` is not exactly the next expected index.
+            FileTooLargeError: this chunk, or the new cumulative total, exceeds its cap.
+        """
+        if len(chunk) > self._max_chunk_bytes:
+            raise FileTooLargeError(
+                f"Chunk is {len(chunk)} bytes, exceeding PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES "
+                f"({self._max_chunk_bytes} bytes)"
+            )
+        async with self._session_locks.acquire(session_id):
+            async with self._registry_guard.acquire("_registry"):
+                self.sweep_expired()
+                session = self._sessions.get(session_id)
+            if session is None:
+                raise NotFoundError(f"Upload session not recognised: {session_id}")
+            if index != session.next_index:
+                raise InvalidRequestError(
+                    f"Expected chunk index {session.next_index}, got {index} - chunks must be uploaded in strict "
+                    "sequential order"
+                )
+            new_total = len(session.chunks) + len(chunk)
+            if new_total > self._max_total_bytes:
+                raise FileTooLargeError(
+                    f"Cumulative upload is {new_total} bytes, exceeding PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES "
+                    f"({self._max_total_bytes} bytes)"
+                )
+            session.chunks.extend(chunk)
+            session.next_index += 1
+            session.last_touched = time.monotonic()
+            return len(session.chunks)
+
 
 class LocalFileProvider(ResearchPublicationProvider):
     """Parses caller-sent PDF bytes; implements only fetch_full_text/parse_full_text.

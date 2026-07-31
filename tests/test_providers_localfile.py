@@ -118,6 +118,84 @@ class TestUploadSessionManagerBegin:
         assert isinstance(second_session_id, str)
 
 
+class TestUploadSessionManagerAppendChunk:
+    """Sequential ordering, per-chunk cap, and running-total cap."""
+
+    def test_append_chunk_accumulates_bytes_in_order(self):
+        manager = _session_manager()
+
+        async def scenario():
+            session_id = await manager.begin(filename=None)
+            first_total = await manager.append_chunk(session_id, 0, b"hello ")
+            second_total = await manager.append_chunk(session_id, 1, b"world")
+            return first_total, second_total
+
+        first_total, second_total = asyncio.run(scenario())
+        assert first_total == 6
+        assert second_total == 11
+
+    def test_append_chunk_with_skipped_index_raises_invalid_request(self):
+        manager = _session_manager()
+
+        async def scenario():
+            session_id = await manager.begin(filename=None)
+            await manager.append_chunk(session_id, 0, b"hello")
+            await manager.append_chunk(session_id, 2, b"world")  # skips index 1
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
+
+    def test_append_chunk_with_repeated_index_raises_invalid_request(self):
+        manager = _session_manager()
+
+        async def scenario():
+            session_id = await manager.begin(filename=None)
+            await manager.append_chunk(session_id, 0, b"hello")
+            await manager.append_chunk(session_id, 0, b"hello again")  # repeats index 0
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
+
+    def test_append_chunk_on_unknown_session_raises_not_found(self):
+        manager = _session_manager()
+        with pytest.raises(NotFoundError):
+            asyncio.run(manager.append_chunk("nonexistent-session", 0, b"hello"))
+
+    def test_append_chunk_on_expired_session_raises_not_found(self, monkeypatch: "pytest.MonkeyPatch"):
+        manager = _session_manager(ttl_seconds=1.0)
+        current_time = [1000.0]
+        monkeypatch.setattr(time, "monotonic", lambda: current_time[0])
+
+        async def scenario():
+            session_id = await manager.begin(filename=None)
+            current_time[0] += 2.0
+            await manager.append_chunk(session_id, 0, b"hello")
+
+        with pytest.raises(NotFoundError):
+            asyncio.run(scenario())
+
+    def test_append_chunk_over_max_chunk_bytes_raises_file_too_large(self):
+        manager = _session_manager(max_chunk_bytes=4)
+
+        async def scenario():
+            session_id = await manager.begin(filename=None)
+            await manager.append_chunk(session_id, 0, b"12345")  # 5 bytes > 4-byte cap
+
+        with pytest.raises(FileTooLargeError):
+            asyncio.run(scenario())
+
+    def test_append_chunk_cumulative_total_over_max_total_bytes_raises_file_too_large(self):
+        manager = _session_manager(max_chunk_bytes=10, max_total_bytes=8)
+
+        async def scenario():
+            session_id = await manager.begin(filename=None)
+            await manager.append_chunk(session_id, 0, b"12345")  # 5 bytes, under both caps
+            await manager.append_chunk(session_id, 1, b"1234")  # 9 bytes cumulative > 8-byte total cap
+
+        with pytest.raises(FileTooLargeError):
+            asyncio.run(scenario())
+
+
 class TestLocalFileProviderContentValidation:
     """Content sniffing/size limit - docs/requirement-specification/05-security.md#fetched-content-is-untrusted-input-to-parse_full_text."""
 
