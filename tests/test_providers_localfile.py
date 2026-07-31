@@ -462,7 +462,7 @@ def _chunks(content: bytes, chunk_size: int) -> list[bytes]:
 
 
 class TestLocalFileProviderChunkedUpload:
-    """docs/superpowers/specs/2026-07-31-localfile-chunked-upload-design.md."""
+    """docs/requirement-specification/06-interface-specification.md#local-filesystem."""
 
     def test_happy_path_matches_fetch_full_text_result(self, tmp_path: Path):
         chunked_provider = _provider(tmp_path / "chunked")
