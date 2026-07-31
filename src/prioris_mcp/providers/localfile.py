@@ -119,6 +119,20 @@ class UploadSessionManager:
                 )
             session.chunks.extend(chunk)
             session.next_index += 1
+            # `last_touched` is refreshed here, after `_registry_guard` has already been released
+            # above (only the lookup needs the registry lock; the mutation below only needs
+            # `_session_locks`). Between that release and this line, a *different* session's
+            # concurrent `begin()` can acquire `_registry_guard` and run `sweep_expired()`; if this
+            # session's stale `last_touched` (from before this call started) is already past the
+            # TTL, the sweep can drop `session_id` from `_sessions` while this append is mid-flight.
+            # The chunk write above still succeeds and this call still returns a byte count, but the
+            # session is gone from the registry, so the caller's next `upload_chunk`/`finalize_upload`
+            # sees a `NotFoundError` instead of the accepted chunk. This requires TTL-boundary timing
+            # coinciding with concurrent activity on another session - narrow enough, and cheap
+            # enough for the caller to recover from (retry the session), that it's an accepted
+            # tradeoff rather than a reason to hold `_registry_guard` across the whole method (see
+            # `_mint_locks` above for a similar accepted-risk tradeoff on the same kind of
+            # check-then-release race).
             session.last_touched = time.monotonic()
             return len(session.chunks)
 
