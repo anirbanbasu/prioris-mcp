@@ -8,9 +8,9 @@ All research tools are prefixed `research_` and grouped by provider (`research_a
 
 ## Errors
 
-Every tool below returns a common envelope on failure: `{"error": "<code>", "message": "<detail>"}`. Codes used across all tools:
+A tool failure surfaces as an MCP `ToolError` — a plain error response carrying a human-readable message (`Error calling tool '<name>': <detail>`), not a structured field a caller can branch on programmatically; there is no `{"error": "<code>", ...}` envelope. The categories below name which condition produced a given failure, for reference — they aren't literal response fields. See [Interface specification → Conventions](requirement-specification/06-interface-specification.md#conventions) for the exception type each one maps to.
 
-| Code | Meaning |
+| Category | Meaning |
 |---|---|
 | `not_found` | Identifier not recognised by the provider, or the requested format hasn't been fetched yet. |
 | `format_unavailable` | The identifier is valid, but doesn't offer the requested format. |

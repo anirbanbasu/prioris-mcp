@@ -14,6 +14,8 @@ Tests must not perform live network calls against arXiv or Europe PMC: both to r
 
 The local filesystem source has no upstream to stub — its tests instead call `research_localfile_fetch_full_text` with base64-encoded content built directly in the test, with no filesystem fixtures needed since the tool no longer reads from server-side disk at all.
 
+A criterion below phrased as "fails with `<category>`" (e.g. `not_found`, `invalid_request`) means a test asserting the exception type that category names is raised — see [Interface specification → Conventions → Errors](06-interface-specification.md#conventions) for the category-to-exception mapping. At the provider/routing-function level (calling e.g. `resolve_research_identifier` or a provider method directly, not through an MCP `Client`), assert `pytest.raises(<the specific exception type>)`. At the full MCP `Client`/`FastMCP` level (see `CLAUDE.md`), FastMCP collapses every uncaught exception into one opaque `fastmcp.exceptions.ToolError`, so the assertion there is `pytest.raises(ToolError)` regardless of which category triggered it — this page does not pin down `ToolError`'s message text as a stable, asserted contract.
+
 ## arXiv acceptance criteria
 
 | Tool | Criteria |
@@ -71,7 +73,7 @@ There is no `research_europepmc_list_top_n` to test against — confirm its abse
 - A Europe PMC identifier input resolves directly to the Europe PMC provider, with no DOI redirect round-trip.
 - A DOI that redirects (via `doi.org`/Crossref) to an `arxiv.org` domain resolves with `provider: "arxiv"` and the canonical arXiv identifier.
 - A DOI that redirects to a `europepmc.org`/NCBI PMC domain resolves with `provider: "europepmc"`.
-- A DOI that redirects to any other domain fails with `unsupported_provider` — and this is the load-bearing security assertion (see [Security](05-security.md#untrusted-identifiers-must-not-drive-unconstrained-outbound-requests)): the test must assert that **no HTTP request is made to that landing page at all**, not merely that the returned error code is correct. The allowlist check happens before any request to the resolved URL.
+- A DOI that redirects to any other domain fails with `unsupported_provider` — and this is the load-bearing security assertion (see [Security](05-security.md#untrusted-identifiers-must-not-drive-unconstrained-outbound-requests)): the test must assert that **no HTTP request is made to that landing page at all**, not merely that the call failed. The allowlist check happens before any request to the resolved URL.
 
 ## Resources acceptance criteria
 

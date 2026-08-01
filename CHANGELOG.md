@@ -9,10 +9,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Added
 
 - Chunked upload for the local filesystem source: `research_localfile_begin_upload`, `research_localfile_upload_chunk`, `research_localfile_finalize_upload` (fix [issue #17](https://github.com/anirbanbasu/prioris-mcp/issues/17)).
+- `src/prioris_mcp/models/` (`arxiv`, `europepmc`, `localfile`, `common`): typed, per-shape Pydantic output models for every `research_*` tool and resource, replacing the previous ad hoc `dict` returns across the arXiv/Europe PMC/local filesystem providers and identifier routing.
 
 ### Changed
 
 - **Breaking:** `research_localfile_fetch_full_text` now accepts `content_base64` (base64-encoded PDF bytes) and an optional `filename` hint instead of a server-side `path`, so "local" means local to the MCP client consistently across transports rather than local to wherever the server process happens to run (addresses [issue #6](https://github.com/anirbanbasu/prioris-mcp/issues/6), see "Fixed" section below). The `PRIORIS_MCP_LOCAL_FILE_ROOT` environment variable is removed as a result (no server-side path is resolved anymore); `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` still bounds the decoded content size.
+- **Breaking:** every tool's business-logic failures (`not_found`, `format_unavailable`, `unsupported_provider`, `invalid_request`, `file_too_large`, `rate_limited`, `provider_unavailable`) no longer come back as the structured `{"error": "<code>", "message": "<detail>"}` envelope. Providers now raise their typed exception directly, and FastMCP surfaces it to the caller as an opaque `ToolError` with a human-readable message only — there is no longer a machine-readable error code in the response.
 
 ### Deprecated
 
@@ -20,7 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Removed
 
-- None documented yet.
+- `errors.to_error_envelope`/`errors.call_returning_envelope` and the internal `_ERROR_CODES` table (zero callers now that providers raise typed exceptions directly instead of being translated into the removed envelope); the exception classes themselves (`NotFoundError`, `FormatUnavailableError`, `UnsupportedProviderError`, `InvalidRequestError`, `FileTooLargeError`) are unchanged.
 
 ### Fixed
 
