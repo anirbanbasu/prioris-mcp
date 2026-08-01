@@ -11,6 +11,13 @@ import httpx
 from defusedxml import ElementTree as safe_ET
 
 from prioris_mcp.errors import FormatUnavailableError, InvalidRequestError, NotFoundError
+from prioris_mcp.models.arxiv import (
+    ArxivCategoriesResult,
+    ArxivFetchMetadataResult,
+    ArxivResolvedIdentifier,
+    ArxivSearchResult,
+)
+from prioris_mcp.models.common import FullTextFetchResult, ParsedFullText
 from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers import http as provider_http
@@ -162,7 +169,7 @@ class ArxivProvider(ResearchPublicationProvider):
         start: int = 0,
         sort_by: str = "relevance",
         sort_order: str = "descending",
-    ) -> dict:
+    ) -> ArxivSearchResult:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_search."""
         if max_results > ARXIV_MAX_RESULTS:
             raise InvalidRequestError(f"max_results must be <= {ARXIV_MAX_RESULTS}, got {max_results}")
@@ -176,11 +183,11 @@ class ArxivProvider(ResearchPublicationProvider):
             "sortOrder": sort_order,
         }
         entries, total_results = _parse_feed(await self._get(params))
-        return {"results": entries, "total_results": total_results}
+        return ArxivSearchResult(results=entries, total_results=total_results)
 
     async def list_top_n(
         self, include_categories: list[str], n: int, exclude_categories: list[str] | None = None
-    ) -> dict:
+    ) -> ArxivSearchResult:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_list_top_n."""
         if not include_categories:
             raise InvalidRequestError("include_categories must contain at least one category")
@@ -196,21 +203,21 @@ class ArxivProvider(ResearchPublicationProvider):
             "sortOrder": "descending",
         }
         entries, _ = _parse_feed(await self._get(params))
-        return {"results": entries}
+        return ArxivSearchResult(results=entries, total_results=len(entries))
 
-    async def list_categories(self) -> dict:
+    async def list_categories(self) -> ArxivCategoriesResult:
         """See docs/requirement-specification/06-interface-specification.md#arxiv-category-list-resource."""
-        return {"categories": _parse_list_sets(await self._get_oai_sets())}
+        return ArxivCategoriesResult(categories=_parse_list_sets(await self._get_oai_sets()))
 
-    async def fetch_metadata(self, identifiers: list[str]) -> dict:
+    async def fetch_metadata(self, identifiers: list[str]) -> ArxivFetchMetadataResult:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_fetch_metadata."""
         params = {"id_list": ",".join(identifiers)}
         entries, _ = _parse_feed(await self._get(params))
         found_bare_ids = {_bare_id(e["arxiv_id"]) for e in entries}
         not_found = [i for i in identifiers if _bare_id(i) not in found_bare_ids]
-        return {"results": entries, "not_found": not_found}
+        return ArxivFetchMetadataResult(results=entries, not_found=not_found)
 
-    async def resolve_identifier(self, identifier: str, format: str) -> dict:
+    async def resolve_identifier(self, identifier: str, format: str) -> ArxivResolvedIdentifier:
         """See docs/requirement-specification/01-architecture.md#resolve_identifier.
 
         A version-pinned identifier is already immutable (see
@@ -222,9 +229,9 @@ class ArxivProvider(ResearchPublicationProvider):
             canonical_id = identifier
         else:
             metadata = await self.fetch_metadata([identifier])
-            if not metadata["results"]:
+            if not metadata.results:
                 raise NotFoundError(f"arXiv identifier not recognised: {identifier}")
-            canonical_id = metadata["results"][0]["arxiv_id"]
+            canonical_id = metadata.results[0].arxiv_id
 
         if format == "pdf":
             url = f"https://arxiv.org/pdf/{canonical_id}"
@@ -232,13 +239,14 @@ class ArxivProvider(ResearchPublicationProvider):
             url = f"https://arxiv.org/html/{canonical_id}"
         else:
             raise ValueError(f"Unsupported format for arXiv: {format}")
-        return {"identifier": canonical_id, "resolved_url": url, "format": format}
 
-    async def fetch_full_text(self, identifier: str, format: str) -> dict:
+        return ArxivResolvedIdentifier(identifier=canonical_id, resolved_url=url, format=format)
+
+    async def fetch_full_text(self, identifier: str, format: str) -> FullTextFetchResult:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_fetch_full_text."""
         resolved = await self.resolve_identifier(identifier, format)
-        canonical_id = resolved["identifier"]
-        url = resolved["resolved_url"]
+        canonical_id = resolved.identifier
+        url = resolved.resolved_url
 
         async def factory() -> bytes:
             async def op() -> httpx.Response:
@@ -263,7 +271,7 @@ class ArxivProvider(ResearchPublicationProvider):
                 # would be pure waste on the common path.
                 if _is_version_pinned(identifier):
                     metadata = await self.fetch_metadata([canonical_id])
-                    if not metadata["results"]:
+                    if not metadata.results:
                         raise NotFoundError(f"arXiv identifier not recognised: {canonical_id}")
                 raise FormatUnavailableError(f"No HTML rendering available for arXiv {canonical_id}")
             return response.content
@@ -271,11 +279,11 @@ class ArxivProvider(ResearchPublicationProvider):
         content, served_from_storage = await self._storage.get_or_create(
             "arxiv", canonical_id, format, factory, original_identifier=identifier
         )
-        return {
-            "location": f"arxiv:{canonical_id}:{format}",
-            "format": format,
-            "size_bytes": len(content),
-            "served_from_storage": served_from_storage,
+        return FullTextFetchResult(
+            location=f"arxiv:{canonical_id}:{format}",
+            format=format,
+            size_bytes=len(content),
+            served_from_storage=served_from_storage,
             # canonical_id is percent-encoded (safe="" so even old-style slash-bearing ids like
             # "hep-th/9901001v1" collapse to one opaque path segment): the resource template in
             # server.py is `research://{provider}/{identifier}/{format}/fulltext`, and a bare "/"
@@ -283,10 +291,12 @@ class ArxivProvider(ResearchPublicationProvider):
             # path segments. FastMCP's match_uri_template() unquotes each captured segment before
             # calling the handler, so read_fulltext_resource still receives the identifier in its
             # original, storage-key-compatible form.
-            "resource_uri": f"research://arxiv/{quote(canonical_id, safe='')}/{format}/fulltext",
-        }
+            resource_uri=f"research://arxiv/{quote(canonical_id, safe='')}/{format}/fulltext",
+        )
 
-    async def parse_full_text(self, identifier: str, format: str, offset: int = 0, limit: int | None = None) -> dict:
+    async def parse_full_text(
+        self, identifier: str, format: str, offset: int = 0, limit: int | None = None
+    ) -> ParsedFullText:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_parse_full_text.
 
         Storage is always keyed on the canonical, version-pinned identifier - see
@@ -304,7 +314,7 @@ class ArxivProvider(ResearchPublicationProvider):
         docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole.
         `limit` defaults to `default_inline_char_limit` when unset.
         """
-        canonical_id = (await self.resolve_identifier(identifier, format))["identifier"]
+        canonical_id = (await self.resolve_identifier(identifier, format)).identifier
         markdown_format = f"{format}-markdown"
         backend = self._pdf_backend if format == "pdf" else self._html_backend
 
@@ -319,13 +329,13 @@ class ArxivProvider(ResearchPublicationProvider):
         page = paginate_text(
             markdown_bytes.decode("utf-8"), offset, limit if limit is not None else self._default_inline_char_limit
         )
-        return {
-            "markdown": page["content"],
-            "offset": page["offset"],
-            "limit": page["limit"],
-            "total_length": page["total_length"],
-            "has_more": page["has_more"],
+        return ParsedFullText(
+            markdown=page["content"],
+            offset=page["offset"],
+            limit=page["limit"],
+            total_length=page["total_length"],
+            has_more=page["has_more"],
             # See the matching comment in fetch_full_text: canonical_id is percent-encoded so an
             # old-style slash-bearing identifier still resolves as a single {identifier} segment.
-            "resource_uri": f"research://arxiv/{quote(canonical_id, safe='')}/{format}/markdown",
-        }
+            resource_uri=f"research://arxiv/{quote(canonical_id, safe='')}/{format}/markdown",
+        )

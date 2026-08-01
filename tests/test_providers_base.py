@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+from pydantic import RootModel
 
 from prioris_mcp.providers.base import CapabilityNotSupportedError, ResearchPublicationProvider
 
@@ -8,30 +9,34 @@ from prioris_mcp.providers.base import CapabilityNotSupportedError, ResearchPubl
 class _StubProvider(ResearchPublicationProvider):
     """Minimal concrete subclass exercising the ABC's default behaviour."""
 
-    async def search(self, query: str, **kwargs: object) -> dict:
-        return {"results": [], "total_results": 0}
+    async def search(self, query: str, **kwargs: object) -> RootModel[dict]:
+        return RootModel({"results": [], "total_results": 0})
 
-    async def fetch_metadata(self, identifiers: list[str]) -> dict:
-        return {"results": [], "not_found": identifiers}
+    async def fetch_metadata(self, identifiers: list[str]) -> RootModel[dict]:
+        return RootModel({"results": [], "not_found": identifiers})
 
-    async def resolve_identifier(self, identifier: str, format: str) -> dict:
-        return {"identifier": identifier, "resolved_url": "https://example.test", "format": format}
+    async def resolve_identifier(self, identifier: str, format: str) -> RootModel[dict]:
+        return RootModel({"identifier": identifier, "resolved_url": "https://example.test", "format": format})
 
-    async def fetch_full_text(self, identifier: str, format: str) -> dict:
-        return {"location": "x", "format": format, "size_bytes": 0, "served_from_storage": False}
+    async def fetch_full_text(self, identifier: str, format: str) -> RootModel[dict]:
+        return RootModel({"location": "x", "format": format, "size_bytes": 0, "served_from_storage": False})
 
-    async def parse_full_text(self, identifier: str, format: str, offset: int = 0, limit: int | None = None) -> dict:
-        return {"markdown": "", "resource_uri": "x"}
+    async def parse_full_text(
+        self, identifier: str, format: str, offset: int = 0, limit: int | None = None
+    ) -> RootModel[dict]:
+        return RootModel({"markdown": "", "resource_uri": "x"})
 
 
 class _PartialCapabilityProvider(ResearchPublicationProvider):
     """A source implementing only fetch_full_text/parse_full_text - the local filesystem shape."""
 
-    async def fetch_full_text(self, identifier: str, format: str) -> dict:
-        return {"location": "x", "format": format, "size_bytes": 0, "served_from_storage": False}
+    async def fetch_full_text(self, identifier: str, format: str) -> RootModel[dict]:
+        return RootModel({"location": "x", "format": format, "size_bytes": 0, "served_from_storage": False})
 
-    async def parse_full_text(self, identifier: str, format: str, offset: int = 0, limit: int | None = None) -> dict:
-        return {"markdown": "", "resource_uri": "x"}
+    async def parse_full_text(
+        self, identifier: str, format: str, offset: int = 0, limit: int | None = None
+    ) -> RootModel[dict]:
+        return RootModel({"markdown": "", "resource_uri": "x"})
 
 
 class TestResearchPublicationProvider:
@@ -52,14 +57,14 @@ class TestResearchPublicationProvider:
     def test_concrete_subclass_implements_required_capabilities(self):
         async def scenario():
             provider = _StubProvider()
-            assert await provider.search("q") == {"results": [], "total_results": 0}
-            assert await provider.fetch_metadata(["a"]) == {"results": [], "not_found": ["a"]}
+            assert (await provider.search("q")).root == {"results": [], "total_results": 0}
+            assert (await provider.fetch_metadata(["a"])).root == {"results": [], "not_found": ["a"]}
             resolved = await provider.resolve_identifier("a", "pdf")
-            assert resolved["identifier"] == "a"
+            assert resolved.root["identifier"] == "a"
             fetched = await provider.fetch_full_text("a", "pdf")
-            assert fetched["format"] == "pdf"
+            assert fetched.root["format"] == "pdf"
             parsed = await provider.parse_full_text("a", "pdf")
-            assert parsed == {"markdown": "", "resource_uri": "x"}
+            assert parsed.root == {"markdown": "", "resource_uri": "x"}
 
         asyncio.run(scenario())
 

@@ -257,11 +257,11 @@ class TestResponseMetadataMiddleware:
     def test_time_operation_reraises_and_logs_on_call_next_failure(self, caplog):
         """`_time_operation`'s exception branch: this is a framework-level failure path.
 
-        A real tool call never reaches here directly - `call_returning_envelope` catches
-        business-logic errors into a typed envelope before `call_next` returns - so this is unit
-        tested against `_time_operation` itself, standing in for `call_next` raising (e.g. a bug
-        elsewhere in the middleware chain or in FastMCP's own dispatch), rather than driven through
-        a full `Client`/`FastMCP` round trip.
+        A real tool call never reaches here directly via a business-logic error - a tool method
+        raising (e.g. `NotFoundError`) is converted to `ToolError` by FastMCP's own dispatch before
+        `call_next` returns - so this is unit tested against `_time_operation` itself, standing in
+        for `call_next` raising (e.g. a bug elsewhere in the middleware chain or in FastMCP's own
+        dispatch), rather than driven through a full `Client`/`FastMCP` round trip.
         """
 
         async def failing_call_next(context):

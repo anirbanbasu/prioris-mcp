@@ -2,19 +2,23 @@ import asyncio
 
 import httpx
 import pytest
+from pydantic import BaseModel
 
 from prioris_mcp.errors import InvalidRequestError, UnsupportedProviderError
+from prioris_mcp.models.arxiv import ArxivResolvedIdentifier
+from prioris_mcp.models.common import ArxivResolvedIdentifierResult, EuropePmcResolvedIdentifierResult
+from prioris_mcp.models.europepmc import EuropePmcResolvedIdentifier
 from prioris_mcp.providers.identifier_routing import resolve_research_identifier
 
 
 class _StubResolvingProvider:
     """Minimal stand-in for ArxivProvider/EuropePmcProvider's `resolve_identifier`."""
 
-    def __init__(self, response: dict) -> None:
+    def __init__(self, response: BaseModel) -> None:
         self.response = response
         self.calls: list[tuple[str, str]] = []
 
-    async def resolve_identifier(self, identifier: str, format: str) -> dict:
+    async def resolve_identifier(self, identifier: str, format: str) -> BaseModel:
         self.calls.append((identifier, format))
         return self.response
 
@@ -22,8 +26,16 @@ class _StubResolvingProvider:
 class _UnsupportedFormatProvider:
     """Simulates `ArxivProvider.resolve_identifier` raising a bare `ValueError` for a bad format."""
 
-    async def resolve_identifier(self, identifier: str, format: str) -> dict:
+    async def resolve_identifier(self, identifier: str, format: str) -> BaseModel:
         raise ValueError(f"Unsupported format for arXiv: {format}")
+
+
+# Never actually consulted by the tests that pass these - the stub they populate is only there
+# to satisfy `_StubResolvingProvider`'s constructor when the routing under test never calls it.
+_UNUSED_ARXIV_RESPONSE = ArxivResolvedIdentifier(identifier="unused", resolved_url="unused", format="pdf")
+_UNUSED_EUROPEPMC_RESPONSE = EuropePmcResolvedIdentifier(
+    identifier="unused", resolved_url="unused", format="xml", full_text_available=False
+)
 
 
 def _no_op_client() -> httpx.AsyncClient:
@@ -38,9 +50,11 @@ class TestResolveResearchIdentifier:
 
     def test_arxiv_id_routes_directly_with_no_doi_round_trip(self):
         arxiv_stub = _StubResolvingProvider(
-            {"identifier": "2106.09685v2", "resolved_url": "https://arxiv.org/pdf/2106.09685v2", "format": "pdf"}
+            ArxivResolvedIdentifier(
+                identifier="2106.09685v2", resolved_url="https://arxiv.org/pdf/2106.09685v2", format="pdf"
+            )
         )
-        europepmc_stub = _StubResolvingProvider({})
+        europepmc_stub = _StubResolvingProvider(_UNUSED_EUROPEPMC_RESPONSE)
 
         async def scenario():
             client = _no_op_client()
@@ -48,18 +62,19 @@ class TestResolveResearchIdentifier:
                 return await resolve_research_identifier("2106.09685v2", "pdf", client, arxiv_stub, europepmc_stub)
 
         result = asyncio.run(scenario())
-        assert result["provider"] == "arxiv"
+        assert isinstance(result, ArxivResolvedIdentifierResult)
+        assert result.provider == "arxiv"
         assert arxiv_stub.calls == [("2106.09685v2", "pdf")]
         assert europepmc_stub.calls == []
 
     def test_provider_value_error_for_unsupported_format_becomes_invalid_request_error(self):
         """A provider's own `ValueError` (e.g. `ArxivProvider` on a non-pdf/html `format`) must surface.
 
-        Must surface as `InvalidRequestError`, not the bare `ValueError` - only `InvalidRequestError`
-        is mapped in `errors._ERROR_CODES` and so caught by `call_returning_envelope`.
+        Must surface as `InvalidRequestError`, not the bare `ValueError`, so FastMCP's dispatch
+        reports it as a distinctly named tool error rather than a generic one.
         """
         arxiv_stub = _UnsupportedFormatProvider()
-        europepmc_stub = _StubResolvingProvider({})
+        europepmc_stub = _StubResolvingProvider(_UNUSED_EUROPEPMC_RESPONSE)
 
         async def scenario():
             client = _no_op_client()
@@ -70,14 +85,14 @@ class TestResolveResearchIdentifier:
             asyncio.run(scenario())
 
     def test_europepmc_id_routes_directly_with_no_doi_round_trip(self):
-        arxiv_stub = _StubResolvingProvider({})
+        arxiv_stub = _StubResolvingProvider(_UNUSED_ARXIV_RESPONSE)
         europepmc_stub = _StubResolvingProvider(
-            {
-                "identifier": "PMC:PMC4767193",
-                "resolved_url": "https://x/fullTextXML",
-                "format": "xml",
-                "full_text_available": True,
-            }
+            EuropePmcResolvedIdentifier(
+                identifier="PMC:PMC4767193",
+                resolved_url="https://x/fullTextXML",
+                format="xml",
+                full_text_available=True,
+            )
         )
 
         async def scenario():
@@ -86,19 +101,20 @@ class TestResolveResearchIdentifier:
                 return await resolve_research_identifier("MED:26551875", "xml", client, arxiv_stub, europepmc_stub)
 
         result = asyncio.run(scenario())
-        assert result["provider"] == "europepmc"
+        assert isinstance(result, EuropePmcResolvedIdentifierResult)
+        assert result.provider == "europepmc"
         assert europepmc_stub.calls == [("MED:26551875", "xml")]
         assert arxiv_stub.calls == []
 
     def test_bare_pmcid_routes_directly_to_europepmc(self):
-        arxiv_stub = _StubResolvingProvider({})
+        arxiv_stub = _StubResolvingProvider(_UNUSED_ARXIV_RESPONSE)
         europepmc_stub = _StubResolvingProvider(
-            {
-                "identifier": "PMC:PMC4767193",
-                "resolved_url": "https://x/fullTextXML",
-                "format": "xml",
-                "full_text_available": True,
-            }
+            EuropePmcResolvedIdentifier(
+                identifier="PMC:PMC4767193",
+                resolved_url="https://x/fullTextXML",
+                format="xml",
+                full_text_available=True,
+            )
         )
 
         async def scenario():
@@ -107,13 +123,16 @@ class TestResolveResearchIdentifier:
                 return await resolve_research_identifier("PMC4767193", "xml", client, arxiv_stub, europepmc_stub)
 
         result = asyncio.run(scenario())
-        assert result["provider"] == "europepmc"
+        assert isinstance(result, EuropePmcResolvedIdentifierResult)
+        assert result.provider == "europepmc"
 
     def test_doi_resolving_to_arxiv_routes_to_arxiv_provider(self):
         arxiv_stub = _StubResolvingProvider(
-            {"identifier": "2106.09685v2", "resolved_url": "https://arxiv.org/pdf/2106.09685v2", "format": "pdf"}
+            ArxivResolvedIdentifier(
+                identifier="2106.09685v2", resolved_url="https://arxiv.org/pdf/2106.09685v2", format="pdf"
+            )
         )
-        europepmc_stub = _StubResolvingProvider({})
+        europepmc_stub = _StubResolvingProvider(_UNUSED_EUROPEPMC_RESPONSE)
 
         def handler(req: httpx.Request) -> httpx.Response:
             assert str(req.url) == "https://doi.org/10.48550/arXiv.2106.09685"
@@ -127,18 +146,19 @@ class TestResolveResearchIdentifier:
                 )
 
         result = asyncio.run(scenario())
-        assert result["provider"] == "arxiv"
+        assert isinstance(result, ArxivResolvedIdentifierResult)
+        assert result.provider == "arxiv"
         assert arxiv_stub.calls == [("2106.09685v2", "pdf")]
 
     def test_doi_resolving_to_ncbi_pmc_routes_to_europepmc_provider(self):
-        arxiv_stub = _StubResolvingProvider({})
+        arxiv_stub = _StubResolvingProvider(_UNUSED_ARXIV_RESPONSE)
         europepmc_stub = _StubResolvingProvider(
-            {
-                "identifier": "PMC:PMC4767193",
-                "resolved_url": "https://x/fullTextXML",
-                "format": "xml",
-                "full_text_available": True,
-            }
+            EuropePmcResolvedIdentifier(
+                identifier="PMC:PMC4767193",
+                resolved_url="https://x/fullTextXML",
+                format="xml",
+                full_text_available=True,
+            )
         )
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -150,7 +170,8 @@ class TestResolveResearchIdentifier:
                 return await resolve_research_identifier("10.1000/example", "xml", client, arxiv_stub, europepmc_stub)
 
         result = asyncio.run(scenario())
-        assert result["provider"] == "europepmc"
+        assert isinstance(result, EuropePmcResolvedIdentifierResult)
+        assert result.provider == "europepmc"
         assert europepmc_stub.calls == [("PMC4767193", "xml")]
 
     def test_doi_resolving_elsewhere_fails_without_a_second_request(self):
@@ -167,7 +188,11 @@ class TestResolveResearchIdentifier:
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             async with client:
                 await resolve_research_identifier(
-                    "10.1234/abcde", "pdf", client, _StubResolvingProvider({}), _StubResolvingProvider({})
+                    "10.1234/abcde",
+                    "pdf",
+                    client,
+                    _StubResolvingProvider(_UNUSED_ARXIV_RESPONSE),
+                    _StubResolvingProvider(_UNUSED_EUROPEPMC_RESPONSE),
                 )
 
         with pytest.raises(UnsupportedProviderError):
@@ -179,7 +204,11 @@ class TestResolveResearchIdentifier:
             client = _no_op_client()
             async with client:
                 await resolve_research_identifier(
-                    "not-an-identifier", "pdf", client, _StubResolvingProvider({}), _StubResolvingProvider({})
+                    "not-an-identifier",
+                    "pdf",
+                    client,
+                    _StubResolvingProvider(_UNUSED_ARXIV_RESPONSE),
+                    _StubResolvingProvider(_UNUSED_EUROPEPMC_RESPONSE),
                 )
 
         with pytest.raises(UnsupportedProviderError):
@@ -199,7 +228,11 @@ class TestResolveResearchIdentifier:
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             async with client:
                 await resolve_research_identifier(
-                    "10.1234/abcde", "pdf", client, _StubResolvingProvider({}), _StubResolvingProvider({})
+                    "10.1234/abcde",
+                    "pdf",
+                    client,
+                    _StubResolvingProvider(_UNUSED_ARXIV_RESPONSE),
+                    _StubResolvingProvider(_UNUSED_EUROPEPMC_RESPONSE),
                 )
 
         with pytest.raises(UnsupportedProviderError):
@@ -211,8 +244,8 @@ class TestResolveResearchIdentifier:
         The domain is allowlisted for arXiv but the landing URL's path doesn't match arXiv's
         `/abs|pdf|html/{id}` shape.
         """
-        arxiv_stub = _StubResolvingProvider({})
-        europepmc_stub = _StubResolvingProvider({})
+        arxiv_stub = _StubResolvingProvider(_UNUSED_ARXIV_RESPONSE)
+        europepmc_stub = _StubResolvingProvider(_UNUSED_EUROPEPMC_RESPONSE)
 
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(302, headers={"location": "https://arxiv.org/some/other/path"})
@@ -233,14 +266,14 @@ class TestResolveResearchIdentifier:
         Distinct from the `/PMC\d+` branch already exercised by
         `test_doi_resolving_to_ncbi_pmc_routes_to_europepmc_provider`.
         """
-        arxiv_stub = _StubResolvingProvider({})
+        arxiv_stub = _StubResolvingProvider(_UNUSED_ARXIV_RESPONSE)
         europepmc_stub = _StubResolvingProvider(
-            {
-                "identifier": "MED:26551875",
-                "resolved_url": "https://x/fullTextXML",
-                "format": "xml",
-                "full_text_available": True,
-            }
+            EuropePmcResolvedIdentifier(
+                identifier="MED:26551875",
+                resolved_url="https://x/fullTextXML",
+                format="xml",
+                full_text_available=True,
+            )
         )
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -252,7 +285,8 @@ class TestResolveResearchIdentifier:
                 return await resolve_research_identifier("10.1000/example", "xml", client, arxiv_stub, europepmc_stub)
 
         result = asyncio.run(scenario())
-        assert result["provider"] == "europepmc"
+        assert isinstance(result, EuropePmcResolvedIdentifierResult)
+        assert result.provider == "europepmc"
         assert europepmc_stub.calls == [("MED:26551875", "xml")]
 
     def test_doi_resolving_to_europepmc_with_unrecognised_path_raises_unsupported_provider(self):
@@ -261,8 +295,8 @@ class TestResolveResearchIdentifier:
         The domain is allowlisted for Europe PMC but the landing URL's path matches neither
         the `/PMC\d+` nor the `/article/{source}/{id}` pattern.
         """
-        arxiv_stub = _StubResolvingProvider({})
-        europepmc_stub = _StubResolvingProvider({})
+        arxiv_stub = _StubResolvingProvider(_UNUSED_ARXIV_RESPONSE)
+        europepmc_stub = _StubResolvingProvider(_UNUSED_EUROPEPMC_RESPONSE)
 
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(302, headers={"location": "https://europepmc.org/some/other/path"})

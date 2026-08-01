@@ -9,6 +9,12 @@ import logging
 import httpx
 
 from prioris_mcp.errors import FormatUnavailableError, NotFoundError
+from prioris_mcp.models.common import FullTextFetchResult, ParsedFullText
+from prioris_mcp.models.europepmc import (
+    EuropePmcFetchMetadataResult,
+    EuropePmcResolvedIdentifier,
+    EuropePmcSearchResult,
+)
 from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers import http as provider_http
@@ -95,19 +101,20 @@ class EuropePmcProvider(ResearchPublicationProvider):
 
     async def search(  # ty: ignore[invalid-method-override]
         self, query: str, page_size: int = 25, cursor_mark: str = "*"
-    ) -> dict:
+    ) -> EuropePmcSearchResult:
         """See docs/requirement-specification/06-interface-specification.md#research_europepmc_search."""
         payload = await self._get_json(
             "search",
             {"query": query, "format": "json", "resultType": "core", "pageSize": page_size, "cursorMark": cursor_mark},
         )
         results = [_parse_record(e) for e in payload.get("resultList", {}).get("result", [])]
-        response: dict = {"results": results, "hit_count": payload.get("hitCount", 0)}
-        if "nextCursorMark" in payload:
-            response["next_cursor_mark"] = payload["nextCursorMark"]
-        return response
+        return EuropePmcSearchResult(
+            results=results,
+            hit_count=payload.get("hitCount", 0),
+            next_cursor_mark=payload.get("nextCursorMark"),
+        )
 
-    async def fetch_metadata(self, identifiers: list[str]) -> dict:
+    async def fetch_metadata(self, identifiers: list[str]) -> EuropePmcFetchMetadataResult:
         """See docs/requirement-specification/06-interface-specification.md#research_europepmc_fetch_metadata."""
         clauses = []
         for identifier in identifiers:
@@ -117,9 +124,9 @@ class EuropePmcProvider(ResearchPublicationProvider):
         payload = await self._get_json("search", {"query": query, "format": "json", "resultType": "core"})
         results = [_parse_record(e) for e in payload.get("resultList", {}).get("result", [])]
         not_found = [i for i in identifiers if not _matches(i, results)]
-        return {"results": results, "not_found": not_found}
+        return EuropePmcFetchMetadataResult(results=results, not_found=not_found)
 
-    async def resolve_identifier(self, identifier: str, format: str) -> dict:
+    async def resolve_identifier(self, identifier: str, format: str) -> EuropePmcResolvedIdentifier:
         """See docs/requirement-specification/01-architecture.md#resolve_identifier.
 
         Always resolves via `fetch_metadata`, even for a bare PMCID: Europe PMC's PMCID alone
@@ -129,24 +136,24 @@ class EuropePmcProvider(ResearchPublicationProvider):
         call instead of issuing a second, redundant one purely to re-check availability.
         """
         metadata = await self.fetch_metadata([identifier])
-        if not metadata["results"]:
+        if not metadata.results:
             raise NotFoundError(f"Europe PMC identifier not recognised: {identifier}")
-        record = metadata["results"][0]
-        if not record["pmcid"]:
+        record = metadata.results[0]
+        if not record.pmcid:
             raise FormatUnavailableError(f"Europe PMC record {identifier} has no PMCID")
-        pmcid = record["pmcid"]
+        pmcid = record.pmcid
         url = f"{EUROPEPMC_API_URL}/{pmcid}/fullTextXML"
-        return {
+        return EuropePmcResolvedIdentifier(
             # pmcid already carries the "PMC" prefix (e.g. "PMC4767193"); strip it before
             # rebuilding the "{source}:{id}" canonical form, or this doubles to "PMC:PMC4767193"
             # - inconsistent with the identifier `_parse_record` produces for the same record.
-            "identifier": f"PMC:{pmcid.removeprefix('PMC')}",
-            "resolved_url": url,
-            "format": "xml",
-            "full_text_available": record["full_text_available"],
-        }
+            identifier=f"PMC:{pmcid.removeprefix('PMC')}",
+            resolved_url=url,
+            format="xml",
+            full_text_available=record.full_text_available,
+        )
 
-    async def fetch_full_text(self, identifier: str, format: str = "xml") -> dict:
+    async def fetch_full_text(self, identifier: str, format: str = "xml") -> FullTextFetchResult:
         """See docs/requirement-specification/06-interface-specification.md#research_europepmc_fetch_full_text.
 
         `fullTextUrlList` entries can point off-domain (publisher sites, NCBI Bookshelf), which
@@ -155,10 +162,10 @@ class EuropePmcProvider(ResearchPublicationProvider):
         docs/requirement-specification/05-security.md#untrusted-identifiers-must-not-drive-unconstrained-outbound-requests.
         """
         resolved = await self.resolve_identifier(identifier, "xml")
-        if not resolved["full_text_available"]:
+        if not resolved.full_text_available:
             raise FormatUnavailableError(f"Europe PMC does not host full text for {identifier}")
-        canonical_id = resolved["identifier"]
-        url = resolved["resolved_url"]
+        canonical_id = resolved.identifier
+        url = resolved.resolved_url
 
         async def factory() -> bytes:
             async def op() -> httpx.Response:
@@ -170,17 +177,17 @@ class EuropePmcProvider(ResearchPublicationProvider):
         content, served_from_storage = await self._storage.get_or_create(
             "europepmc", canonical_id, "xml", factory, original_identifier=identifier
         )
-        return {
-            "location": f"europepmc:{canonical_id}:xml",
-            "format": "xml",
-            "size_bytes": len(content),
-            "served_from_storage": served_from_storage,
-            "resource_uri": f"research://europepmc/{canonical_id}/xml/fulltext",
-        }
+        return FullTextFetchResult(
+            location=f"europepmc:{canonical_id}:xml",
+            format="xml",
+            size_bytes=len(content),
+            served_from_storage=served_from_storage,
+            resource_uri=f"research://europepmc/{canonical_id}/xml/fulltext",
+        )
 
     async def parse_full_text(
         self, identifier: str, format: str = "xml", offset: int = 0, limit: int | None = None
-    ) -> dict:
+    ) -> ParsedFullText:
         """See docs/requirement-specification/06-interface-specification.md#research_europepmc_parse_full_text.
 
         Storage is always keyed on the canonical identifier - see
@@ -198,7 +205,7 @@ class EuropePmcProvider(ResearchPublicationProvider):
         `limit` defaults to `default_inline_char_limit` when unset.
         """
         resolved = await self.resolve_identifier(identifier, format)
-        canonical_id = resolved["identifier"]
+        canonical_id = resolved.identifier
         markdown_format = "xml-markdown"
 
         async def factory() -> bytes:
@@ -212,11 +219,11 @@ class EuropePmcProvider(ResearchPublicationProvider):
         page = paginate_text(
             markdown_bytes.decode("utf-8"), offset, limit if limit is not None else self._default_inline_char_limit
         )
-        return {
-            "markdown": page["content"],
-            "offset": page["offset"],
-            "limit": page["limit"],
-            "total_length": page["total_length"],
-            "has_more": page["has_more"],
-            "resource_uri": f"research://europepmc/{canonical_id}/xml/markdown",
-        }
+        return ParsedFullText(
+            markdown=page["content"],
+            offset=page["offset"],
+            limit=page["limit"],
+            total_length=page["total_length"],
+            has_more=page["has_more"],
+            resource_uri=f"research://europepmc/{canonical_id}/xml/markdown",
+        )
