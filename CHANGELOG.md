@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Chunked upload for the local filesystem source: `research_localfile_begin_upload`, `research_localfile_upload_chunk`, `research_localfile_finalize_upload` (fix [issue #17](https://github.com/anirbanbasu/prioris-mcp/issues/17)).
 - `src/prioris_mcp/models/` (`arxiv`, `europepmc`, `localfile`, `common`): typed, per-shape Pydantic output models for every `research_*` tool and resource, replacing the previous ad hoc `dict` returns across the arXiv/Europe PMC/local filesystem providers and identifier routing.
+- Explicit, airgapped-friendly OCR configuration for `LiteParsePdfBackend`: `PRIORIS_MCP_PDF_OCR_ENABLED`, `PRIORIS_MCP_PDF_OCR_TESSDATA_PATH` (falls back to `TESSDATA_PREFIX`), `PRIORIS_MCP_PDF_OCR_SERVER_URL`, and `PRIORIS_MCP_PDF_OCR_SERVER_HEADERS`, instead of relying on liteparse's own defaults (which lazily download Tesseract language data over the network) — see [Configuration](docs/02-configuration.md) and [Security](docs/requirement-specification/05-security.md#ocr-language-data-is-a-network-dependency-of-parse_full_text) (fix [issue #11](https://github.com/anirbanbasu/prioris-mcp/issues/11)).
 
 ### Changed
 

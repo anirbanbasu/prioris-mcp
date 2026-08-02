@@ -46,6 +46,18 @@ This must be closed by bounding how many JATS transforms are ever *actually exec
 
 The cap (`PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS` — see [Configuration](../02-configuration.md)) is configurable, but is capped at the host's CPU count regardless of configuration: this is CPU-bound native work, so oversubscribing beyond available cores only makes the worst case worse without any offsetting throughput benefit.
 
+## OCR language data is a network dependency of `parse_full_text`
+
+`LiteParsePdfBackend` (`src/prioris_mcp/parsers/pdf_liteparse.py`) can invoke liteparse's bundled Tesseract OCR engine for scanned/image-only PDFs. Tesseract's own OCR needs per-language `.traineddata` files, which — left unconfigured — auto-download to a local cache directory on first use. That default is a hidden network dependency of a supposedly local parsing step: in an airgapped deployment, the first scanned PDF that needs OCR either fails outright or hangs until [`PDF_PARSE_TIMEOUT_SECONDS`](#a-bounded-per-call-failure-is-not-sufficient-on-its-own) trips, surfacing as a generic `ParseError` rather than a clear configuration error.
+
+This is made explicit and configurable rather than left to liteparse's own defaults — see [Configuration](../02-configuration.md):
+
+- `PRIORIS_MCP_PDF_OCR_ENABLED` lets an operator disable OCR outright, accepting degraded quality on scanned PDFs in exchange for removing the dependency entirely.
+- `PRIORIS_MCP_PDF_OCR_TESSDATA_PATH` (falling back to the conventional `TESSDATA_PREFIX` if unset) points at a pre-populated directory of `.traineddata` files, so an airgapped operator supplies them out-of-band instead of relying on a lazy download.
+- `PRIORIS_MCP_PDF_OCR_SERVER_URL`/`PRIORIS_MCP_PDF_OCR_SERVER_HEADERS` route OCR to an external server instead of the bundled engine, for deployments that already run one.
+
+None of these change the *bounded-failure* requirement above — a misconfigured or unreachable OCR path still fails within `PDF_PARSE_TIMEOUT_SECONDS` rather than hanging indefinitely — they only make the underlying network dependency an explicit, operator-controlled choice instead of a silent default.
+
 ## URL-based fetching is explicitly deferred, not silently assumed
 
 The [local filesystem source](01-architecture.md#local-filesystem-source) was considered for direct URL fetching too — letting a caller hand it a URL already reachable through the user's own out-of-band authentication (e.g. a paywalled paper's direct link, after logging in through a browser) — but this is explicitly **out of scope for v1** (see [SRS overview → Out of scope](index.md#out-of-scope-for-v1)), stated here so it isn't mistaken for an oversight later.
