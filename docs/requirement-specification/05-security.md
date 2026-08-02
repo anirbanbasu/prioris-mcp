@@ -53,7 +53,7 @@ The cap (`PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS` — see [Configuration](..
 This is made explicit and configurable rather than left to liteparse's own defaults — see [Configuration](../02-configuration.md):
 
 - `PRIORIS_MCP_PDF_OCR_ENABLED` lets an operator disable OCR outright, accepting degraded quality on scanned PDFs in exchange for removing the dependency entirely.
-- `PRIORIS_MCP_PDF_OCR_TESSDATA_PATH` (falling back to the conventional `TESSDATA_PREFIX` if unset) points at a pre-populated directory of `.traineddata` files, so an airgapped operator supplies them out-of-band instead of relying on a lazy download — see [Configuration → obtaining `.traineddata` files](../02-configuration.md#obtaining-traineddata-files-for-priorismcp_pdf_ocr_tessdata_path) for where to get them before cutting off network access.
+- `PRIORIS_MCP_PDF_OCR_TESSDATA_PATH` (falling back to the conventional `TESSDATA_PREFIX` if unset) points at a pre-populated directory of `.traineddata` files, so an airgapped operator supplies them out-of-band instead of relying on a lazy download — see [Configuration → obtaining `.traineddata` files](../02-configuration.md#obtaining-traineddata-files-for-prioris_mcp_pdf_ocr_tessdata_path) for where to get them before cutting off network access.
 - `PRIORIS_MCP_PDF_OCR_SERVER_URL`/`PRIORIS_MCP_PDF_OCR_SERVER_HEADERS` route OCR to an external server instead of the bundled engine, for deployments that already run one.
 
 None of these change the *bounded-failure* requirement above — a misconfigured or unreachable OCR path still fails within `PDF_PARSE_TIMEOUT_SECONDS` rather than hanging indefinitely — they only make the underlying network dependency an explicit, operator-controlled choice instead of a silent default.
