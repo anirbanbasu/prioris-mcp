@@ -22,3 +22,20 @@ PriorisMCP is configured entirely through environment variables.
 | `PRIORIS_MCP_LOCAL_FILE_UPLOAD_SESSION_TTL_SECONDS` | How long an idle chunked-upload session is kept before being swept as abandoned — see [Interface specification](requirement-specification/06-interface-specification.md#research_localfile_begin_upload). | `300` (5 minutes) | float, ≥ `1` |
 | `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES` | Maximum size of a single chunk passed to `research_localfile_upload_chunk`. | `1048576` (1MB) | integer, ≥ `1` |
 | `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS` | Maximum number of open chunked-upload sessions at once, bounding worst-case buffered memory. | `16` | integer, ≥ `1` |
+| `PRIORIS_MCP_PDF_OCR_ENABLED` | Whether `LiteParsePdfBackend` runs OCR on scanned/image-only PDFs — see [Security](requirement-specification/05-security.md#ocr-language-data-is-a-network-dependency-of-parse_full_text). | `True` | `True`, `False` |
+| `PRIORIS_MCP_PDF_OCR_TESSDATA_PATH` | Path to a pre-populated directory of Tesseract `.traineddata` files, for airgapped deployments — see [obtaining `.traineddata` files](#obtaining-traineddata-files-for-prioris_mcp_pdf_ocr_tessdata_path) below. Falls back to the standard `TESSDATA_PREFIX` if set and this is not. | unset (falls back to `TESSDATA_PREFIX`, then liteparse's own lazy-download behaviour) | — |
+| `PRIORIS_MCP_PDF_OCR_SERVER_URL` | URL of an external OCR server, as an alternative to the bundled Tesseract engine. | unset | — |
+| `PRIORIS_MCP_PDF_OCR_SERVER_HEADERS` | Extra HTTP headers (e.g. `Authorization`) sent with requests to `PRIORIS_MCP_PDF_OCR_SERVER_URL`, as a JSON object. | `{}` | JSON object of string keys/values, e.g. `{"Authorization": "Bearer <token>"}` |
+
+## Obtaining `.traineddata` files for `PRIORIS_MCP_PDF_OCR_TESSDATA_PATH`
+
+`PRIORIS_MCP_PDF_OCR_TESSDATA_PATH` (or `TESSDATA_PREFIX`) must point at a directory already containing the Tesseract language file(s) OCR will need, before network access is cut off — liteparse does not fetch or manage these files itself, it only reads whatever is at that path. To populate it:
+
+1. Pick the language(s) actually expected in scanned PDFs (e.g. `eng` for English) — each corresponds to one `<lang>.traineddata` file.
+2. Download the matching `.traineddata` file(s), while still on a network that can reach GitHub, from one of Tesseract's own model repositories:
+    - [`tessdata_fast`](https://github.com/tesseract-ocr/tessdata_fast) — smaller, faster models; the best default for most deployments.
+    - [`tessdata_best`](https://github.com/tesseract-ocr/tessdata_best) — larger, most accurate models, if OCR quality matters more than speed/size.
+    - [`tessdata`](https://github.com/tesseract-ocr/tessdata) — the legacy-engine models Tesseract shipped before the LSTM-based models above.
+3. Place the downloaded file(s) directly in the directory `PRIORIS_MCP_PDF_OCR_TESSDATA_PATH` points at (no subdirectories) and copy that directory into the airgapped environment.
+
+See liteparse's own [OCR guide](https://developers.llamaindex.ai/liteparse/guides/ocr/) for how `tessdata_path` and the bundled engine interact, and [Security](requirement-specification/05-security.md#ocr-language-data-is-a-network-dependency-of-parse_full_text) for why this is necessary at all in an airgapped deployment.

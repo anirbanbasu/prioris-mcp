@@ -119,3 +119,72 @@ class TestLocalFileMaxSizeBytesDefault:
         monkeypatch.setenv("PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES", "1024")
         reloaded = importlib.reload(prioris_mcp)
         assert reloaded.EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES == 1024
+
+
+class TestPdfOcrConfigDefaults:
+    """EnvVars.PRIORIS_MCP_PDF_OCR_* defaults and overrides."""
+
+    def test_ocr_enabled_defaults_to_true(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_PDF_OCR_ENABLED", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_ENABLED is True
+
+    def test_ocr_enabled_override_wins(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_PDF_OCR_ENABLED", "false")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_ENABLED is False
+
+    def test_tessdata_path_defaults_to_unset(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_PDF_OCR_TESSDATA_PATH", raising=False)
+        monkeypatch.delenv("TESSDATA_PREFIX", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_TESSDATA_PATH is None
+
+    def test_tessdata_path_falls_back_to_tessdata_prefix(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_PDF_OCR_TESSDATA_PATH", raising=False)
+        monkeypatch.setenv("TESSDATA_PREFIX", "/usr/share/tessdata")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_TESSDATA_PATH == "/usr/share/tessdata"
+
+    def test_tessdata_path_explicit_override_wins_over_tessdata_prefix(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_PDF_OCR_TESSDATA_PATH", "/opt/custom-tessdata")
+        monkeypatch.setenv("TESSDATA_PREFIX", "/usr/share/tessdata")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_TESSDATA_PATH == "/opt/custom-tessdata"
+
+    def test_ocr_server_url_defaults_to_unset(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_PDF_OCR_SERVER_URL", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_URL is None
+
+    def test_ocr_server_url_override_wins(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_PDF_OCR_SERVER_URL", "https://ocr.example.internal")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_URL == "https://ocr.example.internal"
+
+    def test_ocr_server_headers_defaults_to_empty_dict(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_PDF_OCR_SERVER_HEADERS", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_HEADERS == {}
+
+    def test_ocr_server_headers_parses_json_with_embedded_commas(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv(
+            "PRIORIS_MCP_PDF_OCR_SERVER_HEADERS",
+            '{"Authorization": "Bearer secret,with,commas"}',
+        )
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_HEADERS == {"Authorization": "Bearer secret,with,commas"}
+
+    def test_ocr_server_headers_rejects_non_object_json(self, monkeypatch: "pytest.MonkeyPatch"):
+        from environs import EnvValidationError
+
+        monkeypatch.setenv("PRIORIS_MCP_PDF_OCR_SERVER_HEADERS", "[1, 2, 3]")
+        with pytest.raises(EnvValidationError):
+            importlib.reload(prioris_mcp)
+
+    def test_ocr_server_headers_rejects_non_string_values(self, monkeypatch: "pytest.MonkeyPatch"):
+        from environs import EnvValidationError
+
+        monkeypatch.setenv("PRIORIS_MCP_PDF_OCR_SERVER_HEADERS", '{"X-Retries": 3}')
+        with pytest.raises(EnvValidationError):
+            importlib.reload(prioris_mcp)

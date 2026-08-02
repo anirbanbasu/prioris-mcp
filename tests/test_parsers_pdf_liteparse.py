@@ -21,7 +21,42 @@ class TestLiteParsePdfBackend:
 
             result = asyncio.run(scenario())
         assert result == "# Title\n\nBody text."
-        mock_cls.assert_called_once_with(output_format="markdown")
+        mock_cls.assert_called_once_with(
+            output_format="markdown",
+            ocr_enabled=True,
+            tessdata_path=None,
+            ocr_server_url=None,
+            ocr_server_headers=None,
+        )
+
+    def test_passes_ocr_config_from_env_vars(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr("prioris_mcp.parsers.pdf_liteparse.EnvVars.PRIORIS_MCP_PDF_OCR_ENABLED", False)
+        monkeypatch.setattr(
+            "prioris_mcp.parsers.pdf_liteparse.EnvVars.PRIORIS_MCP_PDF_OCR_TESSDATA_PATH", "/opt/tessdata"
+        )
+        monkeypatch.setattr(
+            "prioris_mcp.parsers.pdf_liteparse.EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_URL", "https://ocr.example.internal"
+        )
+        monkeypatch.setattr(
+            "prioris_mcp.parsers.pdf_liteparse.EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_HEADERS",
+            {"Authorization": "Bearer secret,with,commas"},
+        )
+        mock_result = MagicMock(text="# Title")
+        with patch("prioris_mcp.parsers.pdf_liteparse.LiteParse") as mock_cls:
+            mock_cls.return_value.parse.return_value = mock_result
+
+            async def scenario():
+                backend = LiteParsePdfBackend()
+                return await backend.to_markdown(b"%PDF-1.4 fake bytes")
+
+            asyncio.run(scenario())
+        mock_cls.assert_called_once_with(
+            output_format="markdown",
+            ocr_enabled=False,
+            tessdata_path="/opt/tessdata",
+            ocr_server_url="https://ocr.example.internal",
+            ocr_server_headers={"Authorization": "Bearer secret,with,commas"},
+        )
 
     def test_liteparse_exception_becomes_parse_error(self):
         with patch("prioris_mcp.parsers.pdf_liteparse.LiteParse") as mock_cls:

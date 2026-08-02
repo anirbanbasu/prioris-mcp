@@ -1,14 +1,22 @@
 import logging
 import os
 from pathlib import Path
+from typing import cast
 
 from environs import Env
+from marshmallow import ValidationError
 from marshmallow.validate import OneOf, Range
 from rich.logging import RichHandler
 
 PACKAGE_NAME = "prioris-mcp"
 env = Env()
 env.read_env()
+
+
+def _validate_str_dict(value: object) -> None:
+    """Raise if `value` (already JSON-decoded) isn't a JSON object of string keys and values."""
+    if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        raise ValidationError("must be a JSON object of string keys and values")
 
 
 class EnvVars:
@@ -134,6 +142,37 @@ class EnvVars:
         # between TTL sweeps.
         default=16,
         validate=Range(min=1),
+    )
+
+    PRIORIS_MCP_PDF_OCR_ENABLED: bool = env.bool(
+        "PRIORIS_MCP_PDF_OCR_ENABLED",
+        # liteparse's own default (True) silently falls back to its bundled Tesseract engine,
+        # which downloads per-language `.traineddata` files over the network on first use - see
+        # docs/requirement-specification/05-security.md#ocr-language-data-is-a-network-dependency-of-parse_full_text.
+        default=True,
+    )
+
+    PRIORIS_MCP_PDF_OCR_TESSDATA_PATH: str | None = env.str(
+        "PRIORIS_MCP_PDF_OCR_TESSDATA_PATH",
+        # Falls back to the conventional TESSDATA_PREFIX so operators who already set it for other
+        # Tesseract consumers on the same host don't need a second, PriorisMCP-specific variable.
+        default=os.environ.get("TESSDATA_PREFIX"),
+    )
+
+    PRIORIS_MCP_PDF_OCR_SERVER_URL: str | None = env.str(
+        "PRIORIS_MCP_PDF_OCR_SERVER_URL",
+        default=None,
+    )
+
+    PRIORIS_MCP_PDF_OCR_SERVER_HEADERS: dict[str, str] = cast(
+        "dict[str, str]",
+        env.json(
+            "PRIORIS_MCP_PDF_OCR_SERVER_HEADERS",
+            # e.g. {"Authorization": "Bearer <token>"} for an authenticated OCR server - a comma-
+            # delimited env.dict format would break on a header value that itself contains a comma.
+            default={},
+            validate=_validate_str_dict,
+        ),
     )
 
 
