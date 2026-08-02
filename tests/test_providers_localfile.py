@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from prioris_mcp.errors import FileTooLargeError, InvalidRequestError, NotFoundError
+from prioris_mcp.models.common import ParsedFullText
+from prioris_mcp.models.localfile import LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
 from prioris_mcp.providers.localfile import PDF_MAGIC_PREFIX, LocalFileProvider, UploadSessionManager
 from prioris_mcp.storage import FilesystemStorageBackend
@@ -353,17 +355,18 @@ class TestLocalFileProviderFetchFullText:
     def test_first_fetch_mints_a_caller_facing_id(self, tmp_path: Path):
         provider = _provider(tmp_path)
         result = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
-        assert re.fullmatch(r"\d{8}-\d{4}-[0-9a-z]{4}", result["id"])
-        assert result["served_from_storage"] is False
-        assert result["resource_uri"] == f"research://localfile/{result['id']}/pdf/fulltext"
-        assert result["size_bytes"] == len(PDF_BYTES)
+        assert isinstance(result, LocalFileFetchResult)
+        assert re.fullmatch(r"\d{8}-\d{4}-[0-9a-z]{4}", result.id)
+        assert result.served_from_storage is False
+        assert result.resource_uri == f"research://localfile/{result.id}/pdf/fulltext"
+        assert result.size_bytes == len(PDF_BYTES)
 
     def test_second_fetch_of_unchanged_content_reuses_the_same_id(self, tmp_path: Path):
         provider = _provider(tmp_path)
         first = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
         second = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
-        assert second["id"] == first["id"]
-        assert second["served_from_storage"] is True
+        assert second.id == first.id
+        assert second.served_from_storage is True
 
     def test_changed_content_gets_a_new_id_and_old_id_remains_valid(self, tmp_path: Path):
         provider = _provider(tmp_path)
@@ -372,11 +375,11 @@ class TestLocalFileProviderFetchFullText:
         changed_base64 = base64.b64encode(PDF_BYTES + b" more content").decode("ascii")
         second = asyncio.run(provider.fetch_full_text(changed_base64, filename="paper.pdf"))
 
-        assert second["id"] != first["id"]
-        assert second["served_from_storage"] is False
+        assert second.id != first.id
+        assert second.served_from_storage is False
         # The first id's content is still independently readable.
         first_manifest_identifier = asyncio.run(
-            provider._storage.find_canonical_identifier("localfile", first["id"], "pdf")
+            provider._storage.find_canonical_identifier("localfile", first.id, "pdf")
         )
         assert asyncio.run(provider._storage.read("localfile", first_manifest_identifier, "pdf")) == PDF_BYTES
 
@@ -390,13 +393,14 @@ class TestLocalFileProviderFetchFullText:
             )
 
         first, second = asyncio.run(scenario())
-        assert first["id"] == second["id"]
-        assert {first["served_from_storage"], second["served_from_storage"]} == {True, False}
+        assert first.id == second.id
+        assert {first.served_from_storage, second.served_from_storage} == {True, False}
 
     def test_filename_is_optional(self, tmp_path: Path):
         provider = _provider(tmp_path)
         result = asyncio.run(provider.fetch_full_text(PDF_BASE64))
-        assert result["served_from_storage"] is False
+        assert isinstance(result, LocalFileFetchResult)
+        assert result.served_from_storage is False
 
 
 class TestLocalFileProviderParseFullText:
@@ -415,16 +419,17 @@ class TestLocalFileProviderParseFullText:
     def test_parses_already_fetched_content_and_returns_resource_uri(self, tmp_path: Path):
         provider = _provider(tmp_path)
         fetched = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
-        parsed = asyncio.run(provider.parse_full_text(fetched["id"]))
-        assert parsed["resource_uri"] == f"research://localfile/{fetched['id']}/pdf/markdown"
-        assert isinstance(parsed["markdown"], str)
-        assert parsed["offset"] == 0
-        assert parsed["has_more"] is False
+        parsed = asyncio.run(provider.parse_full_text(fetched.id))
+        assert isinstance(parsed, ParsedFullText)
+        assert parsed.resource_uri == f"research://localfile/{fetched.id}/pdf/markdown"
+        assert isinstance(parsed.markdown, str)
+        assert parsed.offset == 0
+        assert parsed.has_more is False
 
     def test_second_parse_of_same_id_does_not_reparse(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         provider = _provider(tmp_path)
         fetched = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
-        asyncio.run(provider.parse_full_text(fetched["id"]))
+        asyncio.run(provider.parse_full_text(fetched.id))
 
         original_to_markdown = provider._pdf_backend.to_markdown
 
@@ -432,7 +437,7 @@ class TestLocalFileProviderParseFullText:
             raise AssertionError("must not re-parse an already-parsed identifier")
 
         monkeypatch.setattr(provider._pdf_backend, "to_markdown", _fail_if_called)
-        asyncio.run(provider.parse_full_text(fetched["id"]))
+        asyncio.run(provider.parse_full_text(fetched.id))
         monkeypatch.setattr(provider._pdf_backend, "to_markdown", original_to_markdown)
 
     def test_never_triggers_a_fetch(self, tmp_path: Path):
@@ -453,8 +458,8 @@ class TestLocalFileProviderDeleteDoesNotTouchOriginal:
     def test_delete_via_storage_backend_removes_only_the_storage_copy(self, tmp_path: Path):
         provider = _provider(tmp_path)
         fetched = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
-        asyncio.run(provider._storage.delete("localfile", fetched["id"], "pdf"))
-        assert asyncio.run(provider._storage.find_canonical_identifier("localfile", fetched["id"], "pdf")) is None
+        asyncio.run(provider._storage.delete("localfile", fetched.id, "pdf"))
+        assert asyncio.run(provider._storage.find_canonical_identifier("localfile", fetched.id, "pdf")) is None
 
 
 def _chunks(content: bytes, chunk_size: int) -> list[bytes]:
@@ -463,6 +468,18 @@ def _chunks(content: bytes, chunk_size: int) -> list[bytes]:
 
 class TestLocalFileProviderChunkedUpload:
     """docs/requirement-specification/06-interface-specification.md#local-filesystem."""
+
+    def test_upload_chunk_returns_received_index_and_cumulative_bytes(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+
+        async def scenario():
+            session_id = await provider.begin_upload(filename=None)
+            return await provider.upload_chunk(session_id, 0, base64.b64encode(PDF_BYTES[:10]).decode("ascii"))
+
+        result = asyncio.run(scenario())
+        assert isinstance(result, LocalFileUploadChunkResult)
+        assert result.received_index == 0
+        assert result.bytes_so_far == 10
 
     def test_happy_path_matches_fetch_full_text_result(self, tmp_path: Path):
         chunked_provider = _provider(tmp_path / "chunked")
@@ -477,10 +494,12 @@ class TestLocalFileProviderChunkedUpload:
         chunked_result = asyncio.run(chunked_scenario())
         whole_result = asyncio.run(whole_provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
 
-        assert chunked_result["format"] == whole_result["format"] == "pdf"
-        assert chunked_result["size_bytes"] == whole_result["size_bytes"] == len(PDF_BYTES)
-        assert chunked_result["served_from_storage"] is False
-        assert re.fullmatch(r"\d{8}-\d{4}-[0-9a-z]{4}", chunked_result["id"])
+        assert isinstance(chunked_result, LocalFileFetchResult)
+        assert isinstance(whole_result, LocalFileFetchResult)
+        assert chunked_result.format_ == whole_result.format_ == "pdf"
+        assert chunked_result.size_bytes == whole_result.size_bytes == len(PDF_BYTES)
+        assert chunked_result.served_from_storage is False
+        assert re.fullmatch(r"\d{8}-\d{4}-[0-9a-z]{4}", chunked_result.id)
 
     def test_finalize_of_identical_content_already_fetched_dedupes(self, tmp_path: Path):
         provider = _provider(tmp_path)
@@ -493,7 +512,8 @@ class TestLocalFileProviderChunkedUpload:
             return await provider.finalize_upload(session_id)
 
         result = asyncio.run(scenario())
-        assert result["served_from_storage"] is True
+        assert isinstance(result, LocalFileFetchResult)
+        assert result.served_from_storage is True
 
     def test_upload_chunk_with_skipped_index_raises_invalid_request(self, tmp_path: Path):
         provider = _provider(tmp_path)

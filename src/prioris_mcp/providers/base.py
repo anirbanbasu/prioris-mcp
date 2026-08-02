@@ -7,6 +7,8 @@ source means implementing this interface, not changing it.
 from abc import ABC, abstractmethod
 from typing import Any
 
+from pydantic import BaseModel
+
 
 class CapabilityNotSupportedError(Exception):
     """Raised by a capability's default implementation for a provider with no equivalent.
@@ -36,7 +38,7 @@ class ResearchPublicationProvider(ABC):
     across every provider that supports it.
     """
 
-    async def search(self, query: str, **kwargs: Any) -> dict[str, Any]:
+    async def search(self, query: str, **kwargs: Any) -> BaseModel:
         """Search items by keyword/query. See Functional requirements for the per-provider shape.
 
         Raises:
@@ -47,7 +49,7 @@ class ResearchPublicationProvider(ABC):
 
     async def list_top_n(
         self, include_categories: list[str], n: int, exclude_categories: list[str] | None = None
-    ) -> dict[str, Any]:
+    ) -> BaseModel:
         """List the top-N items across one or more provider-defined categories.
 
         Raises:
@@ -55,7 +57,7 @@ class ResearchPublicationProvider(ABC):
         """
         raise CapabilityNotSupportedError(f"{type(self).__name__} does not support list_top_n")
 
-    async def fetch_metadata(self, identifiers: list[str]) -> dict[str, Any]:
+    async def fetch_metadata(self, identifiers: list[str]) -> BaseModel:
         """Fetch metadata for one or more identifiers in a single call.
 
         Raises:
@@ -64,7 +66,7 @@ class ResearchPublicationProvider(ABC):
         """
         raise CapabilityNotSupportedError(f"{type(self).__name__} does not support fetch_metadata")
 
-    async def resolve_identifier(self, identifier: str, format: str) -> dict[str, Any]:
+    async def resolve_identifier(self, identifier: str, format: str) -> BaseModel:
         """Resolve `identifier` to a fetchable URL/canonical form in the target `format`.
 
         Raises:
@@ -74,11 +76,11 @@ class ResearchPublicationProvider(ABC):
         raise CapabilityNotSupportedError(f"{type(self).__name__} does not support resolve_identifier")
 
     @abstractmethod
-    async def fetch_full_text(self, identifier: str, format: str) -> dict[str, Any]:
+    async def fetch_full_text(self, identifier: str, format: str) -> BaseModel:
         """Fetch (or return already-persisted) full text for `identifier`/`format`."""
 
     @abstractmethod
     async def parse_full_text(
         self, identifier: str, format: str, offset: int = 0, limit: int | None = None
-    ) -> dict[str, Any]:
+    ) -> BaseModel:
         """Convert already-persisted full text for `identifier`/`format` into one page of Markdown."""

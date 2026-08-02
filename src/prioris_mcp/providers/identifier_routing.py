@@ -6,11 +6,19 @@ docs/requirement-specification/05-security.md#untrusted-identifiers-must-not-dri
 
 import logging
 import re
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 import httpx
+from pydantic import BaseModel
 
 from prioris_mcp.errors import InvalidRequestError, UnsupportedProviderError
+from prioris_mcp.models.arxiv import ArxivResolvedIdentifier
+from prioris_mcp.models.common import (
+    ArxivResolvedIdentifierResult,
+    EuropePmcResolvedIdentifierResult,
+    ResolvedIdentifierResult,
+)
+from prioris_mcp.models.europepmc import EuropePmcResolvedIdentifier
 from prioris_mcp.providers import http as provider_http
 
 logger = logging.getLogger(__name__)
@@ -32,8 +40,11 @@ _ALLOWED_DOMAINS = {
 }
 
 
-class _ResolvingProvider(Protocol):
-    async def resolve_identifier(self, identifier: str, format: str) -> dict: ...
+_ResolvedT = TypeVar("_ResolvedT", bound=BaseModel)
+
+
+class _ResolvingProvider(Protocol[_ResolvedT]):
+    async def resolve_identifier(self, identifier: str, format: str) -> _ResolvedT: ...
 
 
 def _is_arxiv_identifier(identifier: str) -> bool:
@@ -48,14 +59,17 @@ def _is_doi(identifier: str) -> bool:
     return bool(_DOI_PATTERN.match(identifier))
 
 
-async def _resolve_identifier(provider: _ResolvingProvider, identifier: str, format: str) -> dict:
+async def _resolve_identifier(  # noqa: UP047 -- TODO: revisit if PEP 695's inferred covariance is proven safe here
+    provider: _ResolvingProvider[_ResolvedT], identifier: str, format: str
+) -> _ResolvedT:
     """Call `provider.resolve_identifier`, translating its format validation into `InvalidRequestError`.
 
     A provider (e.g. `ArxivProvider`) raises a bare `ValueError` for a caller-supplied `format` it
     doesn't support - `format` is deliberately not a `Literal[...]` at the tool schema level since
     valid values depend on the resolving provider, so this is the first point that can validate it.
-    A bare `ValueError` isn't one of `errors._ERROR_CODES`' mapped types, so it must be translated
-    here rather than left to propagate past `call_returning_envelope` as a raw exception.
+    A bare `ValueError` carries no meaning to a caller of `research_resolve_identifier`, so it's
+    translated here into `InvalidRequestError`, a type FastMCP still reports distinctly (by class
+    name, in the propagated `ToolError` message) rather than as an opaque internal failure.
     """
     try:
         return await provider.resolve_identifier(identifier, format)
@@ -81,13 +95,28 @@ def _extract_europepmc_id_from_url(url: str) -> str:
     raise UnsupportedProviderError(f"Could not extract a Europe PMC identifier from landing URL: {url}")
 
 
+def _as_arxiv_result(resolved: ArxivResolvedIdentifier) -> ArxivResolvedIdentifierResult:
+    return ArxivResolvedIdentifierResult(
+        identifier=resolved.identifier, resolved_url=resolved.resolved_url, format=resolved.format_
+    )
+
+
+def _as_europepmc_result(resolved: EuropePmcResolvedIdentifier) -> EuropePmcResolvedIdentifierResult:
+    return EuropePmcResolvedIdentifierResult(
+        identifier=resolved.identifier,
+        resolved_url=resolved.resolved_url,
+        format=resolved.format_,
+        full_text_available=resolved.full_text_available,
+    )
+
+
 async def resolve_research_identifier(
     identifier: str,
     format: str,
     http_client: httpx.AsyncClient,
-    arxiv_provider: _ResolvingProvider,
-    europepmc_provider: _ResolvingProvider,
-) -> dict:
+    arxiv_provider: _ResolvingProvider[ArxivResolvedIdentifier],
+    europepmc_provider: _ResolvingProvider[EuropePmcResolvedIdentifier],
+) -> ResolvedIdentifierResult:
     """Route `identifier` to the owning provider's native `resolve_identifier`.
 
     Self-identifying schemes (an arXiv ID, a Europe PMC identifier) route directly, with no
@@ -99,10 +128,10 @@ async def resolve_research_identifier(
     """
     if _is_arxiv_identifier(identifier):
         resolved = await _resolve_identifier(arxiv_provider, identifier, format)
-        return {**resolved, "provider": "arxiv"}
+        return _as_arxiv_result(resolved)
     if _is_europepmc_identifier(identifier):
         resolved = await _resolve_identifier(europepmc_provider, identifier, format)
-        return {**resolved, "provider": "europepmc"}
+        return _as_europepmc_result(resolved)
     if not _is_doi(identifier):
         raise UnsupportedProviderError(f"Unrecognised identifier scheme: {identifier}")
 
@@ -120,7 +149,7 @@ async def resolve_research_identifier(
     if provider_name == "arxiv":
         arxiv_id = _extract_arxiv_id_from_url(location)
         resolved = await _resolve_identifier(arxiv_provider, arxiv_id, format)
-        return {**resolved, "provider": "arxiv"}
+        return _as_arxiv_result(resolved)
     europepmc_id = _extract_europepmc_id_from_url(location)
     resolved = await _resolve_identifier(europepmc_provider, europepmc_id, format)
-    return {**resolved, "provider": "europepmc"}
+    return _as_europepmc_result(resolved)

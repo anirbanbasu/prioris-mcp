@@ -5,6 +5,13 @@ import httpx
 import pytest
 
 from prioris_mcp.errors import FormatUnavailableError, NotFoundError
+from prioris_mcp.models.common import FullTextFetchResult, ParsedFullText
+from prioris_mcp.models.europepmc import (
+    EuropePmcAuthor,
+    EuropePmcFetchMetadataResult,
+    EuropePmcResolvedIdentifier,
+    EuropePmcSearchResult,
+)
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers.europepmc import EuropePmcProvider
 from prioris_mcp.rate_limit import ProviderRequestQueue
@@ -78,17 +85,18 @@ class TestEuropePmcProviderSearch:
                 return await provider.search("field:value")
 
         result = asyncio.run(scenario())
-        assert result["hit_count"] == 1
-        assert "next_cursor_mark" not in result
-        record = result["results"][0]
-        assert record["identifier"] == "MED:26551875"
-        assert record["pmid"] == "26551875"
-        assert record["pmcid"] == "PMC4767193"
-        assert record["authors"] == [
-            {"full_name": "Jane Doe", "first_name": "Jane", "last_name": "Doe", "initials": "J"}
+        assert isinstance(result, EuropePmcSearchResult)
+        assert result.hit_count == 1
+        assert result.next_cursor_mark is None
+        record = result.results[0]
+        assert record.identifier == "MED:26551875"
+        assert record.pmid == "26551875"
+        assert record.pmcid == "PMC4767193"
+        assert record.authors == [
+            EuropePmcAuthor(full_name="Jane Doe", first_name="Jane", last_name="Doe", initials="J")
         ]
-        assert record["is_open_access"] == "Y"
-        assert record["full_text_available"] is True
+        assert record.is_open_access == "Y"
+        assert record.full_text_available is True
 
     def test_next_cursor_mark_present_only_when_more_results_exist(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -100,7 +108,8 @@ class TestEuropePmcProviderSearch:
                 return await provider.search("field:value")
 
         result = asyncio.run(scenario())
-        assert result["next_cursor_mark"] == "AoIIP123"
+        assert isinstance(result, EuropePmcSearchResult)
+        assert result.next_cursor_mark == "AoIIP123"
 
     def test_full_text_available_false_when_not_in_epmc(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -112,7 +121,8 @@ class TestEuropePmcProviderSearch:
                 return await provider.search("field:value")
 
         result = asyncio.run(scenario())
-        assert result["results"][0]["full_text_available"] is False
+        assert isinstance(result, EuropePmcSearchResult)
+        assert result.results[0].full_text_available is False
 
 
 class TestEuropePmcProviderFetchMetadata:
@@ -130,8 +140,9 @@ class TestEuropePmcProviderFetchMetadata:
                 return await provider.fetch_metadata(["MED:26551875", "PMC4767193"])
 
         result = asyncio.run(scenario())
-        assert result["results"][0]["identifier"] == "MED:26551875"
-        assert result["not_found"] == ["PMC4767193"]
+        assert isinstance(result, EuropePmcFetchMetadataResult)
+        assert result.results[0].identifier == "MED:26551875"
+        assert result.not_found == ["PMC4767193"]
 
     def test_all_invalid_batch_returns_empty_results_and_full_not_found(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -143,7 +154,8 @@ class TestEuropePmcProviderFetchMetadata:
                 return await provider.fetch_metadata(["MED:00000000"])
 
         result = asyncio.run(scenario())
-        assert result == {"results": [], "not_found": ["MED:00000000"]}
+        assert isinstance(result, EuropePmcFetchMetadataResult)
+        assert result == EuropePmcFetchMetadataResult(results=[], not_found=["MED:00000000"])
 
 
 class TestEuropePmcProviderResolveIdentifier:
@@ -159,9 +171,10 @@ class TestEuropePmcProviderResolveIdentifier:
                 return await provider.resolve_identifier("PMC4767193", "xml")
 
         result = asyncio.run(scenario())
-        assert result["identifier"] == "PMC:4767193"
-        assert result["resolved_url"] == f"{'https://www.ebi.ac.uk/europepmc/webservices/rest'}/PMC4767193/fullTextXML"
-        assert result["full_text_available"] is True
+        assert isinstance(result, EuropePmcResolvedIdentifier)
+        assert result.identifier == "PMC:4767193"
+        assert result.resolved_url == f"{'https://www.ebi.ac.uk/europepmc/webservices/rest'}/PMC4767193/fullTextXML"
+        assert result.full_text_available is True
 
     def test_resolves_med_identifier_to_its_pmcid(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -173,7 +186,8 @@ class TestEuropePmcProviderResolveIdentifier:
                 return await provider.resolve_identifier("MED:26551875", "xml")
 
         result = asyncio.run(scenario())
-        assert result["identifier"] == "PMC:4767193"
+        assert isinstance(result, EuropePmcResolvedIdentifier)
+        assert result.identifier == "PMC:4767193"
 
     def test_unrecognised_identifier_raises_not_found(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -199,6 +213,28 @@ class TestEuropePmcProviderResolveIdentifier:
         with pytest.raises(FormatUnavailableError):
             asyncio.run(scenario())
 
+    def test_unsupported_format_raises_value_error_before_any_outbound_call(self):
+        """Europe PMC only ever serves XML full text - any other `format` must be rejected.
+
+        Must be a bare `ValueError`, the same type `ArxivProvider.resolve_identifier` raises for
+        its own unsupported formats - `providers.identifier_routing._resolve_identifier` only
+        knows how to translate that specific type into `InvalidRequestError`. Also asserts no
+        `fetch_metadata` call is made: format validation must happen before any outbound request,
+        the same "fail before any outbound call" contract `InvalidRequestError` cases elsewhere in
+        this codebase already follow.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make an outbound request for an unsupported format")
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                await provider.resolve_identifier("MED:26551875", "pdf")
+
+        with pytest.raises(ValueError, match="Unsupported format for Europe PMC: pdf"):
+            asyncio.run(scenario())
+
 
 class TestEuropePmcProviderFetchFullText:
     """Tests for EuropePmcProvider.fetch_full_text()."""
@@ -215,9 +251,10 @@ class TestEuropePmcProviderFetchFullText:
                 return await provider.fetch_full_text("PMC4767193")
 
         result = asyncio.run(scenario())
-        assert result["format"] == "xml"
-        assert result["served_from_storage"] is False
-        assert result["resource_uri"] == "research://europepmc/PMC:4767193/xml/fulltext"
+        assert isinstance(result, FullTextFetchResult)
+        assert result.format_ == "xml"
+        assert result.served_from_storage is False
+        assert result.resource_uri == "research://europepmc/PMC:4767193/xml/fulltext"
 
     def test_second_call_is_served_from_storage(self, tmp_path):
         xml_call_count = 0
@@ -237,8 +274,10 @@ class TestEuropePmcProviderFetchFullText:
                 return first, second, xml_call_count
 
         first, second, count = asyncio.run(scenario())
-        assert first["served_from_storage"] is False
-        assert second["served_from_storage"] is True
+        assert isinstance(first, FullTextFetchResult)
+        assert isinstance(second, FullTextFetchResult)
+        assert first.served_from_storage is False
+        assert second.served_from_storage is True
         assert count == 1
 
     def test_not_in_epmc_raises_format_unavailable_without_fulltext_request(self, tmp_path):
@@ -304,13 +343,14 @@ class TestEuropePmcProviderParseFullText:
             provider = EuropePmcProvider(storage=storage, queue=queue, http_client=client, xml_backend=xml_backend)
             async with client:
                 fetched = await provider.fetch_full_text("PMC4767193")
-                canonical_id = fetched["resource_uri"].split("/")[3]
+                canonical_id = fetched.resource_uri.split("/")[3]
                 first = await provider.parse_full_text(canonical_id)
                 second = await provider.parse_full_text(canonical_id)
                 return first, second
 
         first, second = asyncio.run(scenario())
-        assert first["markdown"] == "# Parsed JATS"
+        assert isinstance(first, ParsedFullText)
+        assert first.markdown == "# Parsed JATS"
         assert second == first
         assert xml_backend.call_count == 1
 
@@ -335,8 +375,9 @@ class TestEuropePmcProviderParseFullText:
                 return result
 
         result = asyncio.run(scenario())
-        assert result["markdown"] == "# Parsed JATS"
-        assert "PMC:4767193" in result["resource_uri"]
+        assert isinstance(result, ParsedFullText)
+        assert result.markdown == "# Parsed JATS"
+        assert "PMC:4767193" in result.resource_uri
         assert xml_backend.call_count == 1
 
     def test_default_inline_char_limit_truncates_large_markdown(self, tmp_path):
@@ -361,11 +402,12 @@ class TestEuropePmcProviderParseFullText:
                 return await provider.parse_full_text("PMC:4767193")
 
         result = asyncio.run(scenario())
-        assert result["markdown"] == "0123"
-        assert result["offset"] == 0
-        assert result["limit"] == 4
-        assert result["total_length"] == 10
-        assert result["has_more"] is True
+        assert isinstance(result, ParsedFullText)
+        assert result.markdown == "0123"
+        assert result.offset == 0
+        assert result.limit == 4
+        assert result.total_length == 10
+        assert result.has_more is True
 
     def test_explicit_offset_and_limit_are_honored(self, tmp_path):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -385,8 +427,9 @@ class TestEuropePmcProviderParseFullText:
                 return await provider.parse_full_text("PMC:4767193", offset=4, limit=3)
 
         result = asyncio.run(scenario())
-        assert result["markdown"] == "456"
-        assert result["offset"] == 4
-        assert result["limit"] == 3
-        assert result["total_length"] == 10
-        assert result["has_more"] is True
+        assert isinstance(result, ParsedFullText)
+        assert result.markdown == "456"
+        assert result.offset == 4
+        assert result.limit == 3
+        assert result.total_length == 10
+        assert result.has_more is True

@@ -20,9 +20,21 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 from prioris_mcp import PACKAGE_NAME, EnvVars
-from prioris_mcp.errors import InvalidRequestError, call_returning_envelope
+from prioris_mcp.errors import InvalidRequestError
 from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
 from prioris_mcp.mixin import MCPMixin
+from prioris_mcp.models.arxiv import ArxivFetchMetadataResult, ArxivSearchResult
+from prioris_mcp.models.common import (
+    DeleteEntryRef,
+    DeleteFetchedResult,
+    FullTextFetchResult,
+    ListFetchedResult,
+    MarkdownPage,
+    ParsedFullText,
+    ResolvedIdentifierResult,
+)
+from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
+from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.html_markdownify import MarkdownifyHtmlBackend
 from prioris_mcp.parsers.jats_xslt import JatsXsltMarkdownBackend
@@ -178,12 +190,10 @@ class PriorisMCP(MCPMixin):
             Literal["relevance", "lastUpdatedDate", "submittedDate"], Field(default="relevance")
         ] = "relevance",
         sort_order: Annotated[Literal["ascending", "descending"], Field(default="descending")] = "descending",
-    ) -> dict:
+    ) -> ArxivSearchResult:
         """Search arXiv by keyword/query, returning metadata records."""
-        return await call_returning_envelope(
-            self._arxiv_provider.search(
-                query, max_results=max_results, start=start, sort_by=sort_by, sort_order=sort_order
-            )
+        return await self._arxiv_provider.search(
+            query, max_results=max_results, start=start, sort_by=sort_by, sort_order=sort_order
         )
 
     async def research_arxiv_list_top_n(
@@ -200,28 +210,26 @@ class PriorisMCP(MCPMixin):
             list[str] | None,
             Field(default=None, description="Optional arXiv subject classes to exclude, combined with ANDNOT"),
         ] = None,
-    ) -> dict:
+    ) -> ArxivSearchResult:
         """List the N most recently submitted arXiv items across one or more subject categories."""
-        return await call_returning_envelope(
-            self._arxiv_provider.list_top_n(include_categories, n, exclude_categories=exclude_categories)
-        )
+        return await self._arxiv_provider.list_top_n(include_categories, n, exclude_categories=exclude_categories)
 
     async def research_arxiv_fetch_metadata(
         self,
         ctx: Context,
         arxiv_ids: Annotated[list[str], Field(description="One or more arXiv identifiers, version suffix optional")],
-    ) -> dict:
+    ) -> ArxivFetchMetadataResult:
         """Fetch metadata for one or more arXiv identifiers in a single call."""
-        return await call_returning_envelope(self._arxiv_provider.fetch_metadata(arxiv_ids))
+        return await self._arxiv_provider.fetch_metadata(arxiv_ids)
 
     async def research_arxiv_fetch_full_text(
         self,
         ctx: Context,
         arxiv_id: Annotated[str, Field(description="An arXiv identifier, version suffix optional")],
         format: Annotated[Literal["pdf", "html"], Field(description="Full-text format to fetch")],
-    ) -> dict:
+    ) -> FullTextFetchResult:
         """Fetch (or return the already-persisted) full text for an arXiv item."""
-        return await call_returning_envelope(self._arxiv_provider.fetch_full_text(arxiv_id, format))
+        return await self._arxiv_provider.fetch_full_text(arxiv_id, format)
 
     async def research_arxiv_parse_full_text(
         self,
@@ -233,11 +241,9 @@ class PriorisMCP(MCPMixin):
             int | None,
             Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
         ] = None,
-    ) -> dict:
+    ) -> ParsedFullText:
         """Convert already-fetched arXiv full text into one page of Markdown."""
-        return await call_returning_envelope(
-            self._arxiv_provider.parse_full_text(arxiv_id, format, offset=offset, limit=limit)
-        )
+        return await self._arxiv_provider.parse_full_text(arxiv_id, format, offset=offset, limit=limit)
 
     async def research_europepmc_search(
         self,
@@ -245,27 +251,25 @@ class PriorisMCP(MCPMixin):
         query: Annotated[str, Field(description="Europe PMC query syntax, e.g. 'field:value AND field:value'")],
         page_size: Annotated[int, Field(default=25)] = 25,
         cursor_mark: Annotated[str, Field(default="*", description="Europe PMC's opaque pagination cursor")] = "*",
-    ) -> dict:
+    ) -> EuropePmcSearchResult:
         """Search Europe PMC by keyword/query, returning metadata records."""
-        return await call_returning_envelope(
-            self._europepmc_provider.search(query, page_size=page_size, cursor_mark=cursor_mark)
-        )
+        return await self._europepmc_provider.search(query, page_size=page_size, cursor_mark=cursor_mark)
 
     async def research_europepmc_fetch_metadata(
         self,
         ctx: Context,
         identifiers: Annotated[list[str], Field(description="One or more Europe PMC identifiers or bare PMCIDs")],
-    ) -> dict:
+    ) -> EuropePmcFetchMetadataResult:
         """Fetch metadata for one or more Europe PMC identifiers in a single call."""
-        return await call_returning_envelope(self._europepmc_provider.fetch_metadata(identifiers))
+        return await self._europepmc_provider.fetch_metadata(identifiers)
 
     async def research_europepmc_fetch_full_text(
         self,
         ctx: Context,
         identifier: Annotated[str, Field(description="A Europe PMC identifier or bare PMCID")],
-    ) -> dict:
+    ) -> FullTextFetchResult:
         """Fetch (or return the already-persisted) JATS XML full text for a Europe PMC item."""
-        return await call_returning_envelope(self._europepmc_provider.fetch_full_text(identifier))
+        return await self._europepmc_provider.fetch_full_text(identifier)
 
     async def research_europepmc_parse_full_text(
         self,
@@ -276,11 +280,9 @@ class PriorisMCP(MCPMixin):
             int | None,
             Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
         ] = None,
-    ) -> dict:
+    ) -> ParsedFullText:
         """Convert already-fetched Europe PMC JATS XML full text into one page of Markdown."""
-        return await call_returning_envelope(
-            self._europepmc_provider.parse_full_text(identifier, offset=offset, limit=limit)
-        )
+        return await self._europepmc_provider.parse_full_text(identifier, offset=offset, limit=limit)
 
     async def research_resolve_identifier(
         self,
@@ -289,12 +291,10 @@ class PriorisMCP(MCPMixin):
         format: Annotated[
             str, Field(description="Desired target format; valid values depend on the resolving provider")
         ],
-    ) -> dict:
+    ) -> ResolvedIdentifierResult:
         """Resolve an identifier of unknown provider (including DOIs) to its owning provider and URL."""
-        return await call_returning_envelope(
-            resolve_research_identifier(
-                identifier, format, self._http_client, self._arxiv_provider, self._europepmc_provider
-            )
+        return await resolve_research_identifier(
+            identifier, format, self._http_client, self._arxiv_provider, self._europepmc_provider
         )
 
     async def research_localfile_fetch_full_text(
@@ -304,7 +304,7 @@ class PriorisMCP(MCPMixin):
         filename: Annotated[
             str | None, Field(default=None, description="Optional caller-supplied filename, stored for reference only")
         ] = None,
-    ) -> dict:
+    ) -> LocalFileFetchResult:
         """Validate and persist caller-sent PDF bytes, returning a server-assigned caller-facing ID.
 
         Small-file path only - the whole payload must fit in one call. For files at risk of
@@ -320,7 +320,7 @@ class PriorisMCP(MCPMixin):
                 "for the chunked-upload alternative"
             )
             self._warned_localfile_fetch_full_text_deprecation = True
-        return await call_returning_envelope(self._localfile_provider.fetch_full_text(content_base64, filename))
+        return await self._localfile_provider.fetch_full_text(content_base64, filename)
 
     async def research_localfile_parse_full_text(
         self,
@@ -333,9 +333,9 @@ class PriorisMCP(MCPMixin):
             int | None,
             Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
         ] = None,
-    ) -> dict:
+    ) -> ParsedFullText:
         """Convert an already-fetched local PDF's full text into one page of Markdown."""
-        return await call_returning_envelope(self._localfile_provider.parse_full_text(id, offset=offset, limit=limit))
+        return await self._localfile_provider.parse_full_text(id, offset=offset, limit=limit)
 
     async def research_localfile_begin_upload(
         self,
@@ -343,13 +343,15 @@ class PriorisMCP(MCPMixin):
         filename: Annotated[
             str | None, Field(default=None, description="Optional caller-supplied filename, stored for reference only")
         ] = None,
-    ) -> dict:
+    ) -> LocalFileBeginUploadResult:
         """Start a new chunked upload session for a large local PDF; returns a session_id."""
-        return await call_returning_envelope(self._begin_upload(filename))
+        return await self._begin_upload(filename)
 
-    async def _begin_upload(self, filename: str | None) -> dict:
+    async def _begin_upload(self, filename: str | None) -> LocalFileBeginUploadResult:
         session_id = await self._localfile_provider.begin_upload(filename)
-        return {"session_id": session_id, "max_chunk_bytes": EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES}
+        return LocalFileBeginUploadResult(
+            session_id=session_id, max_chunk_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES
+        )
 
     async def research_localfile_upload_chunk(
         self,
@@ -357,17 +359,17 @@ class PriorisMCP(MCPMixin):
         session_id: Annotated[str, Field(description="The session_id returned by research_localfile_begin_upload")],
         index: Annotated[int, Field(description="Zero-based chunk index; chunks must arrive in strict order")],
         chunk_base64: Annotated[str, Field(description="Base64-encoded bytes of this chunk")],
-    ) -> dict:
+    ) -> LocalFileUploadChunkResult:
         """Upload one chunk of a large local PDF to an in-progress upload session."""
-        return await call_returning_envelope(self._localfile_provider.upload_chunk(session_id, index, chunk_base64))
+        return await self._localfile_provider.upload_chunk(session_id, index, chunk_base64)
 
     async def research_localfile_finalize_upload(
         self,
         ctx: Context,
         session_id: Annotated[str, Field(description="The session_id returned by research_localfile_begin_upload")],
-    ) -> dict:
+    ) -> LocalFileFetchResult:
         """Validate and persist a chunked upload session's reassembled content, same as fetch_full_text."""
-        return await call_returning_envelope(self._localfile_provider.finalize_upload(session_id))
+        return await self._localfile_provider.finalize_upload(session_id)
 
     async def research_list_fetched(
         self,
@@ -377,10 +379,10 @@ class PriorisMCP(MCPMixin):
             Field(default=None, description="Restrict to one provider; omit to list all providers"),
         ] = None,
         format: Annotated[str | None, Field(default=None, description="Further restrict to one format")] = None,
-    ) -> dict:
+    ) -> ListFetchedResult:
         """Enumerate persisted (provider, identifier, format) manifest entries; never triggers a fetch."""
         entries = await self._storage.list(provider, format)
-        return {"entries": entries}
+        return ListFetchedResult(entries=entries)
 
     async def research_delete_fetched(
         self,
@@ -389,7 +391,7 @@ class PriorisMCP(MCPMixin):
             list[dict[str, str]],
             Field(description="One or more {provider, identifier, format} entries to remove"),
         ],
-    ) -> dict:
+    ) -> DeleteFetchedResult:
         """Remove one or more persisted entries, tolerating entries no longer present.
 
         Does not cascade: deleting a source entry (e.g. format="pdf") leaves its derived
@@ -398,18 +400,19 @@ class PriorisMCP(MCPMixin):
         remove everything stored for a fetch+parse, pass one entry per format explicitly - e.g.
         both {"format": "pdf", ...} and {"format": "pdf-markdown", ...}.
         """
-        return await call_returning_envelope(self._delete_fetched(entries))
+        return await self._delete_fetched(entries)
 
-    async def _delete_fetched(self, entries: list[dict[str, str]]) -> dict:
-        deleted: list[dict[str, str]] = []
-        not_found: list[dict[str, str]] = []
+    async def _delete_fetched(self, entries: list[dict[str, str]]) -> DeleteFetchedResult:
+        deleted: list[DeleteEntryRef] = []
+        not_found: list[DeleteEntryRef] = []
         for entry in entries:
             for key in ("provider", "identifier", "format"):
                 if key not in entry:
                     raise InvalidRequestError(f"entry missing required key {key!r}: {entry!r}")
             removed = await self._storage.delete(entry["provider"], entry["identifier"], entry["format"])
-            (deleted if removed else not_found).append(entry)
-        return {"deleted": deleted, "not_found": not_found}
+            ref = DeleteEntryRef(provider=entry["provider"], identifier=entry["identifier"], format=entry["format"])
+            (deleted if removed else not_found).append(ref)
+        return DeleteFetchedResult(deleted=deleted, not_found=not_found)
 
     async def _resolve_storage_identifier(self, provider: str, identifier: str, format: str) -> str:
         """Translate a caller-facing identifier into its storage-key identifier.
@@ -433,29 +436,35 @@ class PriorisMCP(MCPMixin):
 
     async def read_markdown_resource(
         self, provider: str, identifier: str, format: str, offset: int = 0, limit: int | None = None
-    ) -> dict:
+    ) -> str:
         """Read one page of persisted parsed Markdown for (provider, identifier, format).
 
         A plain not-found if absent. Paginated the same way as `parse_full_text` - see
         docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole
         - `limit` defaults to `PRIORIS_MCP_MAX_INLINE_CHARS` when unset.
+
+        Returns the `MarkdownPage` serialised to JSON - FastMCP's resource templates, unlike its
+        tools, don't auto-serialise a returned Pydantic model into resource content.
         """
         storage_identifier = await self._resolve_storage_identifier(provider, identifier, format)
         markdown_bytes = await self._storage.read(provider, storage_identifier, f"{format}-markdown")
         page = paginate_text(
             markdown_bytes.decode("utf-8"), offset, limit if limit is not None else EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS
         )
-        return {
-            "markdown": page["content"],
-            "offset": page["offset"],
-            "limit": page["limit"],
-            "total_length": page["total_length"],
-            "has_more": page["has_more"],
-        }
+        return MarkdownPage(
+            markdown=page["content"],
+            offset=page["offset"],
+            limit=page["limit"],
+            total_length=page["total_length"],
+            has_more=page["has_more"],
+        ).model_dump_json()
 
-    async def read_arxiv_categories_resource(self) -> dict:
-        """Read arXiv's queryable category codes and names, for `research_arxiv_list_top_n`/`research_arxiv_search`."""
-        return await self._arxiv_provider.list_categories()
+    async def read_arxiv_categories_resource(self) -> str:
+        """Read arXiv's queryable category codes and names, for `research_arxiv_list_top_n`/`research_arxiv_search`.
+
+        Returns the `ArxivCategoriesResult` serialised to JSON - see `read_markdown_resource` for why.
+        """
+        return (await self._arxiv_provider.list_categories()).model_dump_json()
 
 
 def app() -> FastMCP:  # pragma: no cover

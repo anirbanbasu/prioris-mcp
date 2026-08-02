@@ -5,6 +5,14 @@ import httpx
 import pytest
 
 from prioris_mcp.errors import FormatUnavailableError, InvalidRequestError, NotFoundError
+from prioris_mcp.models.arxiv import (
+    ArxivAuthor,
+    ArxivCategoriesResult,
+    ArxivFetchMetadataResult,
+    ArxivResolvedIdentifier,
+    ArxivSearchResult,
+)
+from prioris_mcp.models.common import FullTextFetchResult, ParsedFullText
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers.arxiv import ArxivProvider, _bare_id, _is_version_pinned
 from prioris_mcp.rate_limit import ProviderRequestQueue
@@ -136,16 +144,17 @@ class TestArxivProviderSearch:
                 return await provider.search("cat:cs.CL")
 
         result = asyncio.run(scenario())
-        assert result["total_results"] == 1
-        record = result["results"][0]
-        assert record["arxiv_id"] == "2106.09685v2"
-        assert record["title"] == "A Paper"
-        assert record["authors"] == [{"name": "Jane Doe", "affiliation": "Example University"}]
-        assert record["primary_category"] == "cs.CL"
-        assert record["categories"] == ["cs.CL"]
-        assert record["pdf_url"] == "http://arxiv.org/pdf/2106.09685v2"
-        assert record["doi"] == "10.48550/arXiv.2106.09685v2"
-        assert record["comment"] == "10 pages"
+        assert isinstance(result, ArxivSearchResult)
+        assert result.total_results == 1
+        record = result.results[0]
+        assert record.arxiv_id == "2106.09685v2"
+        assert record.title == "A Paper"
+        assert record.authors == [ArxivAuthor(name="Jane Doe", affiliation="Example University")]
+        assert record.primary_category == "cs.CL"
+        assert record.categories == ["cs.CL"]
+        assert record.pdf_url == "http://arxiv.org/pdf/2106.09685v2"
+        assert record.doi == "10.48550/arXiv.2106.09685v2"
+        assert record.comment == "10 pages"
 
     def test_zero_hit_query_returns_empty_results(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -157,7 +166,9 @@ class TestArxivProviderSearch:
                 return await provider.search("cat:zz.ZZ")
 
         result = asyncio.run(scenario())
-        assert result == {"results": [], "total_results": 0}
+        assert isinstance(result, ArxivSearchResult)
+        assert result.total_results == 0
+        assert result.results == []
 
     def test_max_results_over_bound_raises_invalid_request_without_network_call(self):
         calls = []
@@ -203,8 +214,9 @@ class TestArxivProviderListTopN:
                 return await provider.list_top_n(["cs.CL"], 2)
 
         result = asyncio.run(scenario())
-        assert len(result["results"]) == 2
-        assert "total_results" not in result
+        assert isinstance(result, ArxivSearchResult)
+        assert len(result.results) == 2
+        assert result.total_results == 2
 
     def test_requesting_more_than_the_category_has_returns_however_many_exist(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -217,7 +229,8 @@ class TestArxivProviderListTopN:
                 return await provider.list_top_n(["cs.CL"], 50)
 
         result = asyncio.run(scenario())
-        assert len(result["results"]) == 1
+        assert isinstance(result, ArxivSearchResult)
+        assert len(result.results) == 1
 
     def test_single_include_category_produces_todays_bare_cat_query(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -322,8 +335,9 @@ class TestArxivProviderFetchMetadata:
                 return await provider.fetch_metadata(["2106.09685", "2106.09686"])
 
         result = asyncio.run(scenario())
-        assert [r["arxiv_id"] for r in result["results"]] == ["2106.09685v2"]
-        assert result["not_found"] == ["2106.09686"]
+        assert isinstance(result, ArxivFetchMetadataResult)
+        assert [r.arxiv_id for r in result.results] == ["2106.09685v2"]
+        assert result.not_found == ["2106.09686"]
 
     def test_all_invalid_batch_returns_empty_results_and_full_not_found(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -335,7 +349,9 @@ class TestArxivProviderFetchMetadata:
                 return await provider.fetch_metadata(["9999.99999"])
 
         result = asyncio.run(scenario())
-        assert result == {"results": [], "not_found": ["9999.99999"]}
+        assert isinstance(result, ArxivFetchMetadataResult)
+        assert result.results == []
+        assert result.not_found == ["9999.99999"]
 
     def test_versioned_request_matches_returned_versioned_id(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -347,7 +363,8 @@ class TestArxivProviderFetchMetadata:
                 return await provider.fetch_metadata(["2106.09685v2"])
 
         result = asyncio.run(scenario())
-        assert result["not_found"] == []
+        assert isinstance(result, ArxivFetchMetadataResult)
+        assert result.not_found == []
 
 
 def _provider_with_storage(
@@ -382,11 +399,10 @@ class TestArxivProviderResolveIdentifier:
                 return await provider.resolve_identifier("2106.09685v2", "pdf")
 
         result = asyncio.run(scenario())
-        assert result == {
-            "identifier": "2106.09685v2",
-            "resolved_url": "https://arxiv.org/pdf/2106.09685v2",
-            "format": "pdf",
-        }
+        assert isinstance(result, ArxivResolvedIdentifier)
+        assert result == ArxivResolvedIdentifier(
+            identifier="2106.09685v2", resolved_url="https://arxiv.org/pdf/2106.09685v2", format="pdf"
+        )
         assert calls == []
 
     def test_unversioned_identifier_resolves_current_version_via_metadata(self):
@@ -399,8 +415,9 @@ class TestArxivProviderResolveIdentifier:
                 return await provider.resolve_identifier("2106.09685", "html")
 
         result = asyncio.run(scenario())
-        assert result["identifier"] == "2106.09685v2"
-        assert result["resolved_url"] == "https://arxiv.org/html/2106.09685v2"
+        assert isinstance(result, ArxivResolvedIdentifier)
+        assert result.identifier == "2106.09685v2"
+        assert result.resolved_url == "https://arxiv.org/html/2106.09685v2"
 
     def test_unrecognised_identifier_raises_not_found(self):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -444,10 +461,11 @@ class TestArxivProviderFetchFullText:
                 return await provider.fetch_full_text("2106.09685v2", "pdf")
 
         result = asyncio.run(scenario())
-        assert result["format"] == "pdf"
-        assert result["served_from_storage"] is False
-        assert result["size_bytes"] == len(b"%PDF-1.4 fake pdf bytes")
-        assert result["resource_uri"] == "research://arxiv/2106.09685v2/pdf/fulltext"
+        assert isinstance(result, FullTextFetchResult)
+        assert result.format_ == "pdf"
+        assert result.served_from_storage is False
+        assert result.size_bytes == len(b"%PDF-1.4 fake pdf bytes")
+        assert result.resource_uri == "research://arxiv/2106.09685v2/pdf/fulltext"
 
     def test_second_call_is_served_from_storage_without_a_second_request(self, tmp_path):
         call_count = 0
@@ -465,8 +483,10 @@ class TestArxivProviderFetchFullText:
                 return first, second, call_count
 
         first, second, count = asyncio.run(scenario())
-        assert first["served_from_storage"] is False
-        assert second["served_from_storage"] is True
+        assert isinstance(first, FullTextFetchResult)
+        assert isinstance(second, FullTextFetchResult)
+        assert first.served_from_storage is False
+        assert second.served_from_storage is True
         assert count == 1
 
     def test_html_404_raises_format_unavailable_not_not_found(self, tmp_path):
@@ -570,7 +590,8 @@ class TestArxivProviderFetchFullText:
                 return await provider.fetch_full_text("2106.09685", "pdf")
 
         result = asyncio.run(scenario())
-        assert result["resource_uri"] == "research://arxiv/2106.09685v2/pdf/fulltext"
+        assert isinstance(result, FullTextFetchResult)
+        assert result.resource_uri == "research://arxiv/2106.09685v2/pdf/fulltext"
 
     def test_redirect_is_followed_and_final_content_persisted(self, tmp_path):
         """Regression test for `PriorisMCP.__init__`'s `httpx.AsyncClient(follow_redirects=True)`.
@@ -605,7 +626,8 @@ class TestArxivProviderFetchFullText:
                 return await provider.fetch_full_text("2106.09685v2", "pdf")
 
         result = asyncio.run(scenario())
-        assert result["size_bytes"] == len(real_content)
+        assert isinstance(result, FullTextFetchResult)
+        assert result.size_bytes == len(real_content)
 
 
 class _StubParserBackend(ParserBackend):
@@ -669,14 +691,14 @@ class TestArxivProviderParseFullText:
                 return first, second
 
         first, second = asyncio.run(scenario())
-        assert first == {
-            "markdown": "# Parsed PDF",
-            "offset": 0,
-            "limit": 20000,
-            "total_length": len("# Parsed PDF"),
-            "has_more": False,
-            "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown",
-        }
+        assert first == ParsedFullText(
+            markdown="# Parsed PDF",
+            offset=0,
+            limit=20000,
+            total_length=len("# Parsed PDF"),
+            has_more=False,
+            resource_uri="research://arxiv/2106.09685v2/pdf/markdown",
+        )
         assert second == first
         assert pdf_backend.call_count == 1  # second call served from storage, not re-parsed
 
@@ -693,7 +715,8 @@ class TestArxivProviderParseFullText:
                 return await provider.parse_full_text("2106.09685v2", "html")
 
         result = asyncio.run(scenario())
-        assert result["markdown"] == "# Parsed HTML"
+        assert isinstance(result, ParsedFullText)
+        assert result.markdown == "# Parsed HTML"
 
     def test_default_inline_char_limit_truncates_large_markdown(self, tmp_path):
         """A parsed document longer than the provider's default limit is truncated, not returned whole.
@@ -717,14 +740,14 @@ class TestArxivProviderParseFullText:
                 return await provider.parse_full_text("2106.09685v2", "pdf")
 
         result = asyncio.run(scenario())
-        assert result == {
-            "markdown": "0123",
-            "offset": 0,
-            "limit": 4,
-            "total_length": 10,
-            "has_more": True,
-            "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown",
-        }
+        assert result == ParsedFullText(
+            markdown="0123",
+            offset=0,
+            limit=4,
+            total_length=10,
+            has_more=True,
+            resource_uri="research://arxiv/2106.09685v2/pdf/markdown",
+        )
 
     def test_explicit_offset_and_limit_are_honored(self, tmp_path):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -739,14 +762,14 @@ class TestArxivProviderParseFullText:
                 return await provider.parse_full_text("2106.09685v2", "pdf", offset=4, limit=3)
 
         result = asyncio.run(scenario())
-        assert result == {
-            "markdown": "456",
-            "offset": 4,
-            "limit": 3,
-            "total_length": 10,
-            "has_more": True,
-            "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown",
-        }
+        assert result == ParsedFullText(
+            markdown="456",
+            offset=4,
+            limit=3,
+            total_length=10,
+            has_more=True,
+            resource_uri="research://arxiv/2106.09685v2/pdf/markdown",
+        )
 
     def test_unversioned_identifier_finds_content_fetched_under_its_canonical_form(self, tmp_path):
         """Regression test: parse_full_text must canonicalize identifier before touching storage.
@@ -771,14 +794,14 @@ class TestArxivProviderParseFullText:
                 return await provider.parse_full_text("2106.09685", "pdf")
 
         result = asyncio.run(scenario())
-        assert result == {
-            "markdown": "# Parsed PDF",
-            "offset": 0,
-            "limit": 20000,
-            "total_length": len("# Parsed PDF"),
-            "has_more": False,
-            "resource_uri": "research://arxiv/2106.09685v2/pdf/markdown",
-        }
+        assert result == ParsedFullText(
+            markdown="# Parsed PDF",
+            offset=0,
+            limit=20000,
+            total_length=len("# Parsed PDF"),
+            has_more=False,
+            resource_uri="research://arxiv/2106.09685v2/pdf/markdown",
+        )
 
 
 class TestArxivProviderListCategories:
@@ -804,13 +827,14 @@ class TestArxivProviderListCategories:
                 return await provider.list_categories()
 
         result = asyncio.run(scenario())
-        assert result == {
-            "categories": [
+        assert isinstance(result, ArxivCategoriesResult)
+        assert result == ArxivCategoriesResult(
+            categories=[
                 {"code": "astro-ph.CO", "name": "Cosmology and Nongalactic Astrophysics"},
                 {"code": "cs.LG", "name": "Machine Learning"},
                 {"code": "hep-th", "name": "High Energy Physics - Theory"},
             ]
-        }
+        )
 
     def test_calls_oai_pmh_list_sets_endpoint_over_https(self):
         def handler(req: httpx.Request) -> httpx.Response:

@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import json
 import logging
 import ssl
 from pathlib import Path
@@ -8,9 +7,12 @@ from pathlib import Path
 import httpx
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import McpError
 
 from prioris_mcp import EnvVars
+from prioris_mcp.models.arxiv import ArxivCategoriesResult, ArxivCategory
+from prioris_mcp.models.common import ArxivResolvedIdentifierResult, MarkdownPage
 from prioris_mcp.server import PriorisMCP
 
 logger = logging.getLogger(__name__)
@@ -329,8 +331,8 @@ class TestArxivTools:
             async with client:
                 return await client.call_tool("research_arxiv_list_top_n", arguments={"include_categories": [], "n": 5})
 
-        result = asyncio.run(scenario())
-        assert result.structured_content["error"] == "invalid_request"
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
     def test_research_arxiv_categories_resource_returns_leaf_categories(
         self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
@@ -345,8 +347,9 @@ class TestArxivTools:
                 return await client.read_resource("research://arxiv/categories")
 
         result = asyncio.run(scenario())
-        payload = json.loads(result[0].text)
-        assert payload == {"categories": [{"code": "hep-th", "name": "High Energy Physics - Theory"}]}
+        assert ArxivCategoriesResult.model_validate_json(result[0].text) == ArxivCategoriesResult(
+            categories=[ArxivCategory(code="hep-th", name="High Energy Physics - Theory")]
+        )
 
     def test_research_arxiv_fetch_metadata_returns_results(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -427,11 +430,11 @@ class TestArxivTools:
                 return await client.read_resource("research://arxiv/2106.09685v2/html/markdown?offset=6&limit=3")
 
         resource_result = asyncio.run(scenario())
-        payload = json.loads(resource_result[0].text)
-        assert payload["markdown"] == "wor"
-        assert payload["has_more"] is True
+        page = MarkdownPage.model_validate_json(resource_result[0].text)
+        assert page.markdown == "wor"
+        assert page.has_more is True
 
-    def test_research_arxiv_parse_full_text_not_found_returns_error_envelope(
+    def test_research_arxiv_parse_full_text_not_found_raises_tool_error(
         self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
     ):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -445,8 +448,8 @@ class TestArxivTools:
                     "research_arxiv_parse_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "pdf"}
                 )
 
-        result = asyncio.run(scenario())
-        assert result.structured_content["error"] == "not_found"
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
     def test_reading_unfetched_resource_is_a_plain_not_found_with_no_side_effect(
         self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
@@ -591,16 +594,19 @@ class TestEuropePmcTools:
                 )
 
         result = asyncio.run(scenario())
-        assert result.structured_content["provider"] == "arxiv"
+        assert (
+            ArxivResolvedIdentifierResult.model_validate(result.structured_content["result"]).provider == "arxiv"
+        )  # routed directly to arXiv provider, not Europe PMC
 
-    def test_research_resolve_identifier_returns_invalid_request_envelope_for_bad_format(
+    def test_research_resolve_identifier_raises_tool_error_for_bad_format(
         self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
     ):
         """`format` is intentionally not a `Literal[...]` at the tool schema level.
 
         Valid values depend on the resolving provider, so an unsupported value (here, `arXiv`'s bare
-        `ValueError` for anything other than pdf/html) must still come back as the standard
-        `{"error": "invalid_request", ...}` envelope rather than as a raw uncaught exception.
+        `ValueError` for anything other than pdf/html, translated to `InvalidRequestError` by
+        `providers.identifier_routing._resolve_identifier`) must surface as a `ToolError`, not
+        succeed silently.
         """
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -614,8 +620,33 @@ class TestEuropePmcTools:
                     "research_resolve_identifier", arguments={"identifier": "2106.09685v2", "format": "xml"}
                 )
 
-        result = asyncio.run(scenario())
-        assert result.structured_content["error"] == "invalid_request"
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_research_resolve_identifier_raises_tool_error_for_bad_format_routed_to_europepmc(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Same contract as the arXiv bad-format case above, exercised for the Europe PMC routing path.
+
+        Europe PMC only ever serves XML full text, so `EuropePmcProvider.resolve_identifier`
+        rejects anything else with a bare `ValueError` before any outbound call, translated to
+        `InvalidRequestError` by `providers.identifier_routing._resolve_identifier` the same way
+        as arXiv's own format check - and must surface as a `ToolError` here too.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_resolve_identifier", arguments={"identifier": "MED:26551875", "format": "pdf"}
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
     def _jats_feed(self) -> bytes:
         return b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -784,8 +815,8 @@ startxref
                     "research_localfile_fetch_full_text", arguments={"content_base64": "not-valid-base64!!!"}
                 )
 
-        result = asyncio.run(scenario())
-        assert result.structured_content["error"] == "invalid_request"
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
     def test_reading_resource_with_unrecognised_localfile_id_is_not_found(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -881,8 +912,8 @@ startxref
                     },
                 )
 
-        result = asyncio.run(scenario())
-        assert result.structured_content["error"] == "invalid_request"
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
     def test_upload_chunk_unknown_session_fails_not_found(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         client = self._server_and_client(tmp_path, monkeypatch)
@@ -898,8 +929,8 @@ startxref
                     },
                 )
 
-        result = asyncio.run(scenario())
-        assert result.structured_content["error"] == "not_found"
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
     def test_finalize_upload_with_zero_chunks_fails_invalid_request(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -914,8 +945,8 @@ startxref
                     "research_localfile_finalize_upload", arguments={"session_id": session_id}
                 )
 
-        result = asyncio.run(scenario())
-        assert result.structured_content["error"] == "invalid_request"
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
     def test_fetch_full_text_logs_deprecation_warning(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch", caplog: "pytest.LogCaptureFixture"
@@ -1019,8 +1050,8 @@ class TestStorageManagementTools:
                     arguments={"entries": [{"provider": "arxiv", "identifier": "does-not-exist"}]},
                 )
 
-        result = asyncio.run(scenario())
-        assert result.structured_content["error"] == "invalid_request"
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
     def test_delete_fetched_does_not_cascade_to_derived_markdown_entry(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"

@@ -17,6 +17,8 @@ from urllib.parse import quote
 from anyio import to_thread
 
 from prioris_mcp.errors import FileTooLargeError, InvalidRequestError, NotFoundError
+from prioris_mcp.models.common import ParsedFullText
+from prioris_mcp.models.localfile import LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers.base import ResearchPublicationProvider
@@ -194,7 +196,7 @@ class LocalFileProvider(ResearchPublicationProvider):
     # has exactly one valid value - see providers/arxiv.py's search() override for the same pattern.
     async def fetch_full_text(  # ty: ignore[invalid-method-override]
         self, content_base64: str, filename: str | None = None, format: str = "pdf"
-    ) -> dict:
+    ) -> LocalFileFetchResult:
         """See docs/requirement-specification/06-interface-specification.md#research_localfile_fetch_full_text."""
         if format != "pdf":
             raise InvalidRequestError(f"Unsupported format for local filesystem source: {format}")
@@ -218,7 +220,7 @@ class LocalFileProvider(ResearchPublicationProvider):
 
         return await self._validate_and_persist(content, filename)
 
-    async def _validate_and_persist(self, content: bytes, filename: str | None) -> dict:
+    async def _validate_and_persist(self, content: bytes, filename: str | None) -> LocalFileFetchResult:
         """Post-decode validation, content-hash canonicalisation, and persistence.
 
         Shared by `fetch_full_text` (content decoded from a single `content_base64` argument) and
@@ -254,14 +256,14 @@ class LocalFileProvider(ResearchPublicationProvider):
                 )
                 served_from_storage = False
 
-        return {
-            "id": caller_facing_id,
-            "location": f"localfile:{content_hash}:pdf",
-            "format": "pdf",
-            "size_bytes": len(content),
-            "served_from_storage": served_from_storage,
-            "resource_uri": f"research://localfile/{quote(caller_facing_id, safe='')}/pdf/fulltext",
-        }
+        return LocalFileFetchResult(
+            id=caller_facing_id,
+            location=f"localfile:{content_hash}:pdf",
+            format="pdf",
+            size_bytes=len(content),
+            served_from_storage=served_from_storage,
+            resource_uri=f"research://localfile/{quote(caller_facing_id, safe='')}/pdf/fulltext",
+        )
 
     async def _mint_caller_facing_id(self) -> str:
         """Mint a minute-resolution-timestamp + random-suffix ID, retrying on manifest collision.
@@ -284,7 +286,7 @@ class LocalFileProvider(ResearchPublicationProvider):
     # fetch_full_text's first-positional-parameter rename above).
     async def parse_full_text(
         self, identifier: str, format: str = "pdf", offset: int = 0, limit: int | None = None
-    ) -> dict:
+    ) -> ParsedFullText:
         """See docs/requirement-specification/06-interface-specification.md#research_localfile_parse_full_text.
 
         Never re-reads the original path and never triggers fetch_full_text - `identifier` is
@@ -307,30 +309,30 @@ class LocalFileProvider(ResearchPublicationProvider):
         page = paginate_text(
             markdown_bytes.decode("utf-8"), offset, limit if limit is not None else self._default_inline_char_limit
         )
-        return {
-            "markdown": page["content"],
-            "offset": page["offset"],
-            "limit": page["limit"],
-            "total_length": page["total_length"],
-            "has_more": page["has_more"],
-            "resource_uri": f"research://localfile/{quote(identifier, safe='')}/pdf/markdown",
-        }
+        return ParsedFullText(
+            markdown=page["content"],
+            offset=page["offset"],
+            limit=page["limit"],
+            total_length=page["total_length"],
+            has_more=page["has_more"],
+            resource_uri=f"research://localfile/{quote(identifier, safe='')}/pdf/markdown",
+        )
 
     async def begin_upload(self, filename: str | None = None) -> str:
         """See docs/requirement-specification/06-interface-specification.md#research_localfile_begin_upload."""
         session_id = await self._upload_sessions.begin(filename)
         return session_id
 
-    async def upload_chunk(self, session_id: str, index: int, chunk_base64: str) -> dict:
+    async def upload_chunk(self, session_id: str, index: int, chunk_base64: str) -> LocalFileUploadChunkResult:
         """See docs/requirement-specification/06-interface-specification.md#research_localfile_upload_chunk."""
         try:
             chunk = await to_thread.run_sync(base64.b64decode, chunk_base64, None, True)
         except binascii.Error as exc:
             raise InvalidRequestError(f"chunk_base64 is not valid base64: {exc}") from exc
         bytes_so_far = await self._upload_sessions.append_chunk(session_id, index, chunk)
-        return {"received_index": index, "bytes_so_far": bytes_so_far}
+        return LocalFileUploadChunkResult(received_index=index, bytes_so_far=bytes_so_far)
 
-    async def finalize_upload(self, session_id: str) -> dict:
+    async def finalize_upload(self, session_id: str) -> LocalFileFetchResult:
         """See docs/requirement-specification/06-interface-specification.md#research_localfile_finalize_upload."""
         content, filename = await self._upload_sessions.pop_for_finalize(session_id)
         return await self._validate_and_persist(content, filename)
