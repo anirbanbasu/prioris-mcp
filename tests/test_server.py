@@ -623,6 +623,31 @@ class TestEuropePmcTools:
         with pytest.raises(ToolError):
             asyncio.run(scenario())
 
+    def test_research_resolve_identifier_raises_tool_error_for_bad_format_routed_to_europepmc(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Same contract as the arXiv bad-format case above, exercised for the Europe PMC routing path.
+
+        Europe PMC only ever serves XML full text, so `EuropePmcProvider.resolve_identifier`
+        rejects anything else with a bare `ValueError` before any outbound call, translated to
+        `InvalidRequestError` by `providers.identifier_routing._resolve_identifier` the same way
+        as arXiv's own format check - and must surface as a `ToolError` here too.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_resolve_identifier", arguments={"identifier": "MED:26551875", "format": "pdf"}
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
     def _jats_feed(self) -> bytes:
         return b"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96) Journal Publishing DTD v1.2 20190208//EN"

@@ -213,6 +213,28 @@ class TestEuropePmcProviderResolveIdentifier:
         with pytest.raises(FormatUnavailableError):
             asyncio.run(scenario())
 
+    def test_unsupported_format_raises_value_error_before_any_outbound_call(self):
+        """Europe PMC only ever serves XML full text - any other `format` must be rejected.
+
+        Must be a bare `ValueError`, the same type `ArxivProvider.resolve_identifier` raises for
+        its own unsupported formats - `providers.identifier_routing._resolve_identifier` only
+        knows how to translate that specific type into `InvalidRequestError`. Also asserts no
+        `fetch_metadata` call is made: format validation must happen before any outbound request,
+        the same "fail before any outbound call" contract `InvalidRequestError` cases elsewhere in
+        this codebase already follow.
+        """
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make an outbound request for an unsupported format")
+
+        async def scenario():
+            provider, client = _provider_with_handler(handler)
+            async with client:
+                await provider.resolve_identifier("MED:26551875", "pdf")
+
+        with pytest.raises(ValueError, match="Unsupported format for Europe PMC: pdf"):
+            asyncio.run(scenario())
+
 
 class TestEuropePmcProviderFetchFullText:
     """Tests for EuropePmcProvider.fetch_full_text()."""

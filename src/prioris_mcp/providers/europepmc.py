@@ -134,7 +134,17 @@ class EuropePmcProvider(ResearchPublicationProvider):
         `fetch_full_text` needs. Returning it here (alongside the `identifier`/`resolved_url`/
         `format` the interface spec requires) lets `fetch_full_text` reuse this one metadata
         call instead of issuing a second, redundant one purely to re-check availability.
+
+        Validates `format` before any outbound call, mirroring `ArxivProvider.resolve_identifier` -
+        Europe PMC only ever serves XML full text (see
+        docs/requirement-specification/06-interface-specification.md#research_europepmc_fetch_full_text),
+        so any other value must be rejected here rather than silently resolved as if "xml" had been
+        requested; `providers.identifier_routing._resolve_identifier` translates this `ValueError`
+        into `InvalidRequestError` for `research_resolve_identifier` the same way it already does
+        for arXiv's own format check.
         """
+        if format != "xml":
+            raise ValueError(f"Unsupported format for Europe PMC: {format}")
         metadata = await self.fetch_metadata([identifier])
         if not metadata.results:
             raise NotFoundError(f"Europe PMC identifier not recognised: {identifier}")
@@ -149,7 +159,7 @@ class EuropePmcProvider(ResearchPublicationProvider):
             # - inconsistent with the identifier `_parse_record` produces for the same record.
             identifier=f"PMC:{pmcid.removeprefix('PMC')}",
             resolved_url=url,
-            format="xml",
+            format=format,
             full_text_available=record.full_text_available,
         )
 
