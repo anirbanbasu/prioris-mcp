@@ -59,7 +59,7 @@ Every arXiv tool that returns article data (`search`, `list_top_n`, `fetch_metad
 
 **Underlying call:** `GET export.arxiv.org/api/query?search_query={query}&start=0&max_results={n}&sortBy=submittedDate&sortOrder=descending`, where `{query}` is `cat:{i1} AND cat:{i2} ... ANDNOT cat:{e1} ANDNOT cat:{e2} ...` — `include_categories` entries `AND`-joined, followed by an `ANDNOT cat:{e}` clause per `exclude_categories` entry (omitted entirely if `exclude_categories` is empty/absent). Both lists are deduplicated (order preserved) before building the query. "Top N" is defined as the N most recently submitted items matching that query — arXiv has no other notion of ranking within a category.
 
-**Output:** `{"results": [<arXiv metadata record>, ...]}`, up to `n` entries.
+**Output:** `{"results": [<arXiv metadata record>, ...], "total_results": <int>}`, up to `n` entries — the same `ArxivSearchResult` model `research_arxiv_search` uses (see [Conventions → Output shapes](#conventions) above), reused here rather than a separate results-only model. `total_results` here is simply `len(results)` for this one call, not a true across-query total the way `research_arxiv_search`'s `total_results` is (arXiv's own `<opensearch:totalResults>`) — `list_top_n` has no separate pagination/cursor concept, so the two fields happen to coincide in this response even though they mean different things.
 
 **Validation:** an empty `include_categories` fails with `invalid_request` before any outbound call.
 

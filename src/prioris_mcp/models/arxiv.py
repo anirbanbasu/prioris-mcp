@@ -25,9 +25,13 @@ class ArxivMetadataRecord(BaseModel):
 
     arxiv_id: Annotated[str, Field(..., strict=True, description="The arXiv ID of the record.")]
     title: Annotated[str | None, Field(None, strict=True, description="The title of the record.")] = None
-    authors: Annotated[list[ArxivAuthor], Field(..., strict=True, description="The authors of the record.")] = []
+    authors: Annotated[
+        list[ArxivAuthor], Field(default_factory=list, strict=True, description="The authors of the record.")
+    ]
     abstract: Annotated[str | None, Field(None, strict=True, description="The abstract of the record.")] = None
-    categories: Annotated[list[str], Field(..., strict=True, description="The categories of the record.")] = []
+    categories: Annotated[
+        list[str], Field(default_factory=list, strict=True, description="The categories of the record.")
+    ]
     primary_category: Annotated[
         str | None, Field(None, strict=True, description="The primary category of the record.")
     ] = None
@@ -44,20 +48,19 @@ class ArxivMetadataRecord(BaseModel):
 
 
 class ArxivSearchResult(BaseModel):
-    """Output of `research_arxiv_search`."""
+    """Output of `research_arxiv_search` and `research_arxiv_list_top_n`.
+
+    `research_arxiv_list_top_n` reuses this shape rather than a separate result-only model, since
+    knowing how many records were actually returned (which can be less than the requested `n`) is
+    just as relevant there as it is for `search` - see
+    docs/requirement-specification/06-interface-specification.md#research_arxiv_list_top_n for the
+    distinction between the two tools' `total_results` semantics.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     results: Annotated[list[ArxivMetadataRecord], Field(..., strict=True, description="The search results.")]
     total_results: Annotated[int, Field(..., strict=True, description="The total number of search results.")]
-
-
-class ArxivListTopNResult(BaseModel):
-    """Output of `research_arxiv_list_top_n`."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    results: Annotated[list[ArxivMetadataRecord], Field(..., strict=True, description="The list of top N records.")]
 
 
 class ArxivFetchMetadataResult(BaseModel):

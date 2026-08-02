@@ -34,8 +34,9 @@ class EuropePmcMetadataRecord(BaseModel):
     doi: Annotated[str | None, Field(None, strict=True, description="The DOI of the record.")] = None
     title: Annotated[str | None, Field(None, strict=True, description="The title of the record.")] = None
     authors: Annotated[
-        list[EuropePmcAuthor], Field(..., strict=True, description="The list of authors of the record.")
-    ] = []
+        list[EuropePmcAuthor],
+        Field(default_factory=list, strict=True, description="The list of authors of the record."),
+    ]
     abstract: Annotated[str | None, Field(None, strict=True, description="The abstract of the record.")] = None
     journal: Annotated[
         dict[str, Any] | None, Field(None, strict=True, description="The journal information of the record.")
