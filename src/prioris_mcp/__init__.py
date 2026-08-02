@@ -4,12 +4,19 @@ from pathlib import Path
 from typing import cast
 
 from environs import Env
+from marshmallow import ValidationError
 from marshmallow.validate import OneOf, Range
 from rich.logging import RichHandler
 
 PACKAGE_NAME = "prioris-mcp"
 env = Env()
 env.read_env()
+
+
+def _validate_str_dict(value: object) -> None:
+    """Raise if `value` (already JSON-decoded) isn't a JSON object of string keys and values."""
+    if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        raise ValidationError("must be a JSON object of string keys and values")
 
 
 class EnvVars:
@@ -164,6 +171,7 @@ class EnvVars:
             # e.g. {"Authorization": "Bearer <token>"} for an authenticated OCR server - a comma-
             # delimited env.dict format would break on a header value that itself contains a comma.
             default={},
+            validate=_validate_str_dict,
         ),
     )
 

@@ -35,12 +35,16 @@ class LiteParsePdfBackend(ParserBackend):
             # (ocr_enabled=True, no tessdata_path/ocr_server_url) fall back to lazily downloading
             # Tesseract language data over the network on first use, per
             # docs/requirement-specification/05-security.md#ocr-language-data-is-a-network-dependency-of-parse_full_text.
+            # Copied rather than passed by reference - EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_HEADERS is a
+            # shared class-level dict, and liteparse mutating it in place would corrupt config for
+            # every subsequent parse call.
+            headers = dict(EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_HEADERS)
             parser = LiteParse(
                 output_format="markdown",
                 ocr_enabled=EnvVars.PRIORIS_MCP_PDF_OCR_ENABLED,
                 tessdata_path=EnvVars.PRIORIS_MCP_PDF_OCR_TESSDATA_PATH,
                 ocr_server_url=EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_URL,
-                ocr_server_headers=EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_HEADERS or None,
+                ocr_server_headers=headers or None,
             )
             result = parser.parse(content)
             return result.text

@@ -174,3 +174,17 @@ class TestPdfOcrConfigDefaults:
         )
         reloaded = importlib.reload(prioris_mcp)
         assert reloaded.EnvVars.PRIORIS_MCP_PDF_OCR_SERVER_HEADERS == {"Authorization": "Bearer secret,with,commas"}
+
+    def test_ocr_server_headers_rejects_non_object_json(self, monkeypatch: "pytest.MonkeyPatch"):
+        from environs import EnvValidationError
+
+        monkeypatch.setenv("PRIORIS_MCP_PDF_OCR_SERVER_HEADERS", "[1, 2, 3]")
+        with pytest.raises(EnvValidationError):
+            importlib.reload(prioris_mcp)
+
+    def test_ocr_server_headers_rejects_non_string_values(self, monkeypatch: "pytest.MonkeyPatch"):
+        from environs import EnvValidationError
+
+        monkeypatch.setenv("PRIORIS_MCP_PDF_OCR_SERVER_HEADERS", '{"X-Retries": 3}')
+        with pytest.raises(EnvValidationError):
+            importlib.reload(prioris_mcp)
