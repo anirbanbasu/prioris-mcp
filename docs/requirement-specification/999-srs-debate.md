@@ -122,7 +122,9 @@ The idea of a "chunk" originated from background thinking about vector indexing 
 
 **Leaf vs. chunk, restated:** leaf is a physical/positional partition — exhaustive, contiguous, mandatory even when trivial (N=1 for whole-document formats). Chunk is a semantic partition — optional, parser-derived when possible, and free to cross leaf boundaries.
 
-**Open sub-question, not resolved:** §4 said a chunk is "structurally a list of spans... so a chunk can cross page boundaries." But since leaves are contiguous and exhaustively partition the blob (§3), a chunk crossing a page boundary is still just one contiguous range in blob coordinates — a single `{start, length}` would suffice for that case alone. A list-of-spans is only actually required for **discontiguous** chunks — e.g. excluding repeated PDF headers/footers/page numbers when stitching a cross-page section together. Raised this session as the likely real motivation; not confirmed.
+**Resolved — keep list-of-spans, but not for the reason originally suspected.** §4 said a chunk is "structurally a list of spans... so a chunk can cross page boundaries." Since leaves are contiguous and exhaustively partition the blob (§3), a chunk crossing a page boundary is in fact always a single contiguous range in blob coordinates. Checked against the actual dependency rather than assumed: `liteparse`'s `keep_headers_footers` defaults to `False` ("stripping repeated page-band lines and page chrome"), and `pdf_liteparse.py` doesn't override it — running headers/footers/page numbers never reach the blob in the first place, so the discontiguity source originally suspected here doesn't exist for this pipeline. A single `{start, length}` would have sufficed for every case examined, including tables reconstructed inline from spatial layout (see §12).
+
+List-of-spans is kept anyway, as a deliberate generalisation rather than a proven-necessary shape: it costs nothing for the common case (stored as a one-element list), and leaves room for a case that *does* need it without a later schema migration — e.g. an LLM-derived fallback chunk (this section's `source: llm` case) splicing together non-adjacent, semantically related passages, which is a real discontiguity source parser-derived chunks don't have.
 
 **Agreed — chunking is an SRS-level conditional capability:** the parser MUST emit chunk entries when it can recover source-document structure; when it cannot, no chunk entries are produced for that leaf/document, and callers needing sub-leaf granularity fall back to leaf-level only. This is deliberately honest about parser fidelity limits (see §9) rather than overpromising uniform chunk support.
 
@@ -163,6 +165,90 @@ Concrete losses identified by reading the stylesheet:
 
 **Open thread, unresolved at end of session:** (a) keep the shared XSLT→HTML→`markdownify` pipeline and patch only the depth-mapping bug, or (b) build a dedicated JATS-XML→Markdown XSLT with no HTML intermediate, accepting the larger maintenance surface and continued duplication with `markdownify` on arXiv's HTML path. Not decided.
 
+### 12. Extracted PDF image artefacts
+
+Follow-up to §8's list-of-spans question: while checking whether table/image reconstruction could be a source of chunk discontiguity, `liteparse`'s actual behaviour (checked against `types.py`/`parser.py`/the package's own `METADATA`, not assumed) turned out to differ between the two content types:
+
+- **Tables** are rendered inline as Markdown table syntax, "reconstructed from the spatial layout" per `liteparse`'s own README — no separate storage; whatever position they land in during reconstruction is their position in the blob, so chunk contiguity holds by the same argument as §8's header/footer finding. The only residual risk is layout-reconstruction *fidelity* ("reconstruction quality varies with document complexity" — the package's own caveat), the same visual-heuristic risk §9 already flagged for PDF generally, not a new discontiguity source.
+- **Images** are different: with `extract_images=True`, raw image bytes come out as separate `ExtractedImage` objects, and the Markdown blob only carries a placeholder/reference whose `id` "matches the reference used in the markdown output" (`liteparse/types.py:191`). The reference stays inline in the blob (contiguity holds), but the actual image bytes have no storage home in the current `StorageBackend` model at all — a genuinely new gap, not a restatement of the span-shape question.
+
+**Agreed:** image bytes get a new artefact type alongside `document`/`markdown`, in the same document-hash directory (`documents/<document-hash>/pdf/images/<image-id>`, naming TBD) — extending the existing artefact model rather than inventing a parallel storage mechanism.
+
+**Not resolved / not yet designed:**
+
+- Whether `liteparse` should even be configured to extract images (`extract_images=True`) given no current tool consumes image bytes — configuring `image_mode="placeholder"` or `"off"` to skip extraction entirely is the simpler default until a concrete tool needs them.
+- If extraction is enabled: catalogue/manifest entries for image artefacts, deletion semantics (does deleting the `markdown` artefact also delete images it references?), and whether `research_search_fetched`/FTS5 should index anything about images (e.g. alt text) at all.
+
+### 13. JATS pipeline resolution: html-to-markdown swap + narrow MathML pre-pass, no dedicated JATS XSLT
+
+Resolves §11's open thread. Investigated further by testing actual libraries rather than reasoning from either option's marketing copy or the debate's own earlier assumptions:
+
+- Confirmed §11's depth-aliasing bug directly against the stylesheet rather than trusting the earlier summary: `jats-html.xsl:1976-2018` gives three explicit depth-keyed templates (`<h2>` main-title, `<h3>` section-title, `<h4>` subsection-title), and `jats-html.xsl:2037-2043`'s generic `match="title"` fallback (anything nested deeper) emits plain `<h3 class="title">` — the same tag as the genuine section-title template. Since `markdownify`/`html-to-markdown` both key heading level off tag name only, never `class`, a section nested 4+ levels deep renders identically to a genuine top-level section. Bug confirmed real.
+- Looked at what else is lost at the `markdownify` step specifically (as distinct from the XSLT step, which preserves table/MathML/image content faithfully through to HTML):
+  - **Tables**: JATS's `<table-wrap>` content is copied straight through to genuine XHTML `<table>`/`<tr>`/`<td>` with attributes intact (`jats-html.xsl:2582-2589`) — nothing lost until `markdownify` runs. Tested empirically with a `rowspan`/`colspan` table: `colspan` degrades gracefully (empty-cell padding, column alignment preserved), but `rowspan` is silently mishandled — the spanned cell's sibling row shifts left with no marker, so a value reads as belonging to the wrong column. Wrong data, not just lossy formatting.
+  - **MathML**: the stylesheet deliberately passes `mml:*` through verbatim (`jats-html.xsl:2518-2519`, comment: "this stylesheet simply copies MathML through"). Tested `E=mc²` through `markdownify`: comes out as `E=mc2` — the superscript is silently dropped, producing a plausible-looking but wrong token.
+  - **Images**: `graphic`/`inline-graphic` only ever carries `@xlink:href` (`jats-html.xsl:2185-2194`, `assign-src` at `:3689`), typically a bare Europe PMC asset identifier, never embedded bytes — unlike PDF (§12), JATS parsing has no image bytes available at parse time at all; fetching them would need a separate network mechanism, out of scope here.
+- Checked whether an alternative HTML→Markdown library fixes the rowspan/MathML problems, rather than assuming a full dedicated-XSLT rewrite is the only fix available. `html-to-markdown` (PyPI; MIT-licensed; Rust-core via prebuilt wheels for the project's supported platforms, not a system-binary dependency the way Pandoc would be; `>=3.10`) — a from-scratch rewrite, not a `markdownify` fork — was tested against the same two cases:
+  - **Rowspan/colspan: fixed.** Same input, correct output — the rowspan'd cell's sibling row stays in the correct column, empty-padded rather than shifted.
+  - **MathML: not fixed.** Identical `E=mc2` flattening — no HTML→Markdown library tested has MathML awareness; this gap exists independent of library choice, since Markdown itself has no native math representation.
+- `markdownify` (the pip package) turned out to be used in exactly one place in the codebase: `html_markdownify.py`. `server.py` only imports the wrapper class (`MarkdownifyHtmlBackend`), and `pyproject.toml:29` is the only dependency reference. No other call site depends on `markdownify`'s specific behaviour, so swapping the underlying library in that one file covers both consumers — arXiv's fetched HTML and JATS's XSLT→HTML output — automatically.
+
+**Resolved:**
+
+1. **No dedicated JATS→Markdown XSLT.** §11's strongest argument for one ("fully fixes the depth-aliasing bug via computed depth," implicitly also motivated by table/MathML fidelity) turned out to be available more cheaply on the shared pipeline once the actual libraries were tested rather than assumed. The original §11 debate weighed the *architecture* question without first checking whether a library swap alone would close the table/rowspan gap — it does.
+2. Swap `markdownify` → `html-to-markdown` in `html_markdownify.py`, removing `markdownify` from `pyproject.toml` entirely. Fixes rowspan/colspan for both JATS and arXiv HTML at once, with no bespoke stylesheet needed.
+3. Add a narrow XSLT template converting `mml:*` subtrees to inline plain-text LaTeX (e.g. `$E=mc^2$`) *before* handoff to the HTML→Markdown backend, rather than passing MathML through verbatim as the vendored stylesheet currently does. This is the one piece of the original "no HTML intermediate" idea worth keeping, scoped to just the subtree that actually needs it rather than the whole document.
+4. Patch the depth-mapping templates (`jats-html.xsl:1976-2018`, `:2037-2043`) to compute heading level dynamically (`count(ancestor::sec)` or equivalent) instead of the fixed 3-level XPath enumeration.
+5. Rename `MarkdownifyHtmlBackend`/`html_markdownify.py` to something library-neutral (e.g. `HtmlToMarkdownBackend`) since the class no longer wraps `markdownify` specifically — including the module's docstring, which currently frames itself around `markdownify` by name.
+
+**Not yet designed:**
+
+- The `mml:*` → LaTeX XSLT mapping itself — only sketched as a concept (`E=mc^2` is a trivial case); non-trivial MathML (fractions, integrals, matrices, multi-line equations) needs its own mapping design, not assumed to fall out for free.
+- Whether the depth-mapping fix needs to generalise beyond `<sec>`-based nesting (body matter) to abstract/back-matter nesting, which may not use uniform element names — flagged in the original §11 debate, not re-checked this session.
+- `tests/test_parsers_html_markdownify.py` will need its golden-output assertions updated for `html-to-markdown`'s exact output conventions (whitespace, heading-style equivalents) even where behaviour is equivalent to `markdownify`'s.
+
+### 14. Summaries/RAPTOR deferred until vector search exists
+
+Prompted by revisiting §10's zero-chunk-fallback question against the actual motivation for wanting RAPTOR-style summaries in the first place: efficient semantic drill-down for retrieval — e.g. navigating a 144-page document like the EU AI Act down to Article 13 and its cross-references, without dumping all leaves into an LLM's context window.
+
+Examining this against the SRS's actual current retrieval capability:
+
+- RAPTOR's own retrieval mechanisms — collapsed-tree (flatten all node levels, rank by embedding similarity) and tree-traversal (descend from root into the most-similar branch, level by level) — are both inherently vector/embedding-based. Neither has an established equivalent for keyword search: FTS5/BM25 has no continuous "how similar is this branch" signal, only literal term matching, so genuine tree traversal isn't achievable with FTS5 alone.
+- What a summary hierarchy could still offer a pure-FTS5 system is more modest: paraphrased vocabulary added to the index (improves recall for queries phrased differently from the source text), and an optional two-pass "search summaries, then restrict to that node's children" pattern — but the latter isn't real tree traversal, and both benefits are marginal for literal/referential document types (legal/technical text, this project's actual domain), where a direct FTS5 keyword search for e.g. "Article 13" already surfaces cross-references well, at a corpus size (hundreds of leaves) FTS5 handles efficiently without needing help avoiding brute-force scanning.
+- The bottleneck originally motivating this thread — too much irrelevant text reaching the LLM's context window — is a result-set-size/ranking problem, which reasonable FTS5 top-k ranking already addresses to a first approximation; it doesn't inherently require a pre-built summary tree to solve.
+
+**Agreed: summaries/RAPTOR is deferred in its entirety until the vector index (already deferred as future work in §2) is designed.** Its actual payoff (efficient semantic drill-down) is gated on vector search existing at all — building `summaries.jsonl`/`generate_full_text_summaries` now would mean paying real costs (LLM summarization calls, non-determinism, manifest schema complexity, and the zero-chunk/zero-leaf edge cases raised in §10) for a capability that can't deliver its main benefit yet.
+
+**Consequence:** §10's open zero-chunk-fallback question (and any further RAPTOR-specific manifest design) is not resolved here — it's out of scope until vector search's own design is scoped, at which point it should be revisited together with vector search rather than independently, since the right answer may depend on decisions made there (e.g. what base retrieval unit vector search ends up using).
+
+### 15. Manifest table schema
+
+Resolves the "concrete manifest table schema" item from the previous session's "still not resolved" list, for the per-document manifest file introduced in §7 (replacing `structure.jsonl`).
+
+**One table, one row per entry** (leaf, chunk, or summary):
+
+| column | meaning |
+|---|---|
+| `id` | PK (rowid) |
+| `format` | `pdf \| jats \| html` — disambiguates which format's Markdown blob this entry's spans index into, since one document-hash directory (and therefore one manifest file, §7) can hold multiple formats, each with its own independent blob and coordinate space |
+| `kind` | `leaf \| chunk \| summary` (§4) |
+| `key` | flat text: page number for `leaf`, heading/section string for `chunk`. For `summary`, left genuinely open rather than assumed-null — summary itself is undesigned (§14), and nothing rules out an LLM-generated cluster label playing the same role a heading does for chunks |
+| `provenance` | `parser \| llm`, **non-null on every row, not chunk-only**: always `parser` for `leaf` (deterministic parser output by definition, no LLM-derived-leaf concept exists); the only kind where it actually varies is `chunk` (§8's parser-structure-recovery vs. LLM-fallback case); always `llm` for `summary` under every summarization mechanism discussed so far (RAPTOR-style `generate_full_text_summaries` is inherently model-generated) — but this is provisional, since summary is undesigned, not an enforced constraint |
+| `scheme` | chunk-only, free text (not a DB-level enum/`CHECK`/lookup table) — names a chunking algorithm+config (e.g. `"heading-bounded-v1"`, `"fts5-coarse"`, a future `"vector-fine-v2"`), letting multiple coexisting chunking passes (§4) layer on without a schema migration each time. Different in kind from `provenance`: `provenance` is a closed, small structural category (exactly two ways an entry can be derived); `scheme` is an open, growing, application-owned naming convention that only the chunking subsystem needs to interpret |
+| `spans` | JSON array `[{start, length}, ...]` (SQLite JSON1) — null for `summary`. Chosen over a normalized `spans` child table because the list is read/written atomically as a unit and is a one-element list in the common case (§8) |
+
+**Dropped `ordinal` entirely.** It would have served two different purposes, both already covered without it: span-internal order comes from JSON array order (the array is inherently ordered, unlike a normalized child table needing its own sequence column); entry-level document order comes from sorting by the first span's `start` (or, for `leaf`, the numeric `key`/page number directly).
+
+**Nesting (e.g. Article 13 → 13.1 → 13.1.2) is derived, not stored.** No `parent_id` and no hierarchical key. A subsection's span is a sub-range of its parent section's span, so containment among `chunk` entries sharing the same `(format, scheme)` reconstructs the hierarchy on demand. Scoped to one `scheme` deliberately: two different chunking passes' boundaries aren't guaranteed to align, so containment across schemes wouldn't mean anything.
+
+**Agreed (this session, superseding the earlier flat-chunk framing in §4/§8):** chunk entries capture every heading nesting level as separate, overlapping entries (an H3 subsection and its enclosing H2 section both get their own row), not just one chosen granularity — needed so a future summary tree (§14, still deferred) has an actual hierarchy to cluster over once it's designed.
+
+**Not yet designed / left open:**
+
+- Whether `summary` will end up with a real `key` (cluster label) once summary design actually happens (§14) — deliberately not decided here.
+- Whether `summary`'s `provenance` is unconditionally `llm` or could ever be something else (e.g. a future non-LLM extractive method) — treated as the expected value, not an enforced constraint.
+- Indices/generated-columns for span-range queries (e.g. supporting the `page` parameter on `parse_full_text`, or "which entries cover byte X") weren't designed this session.
+
 ## Where we left off / next steps
 
 Resolved this session, not yet written into the SRS:
@@ -177,15 +263,23 @@ Resolved this session, not yet written into the SRS:
 - Chunking is an SRS-level conditional capability: the parser MUST emit chunk entries when it can recover source-document structure; when it can't, no chunk entries are produced for that leaf/document, and callers fall back to leaf-level granularity only (§8).
 - Manifest chunk entries need a provenance marker (`source: parser | llm`), distinguishing free/deterministic parser-derived chunks from costly/non-deterministic LLM-derived fallback chunks (§8).
 - Summaries should reference chunks, not leaves, as RAPTOR's base clustering layer — including for JATS/HTML, which have only one (trivial) leaf but can still have many parser-derived chunks (§10).
+- Chunk span structure stays list-of-spans, but not for the originally suspected reason: `liteparse` already strips header/footer/page-chrome boilerplate before the blob is assembled (`keep_headers_footers=False` default, unoverridden), and tables reconstruct inline, so no known discontiguity source exists for parser-derived chunks — a single `{start, length}` would suffice for every case examined. List-of-spans is kept anyway as a no-cost generalisation (one-element list for the common case), reserved for a real future discontiguity source such as LLM-derived fallback chunks splicing non-adjacent passages (§8).
+- Extracted PDF images get a new artefact type alongside `document`/`markdown`, in the same document-hash directory — the Markdown blob only ever carries an inline placeholder/reference, never the raw image bytes, so those need their own storage home (§12).
+- **JATS pipeline architecture resolved: no dedicated JATS→Markdown XSLT.** Keep the shared XSLT→HTML→(HTML-to-Markdown backend) pipeline. Swap `markdownify` → `html-to-markdown` (PyPI, MIT, Rust-core prebuilt wheels) — fixes rowspan/colspan for both JATS and arXiv HTML, empirically verified; `markdownify` removed from the project entirely (`pyproject.toml`), and `MarkdownifyHtmlBackend`/`html_markdownify.py` renamed to something library-neutral. Add a narrow XSLT pre-pass converting `mml:*` MathML subtrees to inline LaTeX text before HTML→Markdown handoff (no library tested has native MathML support). Patch the depth-mapping templates to compute heading level dynamically instead of the fixed 3-level enumeration (§13).
+- **Summaries/RAPTOR deferred entirely until vector search is designed.** RAPTOR's retrieval mechanisms (collapsed-tree, tree-traversal) are inherently vector/embedding-based with no real keyword-search equivalent; its actual payoff (efficient semantic drill-down, avoiding dumping a whole document's leaves into an LLM's context window) can't be realised until the vector index — already deferred as future work in §2 — exists. `summaries.jsonl`/`generate_full_text_summaries` design work, including §10's zero-chunk-fallback question, is out of scope until then and should be revisited together with vector search's own design, not independently (§14).
+- **Manifest table schema resolved.** One table, one row per leaf/chunk/summary entry: `id`, `format`, `kind`, `key`, `provenance`, `scheme`, `spans` (JSON array, not a normalized child table). `ordinal` dropped (span order comes from JSON array order, entry order from sorting by first span's `start`/leaf's numeric `key`). Nesting is derived from span containment among same-`(format, scheme)` chunk entries, not stored (no `parent_id`, no hierarchical key). `provenance` is non-null on every row (not chunk-only): always `parser` for `leaf`, always `llm` for `summary` (provisional), genuinely variable only for `chunk`. `scheme` is free text, not a DB enum, so new chunking schemes don't need a migration. Chunk entries now capture every heading nesting level as separate overlapping rows, superseding §4/§8's earlier flat-chunk framing (§15).
 
 Still not resolved or written into the SRS:
 
-- Whether a chunk's span structure genuinely needs to be a list-of-spans (for discontiguous, e.g. header/footer-stripped, cross-page chunks) or a single `{start, length}` suffices given leaves are contiguous — raised, not confirmed (§8).
-- Whether summary falls back to referencing leaves directly when a document has zero chunks at all (structure recovery failed, no LLM-chunking fallback invoked) — raised, not reconfirmed after the general chunks-not-leaves principle was agreed (§10).
-- The concrete per-format chunk-boundary-detection mechanism isn't fully pinned down: a format-agnostic Markdown-heading-walker was proposed for PDF/HTML but not explicitly ratified; JATS's mechanism is contingent on the still-open pipeline-architecture question below (§9, §11).
-- **JATS parsing pipeline architecture undecided:** keep the shared XSLT→HTML→`markdownify` pipeline and patch only the depth-mapping bug (proposed), vs. build a dedicated JATS-XML→Markdown XSLT with no HTML intermediate (counter-proposed) — not decided (§11).
-- Concrete manifest table schema (columns, indices) for leaf/chunk/summary entries — now additionally needs to carry the provenance marker and conditional-presence semantics from §8, but the schema itself remains undesigned.
+- The concrete per-format chunk-boundary-detection mechanism isn't fully pinned down: a format-agnostic Markdown-heading-walker was proposed for PDF/HTML but not explicitly ratified; JATS's mechanism depends on the now-resolved pipeline (§9, §13).
+- The `mml:*` → LaTeX XSLT mapping is only sketched as a concept (trivial superscript case); non-trivial MathML (fractions, integrals, matrices, multi-line equations) needs its own mapping design (§13).
+- Whether the depth-mapping fix needs to generalise beyond `<sec>`-based nesting (body matter) to abstract/back-matter nesting, which may not use uniform element names (§13).
+- `tests/test_parsers_html_markdownify.py` golden-output assertions need updating for `html-to-markdown`'s output conventions once the swap lands (§13).
+- Indices/generated-columns for span-range queries on the manifest table (e.g. supporting `parse_full_text`'s `page` parameter, or "which entries cover byte X") — schema is resolved (§15) but access patterns weren't designed this session.
+- Whether `summary` entries will have a real `key` (cluster label) and whether `provenance` is unconditionally `llm` for them — deliberately left open pending summary's own design (§14, §15).
 - A concrete `SearchIndex`/indexing-provider interface, separate from `StorageBackend`, with FTS5 as the v1 implementation (from §2).
 - Journal mode (WAL vs. rollback) per file type — deferred to implementation.
 - Backup/restore functionality for the embedded-DB local backend — deferred as separate future work.
+- Whether `liteparse` should be configured with `extract_images=True` at all, given no current tool consumes image bytes — vs. `image_mode="placeholder"`/`"off"` to skip extraction until a concrete tool needs them (§12).
+- If image extraction is enabled: catalogue/manifest entries for image artefacts, deletion semantics relative to the `markdown` artefact that references them, and whether search indexing should touch images at all (§12).
 - None of `02-storage.md`, `01-architecture.md`, `03-functional-requirements.md`, `06-interface-specification.md`, or `07-test-specification.md` have been edited as part of this debate — this file remains the only artefact produced so far.
