@@ -46,6 +46,10 @@ This must be closed by bounding how many JATS transforms are ever *actually exec
 
 The cap (`PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS` — see [Configuration](../02-configuration.md)) is configurable, but is capped at the host's CPU count regardless of configuration: this is CPU-bound native work, so oversubscribing beyond available cores only makes the worst case worse without any offsetting throughput benefit.
 
+## Extracted PDF image resources must not leak filesystem paths
+
+[Storage → Future: extracted PDF images](02-storage.md#future-extracted-pdf-images) exposes each extracted image as its own MCP resource once `PRIORIS_MCP_PDF_EXTRACT_IMAGES` is enabled. That resource's URI scheme is not yet decided, but is bound by the same principle already established in [Local filesystem access means access to the caller's own content, not the server's disk](#local-filesystem-access-means-access-to-the-callers-own-content-not-the-servers-disk): the URI/handler must identify an image by its logical identity (provider, item identifier, image ID) and resolve it against the storage abstraction internally, never by embedding or accepting a server-side filesystem path directly. This isn't a new risk this feature introduces — it's the same no-server-side-path-reads constraint every other resource in this design already satisfies, stated here so it isn't overlooked when the URI scheme is actually chosen.
+
 ## OCR language data is a network dependency of `parse_full_text`
 
 `LiteParsePdfBackend` (`src/prioris_mcp/parsers/pdf_liteparse.py`) can invoke liteparse's bundled Tesseract OCR engine for scanned/image-only PDFs. Tesseract's own OCR needs per-language `.traineddata` files, which — left unconfigured — auto-download to a local cache directory on first use. That default is a hidden network dependency of a supposedly local parsing step: in an airgapped deployment, the first scanned PDF that needs OCR either fails outright or hangs until [`PDF_PARSE_TIMEOUT_SECONDS`](#a-bounded-per-call-failure-is-not-sufficient-on-its-own) trips, surfacing as a generic `ParseError` rather than a clear configuration error.
