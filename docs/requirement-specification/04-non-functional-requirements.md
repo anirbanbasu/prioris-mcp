@@ -36,7 +36,7 @@ For the same reason, every arXiv call goes to `https://export.arxiv.org/api/quer
 
 ### Storage must de-duplicate in-flight work, not just completed work
 
-[Storage → `StorageBackend`](02-storage.md#storagebackend) already de-duplicates *completed* downloads and parses via `exists`. That's insufficient under concurrency: if two calls for the same `(provider, canonical identifier, format)` key arrive close together, both can observe `exists` as false before either has finished `write`-ing, and both proceed — a duplicate concurrent download (for `fetch_full_text`) or a duplicate concurrent parse (for `parse_full_text`) for the same key.
+[Storage → `StorageBackend`](02-storage.md#storagebackend) already de-duplicates *completed* downloads and parses via `exists`. That's insufficient under concurrency: if two calls for the same `(provider, canonical identifier, format, artefact)` key arrive close together, both can observe `exists` as false before either has finished `write`-ing, and both proceed — a duplicate concurrent download (for `fetch_full_text`) or a duplicate concurrent parse (for `parse_full_text`) for the same key.
 
 `StorageBackend` (or the layer calling it) must guarantee that only one fetch and only one parse is ever in flight for a given key at a time: a second concurrent request for a key already being fetched or parsed must wait for that in-flight operation to complete and be served its result, rather than starting a redundant one. This is an in-flight lock, distinct from `exists` (which only reflects already-completed work).
 

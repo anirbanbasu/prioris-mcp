@@ -27,7 +27,7 @@ The capability names below (`search`, `fetch_metadata`, ...) name the shared int
 | `resolve_identifier` | Given an identifier already known to belong to this provider, resolve it to a fetchable URL in the target format (e.g. HTML, PDF), pinning a canonical version where the provider's identifiers are mutable. This is an internal, provider-native capability — see below. | Light |
 | `fetch_full_text` | Fetch the full text of a single item, in a given format, from its resolved URL. | Heavy (network I/O) |
 | `parse_full_text` | Convert previously-fetched full text into Markdown. Accepts an optional, PDF-only `page` param to page by physical PDF page rather than raw character offset — see below. | Heavy (CPU-bound) |
-| `list_fetched` | Enumerate previously-persisted `(provider, identifier, format)` entries in the [storage abstraction](02-storage.md), optionally filtered by provider/format. Not a per-provider capability — see below. | Light |
+| `list_fetched` | Enumerate previously-persisted `(provider, identifier, format, artefact)` entries in the [storage abstraction](02-storage.md), optionally filtered by provider/format. Not a per-provider capability — see below. | Light |
 | `delete_fetched` | Remove one or more previously-persisted `(provider, identifier, format, artefact)` entries from storage. Not a per-provider capability — see below. | Light |
 | `search_fetched` | Full-text search over previously-persisted chunks (or leaves, as a fallback for a document with none), optionally scoped to one provider/identifier/format — see [`SearchIndex`](#searchindex) and [Storage → Full-text search](02-storage.md#full-text-search-the-searchsqlite3-index) below. Not a per-provider capability — see below. | Light |
 
