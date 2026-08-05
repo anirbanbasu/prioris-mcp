@@ -88,6 +88,12 @@ class TestPageRangeForSpan:
         asyncio.run(manifest.replace_leaf_rows("pdf", [{"start": 0, "length": 100}, {"start": 100, "length": 100}]))
         assert asyncio.run(manifest.page_range_for_span("pdf", 150, 100)) == (2, 2)
 
+    def test_page_range_on_format_with_no_leaf_rows(self, tmp_path):
+        manifest = DocumentManifest(tmp_path / "manifest.sqlite")
+        # Call page_range_for_span on a format that has never had replace_leaf_rows called
+        result = asyncio.run(manifest.page_range_for_span("pdf", 0, 10))
+        assert result == (1, 1)
+
 
 class TestReplaceChunkRows:
     """Test replace_chunk_rows and related chunk operations."""
