@@ -40,6 +40,13 @@ class MarkdownPage(BaseModel):
     limit: Annotated[int, Field(..., strict=True, description="The limit of the page in the full text.")]
     total_length: Annotated[int, Field(..., strict=True, description="The total length of the full text.")]
     has_more: Annotated[bool, Field(..., strict=True, description="Whether there are more pages of Markdown to fetch.")]
+    total_pages: Annotated[
+        int | None, Field(default=None, description="Total PDF pages; null for non-page-aware formats")
+    ] = None
+    page_range: Annotated[
+        tuple[int, int] | None,
+        Field(default=None, description="[first_page, last_page] the returned slice spans; null for non-page-aware formats"),
+    ] = None
 
 
 class ParsedFullText(MarkdownPage):
@@ -107,7 +114,8 @@ class StorageEntry(BaseModel):
     provider: Annotated[str, Field(..., strict=True, description="The provider that persisted this entry.")]
     identifier: Annotated[str, Field(..., strict=True, description="The externally-visible identifier.")]
     format_: Annotated[str, Field(..., alias="format", strict=True, description="The format of the persisted entry.")]
-    fetched_at: Annotated[str, Field(..., strict=True, description="When this entry was fetched.")]
+    artefact: Annotated[Literal["document", "markdown"], Field(..., description="The type of artefact.")]
+    fetched_at_or_parsed_at: Annotated[str, Field(..., strict=True, description="When this entry was fetched.")]
     size_bytes: Annotated[int, Field(..., strict=True, description="The size of the persisted entry in bytes.")]
 
 
@@ -127,6 +135,7 @@ class DeleteEntryRef(BaseModel):
     provider: Annotated[str, Field(..., strict=True, description="The provider the entry was persisted under.")]
     identifier: Annotated[str, Field(..., strict=True, description="The externally-visible identifier.")]
     format_: Annotated[str, Field(..., alias="format", strict=True, description="The format of the entry.")]
+    artefact: Annotated[Literal["document", "markdown", "all"], Field(..., description="The type of artefact.")]
 
 
 class DeleteFetchedResult(BaseModel):
@@ -138,3 +147,24 @@ class DeleteFetchedResult(BaseModel):
     not_found: Annotated[
         list[DeleteEntryRef], Field(..., strict=True, description="Requested entries that were already absent.")
     ]
+
+
+class SearchMatch(BaseModel):
+    """One match result from a search across the local index."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Annotated[str, Field(..., strict=True)]
+    identifier: Annotated[str, Field(..., strict=True)]
+    format_: Annotated[str, Field(..., alias="format", strict=True)]
+    snippet: Annotated[str, Field(..., strict=True)]
+    offset: Annotated[int, Field(..., strict=True)]
+    score: Annotated[float, Field(..., strict=True)]
+
+
+class SearchFetchedResult(BaseModel):
+    """Output of `research_search_fetched`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    matches: Annotated[list[SearchMatch], Field(..., strict=True)]
