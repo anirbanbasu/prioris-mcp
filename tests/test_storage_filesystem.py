@@ -245,3 +245,108 @@ class TestFilesystemStorageBackend:
         second = asyncio.run(backend.get_or_create("arxiv", "2601.05525v2", "pdf", factory))
         assert first == (b"downloaded bytes", False)
         assert second == (b"downloaded bytes", True)
+
+
+class TestExistsWriteRead:
+    """Directory-layout tests for exists/write/read against the artefact model (Task 7a)."""
+
+    def test_exists_false_before_write(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        assert asyncio.run(backend.exists("arxiv", "2106.09685v2", "pdf")) is False
+
+    def test_write_then_read_round_trips_document_artefact(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"%PDF-1.4 raw bytes")
+            exists = await backend.exists("arxiv", "2106.09685v2", "pdf")
+            content = await backend.read("arxiv", "2106.09685v2", "pdf")
+            return exists, content
+
+        exists, content = asyncio.run(scenario())
+        assert exists is True
+        assert content == b"%PDF-1.4 raw bytes"
+
+    def test_document_and_markdown_artefacts_are_independent_files(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"raw", artefact="document")
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"# md", artefact="markdown")
+            document = await backend.read("arxiv", "2106.09685v2", "pdf", artefact="document")
+            markdown = await backend.read("arxiv", "2106.09685v2", "pdf", artefact="markdown")
+            return document, markdown
+
+        document, markdown = asyncio.run(scenario())
+        assert document == b"raw"
+        assert markdown == b"# md"
+
+    def test_read_of_missing_content_raises_file_not_found(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(backend.read("arxiv", "nope", "pdf"))
+
+    def test_write_creates_documents_subdirectory_layout(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        location = asyncio.run(backend.write("arxiv", "2106.09685v2", "pdf", b"raw"))
+        assert "documents" in location
+        assert location.endswith("pdf/document")
+
+    def test_write_populates_catalogue(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"raw bytes", original_identifier="2106.09685")
+            return await backend._catalogue.get("arxiv", "2106.09685v2", "pdf", "document")
+
+        entry = asyncio.run(scenario())
+        assert entry["size_bytes"] == len(b"raw bytes")
+        assert entry["original_identifier"] == "2106.09685"
+
+    def test_write_appends_metadata_jsonl(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("arxiv", "2106.09685v2", "pdf", b"raw bytes"))
+        doc_dir = backend._document_dir("arxiv", "2106.09685v2")
+        lines = (doc_dir / "pdf" / "metadata.jsonl").read_text().splitlines()
+        assert len(lines) == 1
+        record = json.loads(lines[0])
+        assert record["provider"] == "arxiv"
+        assert record["artefact"] == "document"
+
+    def test_no_leftover_tmp_files_after_write(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        asyncio.run(backend.write("arxiv", "2106.09685v2", "pdf", b"raw"))
+        doc_dir = backend._document_dir("arxiv", "2106.09685v2")
+        assert list((doc_dir / "pdf").glob("*.tmp")) == []
+
+    def test_base_dir_auto_created_if_missing(self, tmp_path: Path):
+        target = tmp_path / "nested" / "storage"
+        FilesystemStorageBackend(target)
+        assert target.exists()
+        assert (target / "documents").exists()
+
+    def test_defaults_base_dir_to_env_vars_storage_dir(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "from-env")
+        backend = FilesystemStorageBackend()
+        assert backend._base_dir == tmp_path / "from-env"
+
+
+class TestGetOrCreateEndToEnd:
+    """End-to-end get_or_create test against the artefact directory layout (Task 7a)."""
+
+    def test_get_or_create_round_trips_against_real_filesystem(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def factory() -> bytes:
+            return b"produced content"
+
+        async def scenario():
+            content, served = await backend.get_or_create("arxiv", "2106.09685v2", "pdf", factory)
+            content2, served2 = await backend.get_or_create("arxiv", "2106.09685v2", "pdf", factory)
+            return content, served, content2, served2
+
+        content, served, content2, served2 = asyncio.run(scenario())
+        assert content == b"produced content"
+        assert served is False
+        assert content2 == b"produced content"
+        assert served2 is True
