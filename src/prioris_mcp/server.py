@@ -45,6 +45,7 @@ from prioris_mcp.providers.identifier_routing import resolve_research_identifier
 from prioris_mcp.providers.localfile import LocalFileProvider, UploadSessionManager
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
+from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 
 package_version = version(PACKAGE_NAME)
 logger = logging.getLogger(__name__)
@@ -129,6 +130,7 @@ class PriorisMCP(MCPMixin):
 
     def __init__(self) -> None:
         self._storage = FilesystemStorageBackend()
+        self._search_index = SqliteFts5SearchIndex(EnvVars.PRIORIS_MCP_STORAGE_DIR / "search.sqlite3")
         if EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS:
             logger.warning(
                 "HTTPS certificate verification is DISABLED (PRIORIS_MCP_UNVERIFIED_HTTPS=True) - "
@@ -151,6 +153,7 @@ class PriorisMCP(MCPMixin):
             http_client=self._http_client,
             pdf_backend=pdf_backend,
             html_backend=html_backend,
+            search_index=self._search_index,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
         )
         europepmc_queue = ProviderRequestQueue(
@@ -163,6 +166,7 @@ class PriorisMCP(MCPMixin):
             queue=europepmc_queue,
             http_client=self._http_client,
             xml_backend=jats_backend,
+            search_index=self._search_index,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
         )
         self._localfile_provider = LocalFileProvider(
@@ -170,6 +174,7 @@ class PriorisMCP(MCPMixin):
             pdf_backend=pdf_backend,
             max_size_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
+            search_index=self._search_index,
             upload_session_manager=UploadSessionManager(
                 ttl_seconds=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_SESSION_TTL_SECONDS,
                 max_chunk_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES,
