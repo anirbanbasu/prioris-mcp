@@ -3,7 +3,11 @@ import asyncio
 import pytest
 from pydantic import RootModel
 
-from prioris_mcp.providers.base import CapabilityNotSupportedError, ResearchPublicationProvider
+from prioris_mcp.errors import InvalidRequestError, NotFoundError
+from prioris_mcp.parsers.base import ParserBackend
+from prioris_mcp.providers.base import CapabilityNotSupportedError, ResearchPublicationProvider, persist_parsed_markdown
+from prioris_mcp.storage.filesystem import FilesystemStorageBackend
+from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 
 
 class _StubProvider(ResearchPublicationProvider):
@@ -84,5 +88,285 @@ class TestResearchPublicationProvider:
             ):
                 with pytest.raises(CapabilityNotSupportedError):
                     await coro
+
+        asyncio.run(scenario())
+
+
+class _CountingParserBackend(ParserBackend):
+    def __init__(self, pages: list[str]):
+        self.call_count = 0
+        self._pages = pages
+
+    async def to_markdown(self, content: bytes) -> dict:
+        self.call_count += 1
+        markdown_parts, leaf_spans, offset = [], [], 0
+        for i, page in enumerate(self._pages):
+            if i > 0:
+                markdown_parts.append("\n\n")
+                offset += 2
+            markdown_parts.append(page)
+            leaf_spans.append({"start": offset, "length": len(page)})
+            offset += len(page)
+        return {"markdown": "".join(markdown_parts), "leaf_spans": leaf_spans}
+
+
+def _env(tmp_path):
+    storage = FilesystemStorageBackend(tmp_path / "storage")
+    search_index = SqliteFts5SearchIndex(tmp_path / "search.sqlite3")
+    return storage, search_index
+
+
+class TestPersistParsedMarkdownNotFound:
+    """Test NotFoundError raised when source document missing or page out of range."""
+
+    def test_raises_not_found_when_source_document_missing(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            backend = _CountingParserBackend(["one page"])
+            with pytest.raises(NotFoundError):
+                await persist_parsed_markdown(
+                    storage=storage,
+                    search_index=search_index,
+                    provider="arxiv",
+                    canonical_identifier="2106.09685v2",
+                    external_identifier="2106.09685v2",
+                    source_format="pdf",
+                    backend=backend,
+                    offset=0,
+                    limit=100,
+                    page=None,
+                    page_aware=True,
+                )
+
+        asyncio.run(scenario())
+
+
+class TestPersistParsedMarkdownFreshParse:
+    """Test parsing, persistence, caching, manifest population, and search index."""
+
+    def test_parses_persists_and_paginates_on_first_call(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"%PDF-1.4 raw")
+            backend = _CountingParserBackend(["# Intro\n\nHello world."])
+            result = await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=True,
+            )
+            assert result["markdown"] == "# Intro\n\nHello world."
+            assert backend.call_count == 1
+            assert result["total_pages"] == 1
+            assert result["page_range"] == (1, 1)
+
+        asyncio.run(scenario())
+
+    def test_second_call_is_served_from_cache_not_reparsed(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"%PDF-1.4 raw")
+            backend = _CountingParserBackend(["# Intro\n\nHello world."])
+            await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=True,
+            )
+            await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=True,
+            )
+            assert backend.call_count == 1
+
+        asyncio.run(scenario())
+
+    def test_populates_manifest_leaf_rows(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"raw")
+            backend = _CountingParserBackend(["Page one.", "Page two."])
+            await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=True,
+            )
+            manifest = storage.manifest_for("arxiv", "2106.09685v2")
+            assert await manifest.total_pages("pdf") == 2
+
+        asyncio.run(scenario())
+
+    def test_populates_search_index(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"raw")
+            backend = _CountingParserBackend(["# Introduction\n\nAbout quantum entanglement."])
+            await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=True,
+            )
+            results = await search_index.search("quantum")
+            assert len(results) == 1
+            assert results[0]["identifier"] == "2106.09685v2"
+
+        asyncio.run(scenario())
+
+    def test_uses_external_identifier_not_canonical_for_search_index(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("localfile", "abc123hash", "pdf", b"raw")
+            backend = _CountingParserBackend(["octopus content"])
+            await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="localfile",
+                canonical_identifier="abc123hash",
+                external_identifier="20260729-1430-a3f2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=True,
+            )
+            results = await search_index.search("octopus")
+            assert results[0]["identifier"] == "20260729-1430-a3f2"
+
+        asyncio.run(scenario())
+
+
+class TestPersistParsedMarkdownPageParam:
+    """Test page parameter resolves offset to page start and validates bounds."""
+
+    def test_page_resolves_offset_relative_to_that_pages_start(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"raw")
+            backend = _CountingParserBackend(["Page one content.", "Page two content."])
+            result = await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=2,
+                page_aware=True,
+            )
+            assert result["markdown"] == "Page two content."
+
+        asyncio.run(scenario())
+
+    def test_page_out_of_range_raises_not_found(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"raw")
+            backend = _CountingParserBackend(["Only page."])
+            with pytest.raises(NotFoundError):
+                await persist_parsed_markdown(
+                    storage=storage,
+                    search_index=search_index,
+                    provider="arxiv",
+                    canonical_identifier="2106.09685v2",
+                    external_identifier="2106.09685v2",
+                    source_format="pdf",
+                    backend=backend,
+                    offset=0,
+                    limit=1000,
+                    page=5,
+                    page_aware=True,
+                )
+
+        asyncio.run(scenario())
+
+
+class TestPersistParsedMarkdownPageAwareGuard:
+    """Test page_aware guard and page/page_range behavior per format."""
+
+    def test_page_given_when_not_page_aware_raises_invalid_request(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("europepmc", "MED:1", "xml", b"raw")
+            backend = _CountingParserBackend(["whole document"])
+            with pytest.raises(InvalidRequestError):
+                await persist_parsed_markdown(
+                    storage=storage,
+                    search_index=search_index,
+                    provider="europepmc",
+                    canonical_identifier="MED:1",
+                    external_identifier="MED:1",
+                    source_format="xml",
+                    backend=backend,
+                    offset=0,
+                    limit=1000,
+                    page=1,
+                    page_aware=False,
+                )
+
+        asyncio.run(scenario())
+
+    def test_total_pages_and_page_range_are_none_when_not_page_aware(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("europepmc", "MED:1", "xml", b"raw")
+            backend = _CountingParserBackend(["whole document"])
+            result = await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="europepmc",
+                canonical_identifier="MED:1",
+                external_identifier="MED:1",
+                source_format="xml",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=False,
+            )
+            assert result["total_pages"] is None
+            assert result["page_range"] is None
 
         asyncio.run(scenario())
