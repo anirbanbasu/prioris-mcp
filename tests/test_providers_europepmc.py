@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import pytest
@@ -16,6 +17,7 @@ from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers.europepmc import EuropePmcProvider
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
+from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 
 
 def _record(
@@ -56,7 +58,13 @@ def _provider_with_handler(
 ) -> tuple[EuropePmcProvider, httpx.AsyncClient]:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
-    provider = EuropePmcProvider(storage=None, queue=queue, http_client=client, xml_backend=None)
+    provider = EuropePmcProvider(
+        storage=None,
+        queue=queue,
+        http_client=client,
+        xml_backend=None,
+        search_index=SqliteFts5SearchIndex(Path(":memory:")),
+    )
     return provider, client
 
 
@@ -66,7 +74,13 @@ def _provider_with_storage(
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
     storage = FilesystemStorageBackend(base_dir=tmp_path)
-    provider = EuropePmcProvider(storage=storage, queue=queue, http_client=client, xml_backend=None)
+    provider = EuropePmcProvider(
+        storage=storage,
+        queue=queue,
+        http_client=client,
+        xml_backend=None,
+        search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
+    )
     return provider, client
 
 
@@ -300,9 +314,9 @@ class _StubXmlBackend(ParserBackend):
         self.markdown = markdown
         self.call_count = 0
 
-    async def to_markdown(self, content: bytes) -> str:
+    async def to_markdown(self, content: bytes) -> dict:
         self.call_count += 1
-        return self.markdown
+        return {"markdown": self.markdown, "leaf_spans": [{"start": 0, "length": len(self.markdown)}]}
 
 
 class TestEuropePmcProviderParseFullText:
@@ -320,7 +334,11 @@ class TestEuropePmcProviderParseFullText:
             queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
             storage = FilesystemStorageBackend(base_dir=tmp_path)
             provider = EuropePmcProvider(
-                storage=storage, queue=queue, http_client=client, xml_backend=_StubXmlBackend()
+                storage=storage,
+                queue=queue,
+                http_client=client,
+                xml_backend=_StubXmlBackend(),
+                search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
             )
             async with client:
                 await provider.parse_full_text("PMC:4767193")
@@ -340,7 +358,13 @@ class TestEuropePmcProviderParseFullText:
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
             storage = FilesystemStorageBackend(base_dir=tmp_path)
-            provider = EuropePmcProvider(storage=storage, queue=queue, http_client=client, xml_backend=xml_backend)
+            provider = EuropePmcProvider(
+                storage=storage,
+                queue=queue,
+                http_client=client,
+                xml_backend=xml_backend,
+                search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
+            )
             async with client:
                 fetched = await provider.fetch_full_text("PMC4767193")
                 canonical_id = fetched.resource_uri.split("/")[3]
@@ -366,7 +390,13 @@ class TestEuropePmcProviderParseFullText:
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
             storage = FilesystemStorageBackend(base_dir=tmp_path)
-            provider = EuropePmcProvider(storage=storage, queue=queue, http_client=client, xml_backend=xml_backend)
+            provider = EuropePmcProvider(
+                storage=storage,
+                queue=queue,
+                http_client=client,
+                xml_backend=xml_backend,
+                search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
+            )
             async with client:
                 # Fetch using bare PMCID
                 await provider.fetch_full_text("PMC4767193")
@@ -395,7 +425,12 @@ class TestEuropePmcProviderParseFullText:
             queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
             storage = FilesystemStorageBackend(base_dir=tmp_path)
             provider = EuropePmcProvider(
-                storage=storage, queue=queue, http_client=client, xml_backend=xml_backend, default_inline_char_limit=4
+                storage=storage,
+                queue=queue,
+                http_client=client,
+                xml_backend=xml_backend,
+                search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
+                default_inline_char_limit=4,
             )
             async with client:
                 await provider.fetch_full_text("PMC4767193")
@@ -421,7 +456,13 @@ class TestEuropePmcProviderParseFullText:
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
             queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
             storage = FilesystemStorageBackend(base_dir=tmp_path)
-            provider = EuropePmcProvider(storage=storage, queue=queue, http_client=client, xml_backend=xml_backend)
+            provider = EuropePmcProvider(
+                storage=storage,
+                queue=queue,
+                http_client=client,
+                xml_backend=xml_backend,
+                search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
+            )
             async with client:
                 await provider.fetch_full_text("PMC4767193")
                 return await provider.parse_full_text("PMC:4767193", offset=4, limit=3)
@@ -433,3 +474,42 @@ class TestEuropePmcProviderParseFullText:
         assert result.limit == 3
         assert result.total_length == 10
         assert result.has_more is True
+
+
+class TestParseFullTextSearchIndexing:
+    """docs/requirement-specification/02-storage.md#full-text-search-the-searchsqlite3-index."""
+
+    def test_parse_full_text_populates_search_index(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=_search_payload([_record()]))
+
+        search_index = SqliteFts5SearchIndex(tmp_path / "search.sqlite3")
+
+        async def scenario():
+            client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+            storage = FilesystemStorageBackend(base_dir=tmp_path)
+            provider = EuropePmcProvider(
+                storage=storage,
+                queue=queue,
+                http_client=client,
+                xml_backend=_StubXmlBackend(),
+                search_index=search_index,
+            )
+            async with client:
+                # resolve_identifier resolves "MED:26551875" to canonical "PMC:4767193" via
+                # fetch_metadata (see _record()'s default pmcid) - storage is written under that
+                # canonical form, mirroring how fetch_full_text itself would have persisted it.
+                await provider._storage.write("europepmc", "PMC:4767193", "xml", b"<article/>")
+                await provider.parse_full_text("MED:26551875")
+
+        asyncio.run(scenario())
+        # _StubXmlBackend's default markdown is "# parsed" - search for the real word "parsed",
+        # not a bare "*" wildcard (FTS5 MATCH doesn't support "*" as "any").
+        results = asyncio.run(search_index.search("parsed"))
+        assert len(results) == 1
+        assert results[0]["provider"] == "europepmc"
+        # external_identifier is the canonical id here (europepmc has no separate caller-facing
+        # form the way localfile does), not the "MED:26551875" identifier parse_full_text was
+        # called with.
+        assert results[0]["identifier"] == "PMC:4767193"
