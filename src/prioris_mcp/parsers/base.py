@@ -1,4 +1,4 @@
-"""Pluggable parser-backend interface: converts persisted full text into Markdown.
+"""Pluggable parser-backend interface: converts persisted full text into Markdown + leaf spans.
 
 See docs/requirement-specification/01-architecture.md#parse_full_text - one backend per source
 format, swappable by configuration without changing this interface, mirroring
@@ -18,11 +18,16 @@ class ParseError(Exception):
 
 
 class ParserBackend(ABC):
-    """Converts one source format's raw bytes into a Markdown string."""
+    """Converts one source format's raw bytes into a Markdown string plus leaf-span structure."""
 
     @abstractmethod
-    async def to_markdown(self, content: bytes) -> str:
-        """Convert `content` to Markdown.
+    async def to_markdown(self, content: bytes) -> dict:
+        """Convert `content` to Markdown, with leaf-level (page-span) structure.
+
+        Returns:
+            {"markdown": str, "leaf_spans": list[{"start": int, "length": int}]} - leaf_spans is
+            one entry per PDF page (parser-determined), or a single trivial span covering the
+            whole blob for whole-document formats with no native page concept (HTML/JATS).
 
         Raises:
             ParseError: the content is malformed, or parsing exceeded this backend's own
