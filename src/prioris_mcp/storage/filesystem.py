@@ -125,7 +125,10 @@ class FilesystemStorageBackend(StorageBackend):
             return removed
 
         removed_artefacts = await self._catalogue.remove_all_artefacts(provider, canonical_identifier, format)
-        if not removed_artefacts:
+        if not removed_artefacts:  # pragma: no cover
+            # Unreachable absent a concurrent delete: `entry` above already confirms a row exists
+            # for this exact (provider, canonical_identifier, format), so remove_all_artefacts must
+            # find at least that one.
             return False
         format_dir = self._document_dir(provider, canonical_identifier) / format
         await to_thread.run_sync(lambda: rmtree(format_dir, ignore_errors=True))
