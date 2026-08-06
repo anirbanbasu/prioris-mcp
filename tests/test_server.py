@@ -511,6 +511,103 @@ class TestArxivTools:
         assert "research_arxiv_search" in names
 
 
+class TestArxivParseFullTextPageParam:
+    """End-to-end MCP tool tests for the `page` param on research_arxiv_parse_full_text.
+
+    Uses `format="pdf"` (not "html") because `page` is documented as pdf-only (page_aware=True
+    only when format=="pdf" - see ArxivProvider.parse_full_text's docstring), and `format="pdf"`
+    invokes the real, unmocked liteparse backend, so this needs a structurally valid single-page
+    PDF, not just a magic-byte stub. Same fixture bytes as TestLocalFileTools._PDF_BYTES, copied
+    (not cross-referenced) to keep these classes independent.
+    """
+
+    _PDF_BYTES = b"""%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 44 >>
+stream
+BT /F1 24 Tf 20 100 Td (Hello World) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+0
+%%EOF"""
+
+    def _server_and_client(self, handler, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        # See TestArxivTools._server_and_client's comment for why monkeypatch.setattr (not
+        # setenv) is required for PRIORIS_MCP_STORAGE_DIR.
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path)
+        mcp_obj = PriorisMCP()
+        mcp_obj._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        mcp_obj._arxiv_provider._http_client = mcp_obj._http_client
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_page_param_returns_that_pages_markdown(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        # "2106.09685v2" is version-pinned, so resolve_identifier never issues a metadata lookup -
+        # the handler only ever needs to answer the full-text GET, same as
+        # test_fetch_full_text_old_style_slash_id_resource_uri_round_trips above.
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=self._PDF_BYTES)
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_arxiv_fetch_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "pdf"}
+                )
+                return await client.call_tool(
+                    "research_arxiv_parse_full_text",
+                    arguments={"arxiv_id": "2106.09685v2", "format": "pdf", "page": 1},
+                )
+
+        result = asyncio.run(scenario())
+        # The fixture PDF has exactly one page, so total_pages/page_range are page-consistent
+        # with the requested page=1 - same expectation established for the equivalent provider-
+        # level test in tests/test_providers_localfile.py (Task 14).
+        assert result.structured_content["total_pages"] == 1
+        assert result.structured_content["page_range"] == [1, 1]
+
+    def test_page_with_html_format_returns_invalid_request_tool_error(
+        self, tmp_path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"<html><body><p>Hello world</p></body></html>")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_arxiv_fetch_full_text", arguments={"arxiv_id": "2106.09685v2", "format": "html"}
+                )
+                return await client.call_tool(
+                    "research_arxiv_parse_full_text",
+                    arguments={"arxiv_id": "2106.09685v2", "format": "html", "page": 1},
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+
 class TestEuropePmcTools:
     """End-to-end MCP tool tests for the Europe PMC provider, stubbing its HTTP API."""
 
@@ -963,6 +1060,39 @@ startxref
         with caplog.at_level(logging.WARNING):
             asyncio.run(scenario())
         assert "deprecation candidate" in caplog.text
+
+
+class TestLocalfileParseFullTextPageParam:
+    """End-to-end MCP tool tests for the `page` param on research_localfile_parse_full_text."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_page_param_returns_that_pages_markdown(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                return await client.call_tool(
+                    "research_localfile_parse_full_text", arguments={"id": caller_facing_id, "page": 1}
+                )
+
+        result = asyncio.run(scenario())
+        # TestLocalFileTools._PDF_BASE64/_PDF_BYTES is a real single-page PDF, so total_pages/
+        # page_range are page-consistent with the requested page=1 - same expectation as
+        # tests/test_providers_localfile.py's page-param test from Task 14.
+        assert result.structured_content["total_pages"] == 1
+        assert result.structured_content["page_range"] == [1, 1]
 
 
 class TestStorageManagementTools:

@@ -246,9 +246,12 @@ class PriorisMCP(MCPMixin):
             int | None,
             Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
         ] = None,
+        page: Annotated[
+            int | None, Field(default=None, description="1-indexed PDF page to page by; pdf format only")
+        ] = None,
     ) -> ParsedFullText:
         """Convert already-fetched arXiv full text into one page of Markdown."""
-        return await self._arxiv_provider.parse_full_text(arxiv_id, format, offset=offset, limit=limit)
+        return await self._arxiv_provider.parse_full_text(arxiv_id, format, offset=offset, limit=limit, page=page)
 
     async def research_europepmc_search(
         self,
@@ -338,9 +341,10 @@ class PriorisMCP(MCPMixin):
             int | None,
             Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
         ] = None,
+        page: Annotated[int | None, Field(default=None, description="1-indexed PDF page to page by")] = None,
     ) -> ParsedFullText:
         """Convert an already-fetched local PDF's full text into one page of Markdown."""
-        return await self._localfile_provider.parse_full_text(id, offset=offset, limit=limit)
+        return await self._localfile_provider.parse_full_text(id, offset=offset, limit=limit, page=page)
 
     async def research_localfile_begin_upload(
         self,
