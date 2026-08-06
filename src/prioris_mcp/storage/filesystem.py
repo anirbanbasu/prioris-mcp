@@ -136,12 +136,11 @@ class FilesystemStorageBackend(StorageBackend):
             await to_thread.run_sync(lambda: rmtree(doc_dir, ignore_errors=True))
         return True
 
-    # TODO(Task 7c): read_manifest/find_canonical_identifier over the catalogue.
     async def read_manifest(
         self, provider: str, identifier: str, format: str, artefact: str = "document"
     ) -> dict | None:
-        raise NotImplementedError
+        return await self._catalogue.get(provider, identifier, format, artefact)
 
-    # TODO(Task 7c): read_manifest/find_canonical_identifier over the catalogue.
     async def find_canonical_identifier(self, provider: str, public_identifier: str, format: str) -> str | None:
-        raise NotImplementedError
+        entry = await self._catalogue.find_by_external_identifier(provider, public_identifier, format)
+        return entry["canonical_identifier"] if entry is not None else None

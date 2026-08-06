@@ -34,6 +34,7 @@ class DocumentManifest:
         self._path = path
 
     def _connect(self) -> sqlite3.Connection:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self._path)
         conn.row_factory = sqlite3.Row
         conn.executescript(_SCHEMA)
