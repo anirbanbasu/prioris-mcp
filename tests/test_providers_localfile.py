@@ -458,7 +458,7 @@ class TestLocalFileProviderDeleteDoesNotTouchOriginal:
     def test_delete_via_storage_backend_removes_only_the_storage_copy(self, tmp_path: Path):
         provider = _provider(tmp_path)
         fetched = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
-        asyncio.run(provider._storage.delete("localfile", fetched.id, "pdf"))
+        asyncio.run(provider._storage.delete("localfile", fetched.id, "pdf", artefact="document"))
         assert asyncio.run(provider._storage.find_canonical_identifier("localfile", fetched.id, "pdf")) is None
 
 
