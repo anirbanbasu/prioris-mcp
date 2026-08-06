@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from prioris_mcp.parsers.base import ParseError
-from prioris_mcp.parsers.html_markdownify import MarkdownifyHtmlBackend
+from prioris_mcp.parsers.html_markdownify import MarkdownifyHtmlBackend, markdownify
 
 
 class TestMarkdownifyHtmlBackend:
@@ -17,9 +17,9 @@ class TestMarkdownifyHtmlBackend:
             return await backend.to_markdown(html)
 
         result = asyncio.run(scenario())
-        assert "# Title" in result
-        assert "Hello" in result
-        assert "**world**" in result
+        assert "# Title" in result["markdown"]
+        assert "Hello" in result["markdown"]
+        assert "**world**" in result["markdown"]
 
     def test_slow_parse_raises_parse_error_within_bound(self, monkeypatch: pytest.MonkeyPatch):
         import time
@@ -54,3 +54,16 @@ class TestMarkdownifyHtmlBackend:
 
         with pytest.raises(ParseError):
             asyncio.run(scenario())
+
+
+class TestToMarkdownReturnsLeafSpans:
+    """Tests for leaf_spans in MarkdownifyHtmlBackend.to_markdown result."""
+
+    def test_returns_single_trivial_span_covering_whole_blob(self):
+        async def scenario():
+            backend = MarkdownifyHtmlBackend()
+            result = await backend.to_markdown(b"<h1>Title</h1><p>Body text.</p>")
+            assert result["markdown"] == markdownify("<h1>Title</h1><p>Body text.</p>")
+            assert result["leaf_spans"] == [{"start": 0, "length": len(result["markdown"])}]
+
+        asyncio.run(scenario())

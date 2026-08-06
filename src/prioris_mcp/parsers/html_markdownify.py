@@ -30,7 +30,7 @@ HTML_PARSE_TIMEOUT_SECONDS = 30.0
 class MarkdownifyHtmlBackend(ParserBackend):
     """Converts HTML bytes to Markdown via markdownify."""
 
-    async def to_markdown(self, content: bytes) -> str:
+    async def to_markdown(self, content: bytes) -> dict:
         def _parse() -> str:
             return markdownify(content.decode("utf-8", errors="replace"))
 
@@ -39,8 +39,9 @@ class MarkdownifyHtmlBackend(ParserBackend):
                 # abandon_on_cancel=True is required for fail_after's deadline to have any effect
                 # here - without it, anyio.to_thread.run_sync ignores cancellation until the
                 # thread finishes, silently defeating the timeout bound entirely.
-                return await to_thread.run_sync(_parse, abandon_on_cancel=True)
+                text = await to_thread.run_sync(_parse, abandon_on_cancel=True)
         except TimeoutError as exc:
             raise ParseError(f"HTML parse exceeded {HTML_PARSE_TIMEOUT_SECONDS}s bound") from exc
         except Exception as exc:
             raise ParseError(f"markdownify failed to parse HTML: {exc}") from exc
+        return {"markdown": text, "leaf_spans": [{"start": 0, "length": len(text)}]}

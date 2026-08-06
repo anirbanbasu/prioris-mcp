@@ -25,12 +25,13 @@ _MINIMAL_JATS = b"""<?xml version="1.0" encoding="UTF-8"?>
 
 
 class _RecordingHtmlBackend(ParserBackend):
-    def __init__(self) -> None:
+    def __init__(self, markdown: str = "# A Test Article\\n\\nHello, world.") -> None:
         self.received_html: bytes | None = None
+        self._markdown = markdown
 
-    async def to_markdown(self, content: bytes) -> str:
+    async def to_markdown(self, content: bytes) -> dict:
         self.received_html = content
-        return "# A Test Article\\n\\nHello, world."
+        return {"markdown": self._markdown, "leaf_spans": [{"start": 0, "length": len(self._markdown)}]}
 
 
 class TestJatsXsltMarkdownBackend:
@@ -44,7 +45,10 @@ class TestJatsXsltMarkdownBackend:
             return await backend.to_markdown(_MINIMAL_JATS)
 
         result = asyncio.run(scenario())
-        assert result == "# A Test Article\\n\\nHello, world."
+        assert result == {
+            "markdown": "# A Test Article\\n\\nHello, world.",
+            "leaf_spans": [{"start": 0, "length": len("# A Test Article\\n\\nHello, world.")}],
+        }
         assert html_backend.received_html is not None
         assert b"Hello, world." in html_backend.received_html
 
@@ -161,3 +165,16 @@ class TestJatsXsltMarkdownBackend:
 
         asyncio.run(scenario())
         assert max_concurrent == 1
+
+
+class TestToMarkdownReturnsLeafSpans:
+    """Tests for leaf_spans in JatsXsltMarkdownBackend.to_markdown result."""
+
+    def test_returns_whatever_the_injected_html_backend_returns(self):
+        async def scenario():
+            html_backend = _RecordingHtmlBackend(markdown="# Converted")
+            backend = JatsXsltMarkdownBackend(html_backend)
+            result = await backend.to_markdown(_MINIMAL_JATS)
+            assert result == {"markdown": "# Converted", "leaf_spans": [{"start": 0, "length": len("# Converted")}]}
+
+        asyncio.run(scenario())
