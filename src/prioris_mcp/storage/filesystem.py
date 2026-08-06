@@ -9,6 +9,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from shutil import rmtree
 
 from anyio import to_thread
 
@@ -96,13 +97,44 @@ class FilesystemStorageBackend(StorageBackend):
         tmp_path.write_bytes(content)
         tmp_path.replace(path)
 
-    # TODO(Task 7b): list/delete over the catalogue, replacing these placeholders.
     async def list(self, provider: str | None = None, format: str | None = None) -> list[dict]:
-        raise NotImplementedError
+        entries = await self._catalogue.list(provider, format)
+        return [
+            {
+                "provider": entry["provider"],
+                "identifier": entry["public_identifier"] or entry["canonical_identifier"],
+                "format": entry["format"],
+                "artefact": entry["artefact"],
+                "fetched_at_or_parsed_at": entry["recorded_at"],
+                "size_bytes": entry["size_bytes"],
+            }
+            for entry in entries
+        ]
 
-    # TODO(Task 7b): list/delete over the catalogue, replacing these placeholders.
     async def delete(self, provider: str, identifier: str, format: str, artefact: str) -> bool:
-        raise NotImplementedError
+        entry = await self._catalogue.find_by_external_identifier(provider, identifier, format)
+        if entry is None:
+            return False
+        canonical_identifier = entry["canonical_identifier"]
+
+        if artefact != "all":
+            removed = await self._catalogue.remove(provider, identifier, format, artefact)
+            if removed:
+                path = self._artefact_path(provider, canonical_identifier, format, artefact)
+                await to_thread.run_sync(lambda: path.unlink(missing_ok=True))
+            return removed
+
+        removed_artefacts = await self._catalogue.remove_all_artefacts(provider, canonical_identifier, format)
+        if not removed_artefacts:
+            return False
+        format_dir = self._document_dir(provider, canonical_identifier) / format
+        await to_thread.run_sync(lambda: rmtree(format_dir, ignore_errors=True))
+        await self.manifest_for(provider, canonical_identifier).delete_format(format)
+        remaining_formats = await self._catalogue.count_formats(provider, canonical_identifier)
+        if remaining_formats == 0:
+            doc_dir = self._document_dir(provider, canonical_identifier)
+            await to_thread.run_sync(lambda: rmtree(doc_dir, ignore_errors=True))
+        return True
 
     # TODO(Task 7c): read_manifest/find_canonical_identifier over the catalogue.
     async def read_manifest(
