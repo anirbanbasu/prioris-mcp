@@ -134,7 +134,12 @@ async def persist_parsed_markdown(
         return parsed["markdown"].encode("utf-8")
 
     markdown_bytes, served_from_storage = await storage.get_or_create(
-        provider, canonical_identifier, source_format, factory, artefact="markdown"
+        provider,
+        canonical_identifier,
+        source_format,
+        factory,
+        artefact="markdown",
+        public_identifier=external_identifier,
     )
     markdown = markdown_bytes.decode("utf-8")
     manifest = storage.manifest_for(provider, canonical_identifier)

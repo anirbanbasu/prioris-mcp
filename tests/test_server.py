@@ -1142,7 +1142,16 @@ class TestStorageManagementTools:
                 caller_facing_id = fetch_result.structured_content["id"]
                 delete_result = await client.call_tool(
                     "research_delete_fetched",
-                    arguments={"entries": [{"provider": "localfile", "identifier": caller_facing_id, "format": "pdf"}]},
+                    arguments={
+                        "entries": [
+                            {
+                                "provider": "localfile",
+                                "identifier": caller_facing_id,
+                                "format": "pdf",
+                                "artefact": "document",
+                            }
+                        ]
+                    },
                 )
                 list_after = await client.call_tool("research_list_fetched", arguments={})
                 return delete_result, list_after
@@ -1161,7 +1170,16 @@ class TestStorageManagementTools:
             async with client:
                 return await client.call_tool(
                     "research_delete_fetched",
-                    arguments={"entries": [{"provider": "arxiv", "identifier": "does-not-exist", "format": "pdf"}]},
+                    arguments={
+                        "entries": [
+                            {
+                                "provider": "arxiv",
+                                "identifier": "does-not-exist",
+                                "format": "pdf",
+                                "artefact": "document",
+                            }
+                        ]
+                    },
                 )
 
         result = asyncio.run(scenario())
@@ -1199,16 +1217,98 @@ class TestStorageManagementTools:
                 list_after_parse = await client.call_tool("research_list_fetched", arguments={})
                 delete_result = await client.call_tool(
                     "research_delete_fetched",
-                    arguments={"entries": [{"provider": "localfile", "identifier": caller_facing_id, "format": "pdf"}]},
+                    arguments={
+                        "entries": [
+                            {
+                                "provider": "localfile",
+                                "identifier": caller_facing_id,
+                                "format": "pdf",
+                                "artefact": "document",
+                            }
+                        ]
+                    },
                 )
                 list_after_delete = await client.call_tool("research_list_fetched", arguments={})
                 return list_after_parse, delete_result, list_after_delete
 
         list_after_parse, delete_result, list_after_delete = asyncio.run(scenario())
-        formats_after_parse = {entry["format"] for entry in list_after_parse.structured_content["entries"]}
-        assert formats_after_parse == {"pdf", "pdf-markdown"}
+        # Both the source (format="pdf", artefact="document") and derived-markdown
+        # (format="pdf", artefact="markdown") entries share the same `format`; only `artefact`
+        # distinguishes them - `format` is never synthesized into a "pdf-markdown" display string.
+        artefacts_after_parse = {entry["artefact"] for entry in list_after_parse.structured_content["entries"]}
+        assert artefacts_after_parse == {"document", "markdown"}
 
         assert len(delete_result.structured_content["deleted"]) == 1
 
-        formats_after_delete = {entry["format"] for entry in list_after_delete.structured_content["entries"]}
-        assert formats_after_delete == {"pdf-markdown"}
+        entries_after_delete = list_after_delete.structured_content["entries"]
+        assert {entry["artefact"] for entry in entries_after_delete} == {"markdown"}
+        assert {entry["format"] for entry in entries_after_delete} == {"pdf"}
+
+
+class TestDeleteFetchedArtefactField:
+    """Tests for the required `artefact` field on research_delete_fetched, incl. search cascade."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return mcp_obj, Client(transport=server_with_features, timeout=60)
+
+    def test_entry_missing_artefact_key_raises_invalid_request(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        _, client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_delete_fetched",
+                    arguments={"entries": [{"provider": "arxiv", "identifier": "does-not-exist", "format": "pdf"}]},
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_delete_markdown_artefact_removes_it_from_search_index(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        mcp_obj, client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+
+                # research_search_fetched (Task 17d) doesn't exist yet, so verify the search-index
+                # cascade by poking PriorisMCP's own _search_index directly, matching this file's
+                # established pattern of inspecting internal attributes for verification.
+                matches_before = await mcp_obj._search_index.search(
+                    "Hello", provider="localfile", identifier=caller_facing_id, format="pdf"
+                )
+
+                delete_result = await client.call_tool(
+                    "research_delete_fetched",
+                    arguments={
+                        "entries": [
+                            {
+                                "provider": "localfile",
+                                "identifier": caller_facing_id,
+                                "format": "pdf",
+                                "artefact": "markdown",
+                            }
+                        ]
+                    },
+                )
+
+                matches_after = await mcp_obj._search_index.search(
+                    "Hello", provider="localfile", identifier=caller_facing_id, format="pdf"
+                )
+                return delete_result, matches_before, matches_after
+
+        delete_result, matches_before, matches_after = asyncio.run(scenario())
+        assert len(delete_result.structured_content["deleted"]) == 1
+        assert matches_before != []
+        assert matches_after == []

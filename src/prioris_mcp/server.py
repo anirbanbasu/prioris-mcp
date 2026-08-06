@@ -398,16 +398,16 @@ class PriorisMCP(MCPMixin):
         ctx: Context,
         entries: Annotated[
             list[dict[str, str]],
-            Field(description="One or more {provider, identifier, format} entries to remove"),
+            Field(description="One or more {provider, identifier, format, artefact} entries to remove"),
         ],
     ) -> DeleteFetchedResult:
-        """Remove one or more persisted entries, tolerating entries no longer present.
+        """Remove one or more persisted artefacts, tolerating entries no longer present.
 
-        Does not cascade: deleting a source entry (e.g. format="pdf") leaves its derived
-        `parse_full_text` output (format="pdf-markdown") in place as its own manifest entry,
-        since `StorageBackend` has no notion that one format is "derived from" another. To
-        remove everything stored for a fetch+parse, pass one entry per format explicitly - e.g.
-        both {"format": "pdf", ...} and {"format": "pdf-markdown", ...}.
+        `artefact` is "document", "markdown", or "all" - see
+        docs/requirement-specification/02-storage.md#deletion-is-per-artefact-not-per-format.
+        Does not cascade between artefacts: deleting "document" leaves "markdown" in place and
+        vice versa. Deleting "markdown" or "all" also removes that document from the search
+        index.
         """
         return await self._delete_fetched(entries)
 
@@ -415,11 +415,20 @@ class PriorisMCP(MCPMixin):
         deleted: list[DeleteEntryRef] = []
         not_found: list[DeleteEntryRef] = []
         for entry in entries:
-            for key in ("provider", "identifier", "format"):
+            for key in ("provider", "identifier", "format", "artefact"):
                 if key not in entry:
                     raise InvalidRequestError(f"entry missing required key {key!r}: {entry!r}")
-            removed = await self._storage.delete(entry["provider"], entry["identifier"], entry["format"])
-            ref = DeleteEntryRef(provider=entry["provider"], identifier=entry["identifier"], format=entry["format"])
+            removed = await self._storage.delete(
+                entry["provider"], entry["identifier"], entry["format"], entry["artefact"]
+            )
+            if removed and entry["artefact"] in ("markdown", "all"):
+                await self._search_index.remove_document(entry["provider"], entry["identifier"], entry["format"])
+            ref = DeleteEntryRef(
+                provider=entry["provider"],
+                identifier=entry["identifier"],
+                format=entry["format"],
+                artefact=entry["artefact"],
+            )
             (deleted if removed else not_found).append(ref)
         return DeleteFetchedResult(deleted=deleted, not_found=not_found)
 
