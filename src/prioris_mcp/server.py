@@ -32,6 +32,8 @@ from prioris_mcp.models.common import (
     MarkdownPage,
     ParsedFullText,
     ResolvedIdentifierResult,
+    SearchFetchedResult,
+    SearchMatch,
 )
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
@@ -120,6 +122,7 @@ class PriorisMCP(MCPMixin):
             "tags": ["research", "storage"],
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
+        {"fn": "research_search_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -410,6 +413,22 @@ class PriorisMCP(MCPMixin):
         index.
         """
         return await self._delete_fetched(entries)
+
+    async def research_search_fetched(
+        self,
+        ctx: Context,
+        query: Annotated[str, Field(description="FTS5 query syntax")],
+        provider: Annotated[Literal["arxiv", "europepmc", "localfile"] | None, Field(default=None)] = None,
+        identifier: Annotated[
+            str | None, Field(default=None, description="Scopes to one document; requires provider")
+        ] = None,
+        format: Annotated[str | None, Field(default=None)] = None,
+    ) -> SearchFetchedResult:
+        """Full-text search over previously-persisted chunks (or leaves); never fetches or parses."""
+        if identifier is not None and provider is None:
+            raise InvalidRequestError("identifier requires provider")
+        matches = await self._search_index.search(query, provider=provider, identifier=identifier, format=format)
+        return SearchFetchedResult(matches=[SearchMatch(**match) for match in matches])
 
     async def _delete_fetched(self, entries: list[dict[str, str]]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []

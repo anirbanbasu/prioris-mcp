@@ -1312,3 +1312,63 @@ class TestDeleteFetchedArtefactField:
         assert len(delete_result.structured_content["deleted"]) == 1
         assert matches_before != []
         assert matches_after == []
+
+
+class TestResearchSearchFetched:
+    """End-to-end MCP tool tests for research_search_fetched."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_search_before_anything_persisted_returns_no_matches(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_search_fetched", arguments={"query": "quantum"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["matches"] == []
+
+    def test_identifier_without_provider_raises_invalid_request(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "quantum", "identifier": "2106.09685v2"},
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_search_finds_previously_parsed_content(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+
+                search_result = await client.call_tool("research_search_fetched", arguments={"query": "Hello"})
+                return caller_facing_id, search_result
+
+        caller_facing_id, search_result = asyncio.run(scenario())
+        matches = search_result.structured_content["matches"]
+        assert len(matches) >= 1
+        assert matches[0]["provider"] == "localfile"
+        assert matches[0]["identifier"] == caller_facing_id
+        assert matches[0]["format"] == "pdf"
