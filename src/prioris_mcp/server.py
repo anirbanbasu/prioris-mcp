@@ -127,7 +127,10 @@ class PriorisMCP(MCPMixin):
 
     resources: ClassVar[list[dict]] = [
         {"fn": "read_fulltext_resource", "uri": "research://{provider}/{identifier}/{format}/fulltext"},
-        {"fn": "read_markdown_resource", "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit}"},
+        {
+            "fn": "read_markdown_resource",
+            "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
+        },
         {"fn": "read_arxiv_categories_resource", "uri": "research://arxiv/categories"},
     ]
 
@@ -472,28 +475,60 @@ class PriorisMCP(MCPMixin):
         return await self._storage.read(provider, storage_identifier, format)
 
     async def read_markdown_resource(
-        self, provider: str, identifier: str, format: str, offset: int = 0, limit: int | None = None
+        self,
+        provider: str,
+        identifier: str,
+        format: str,
+        offset: int = 0,
+        limit: int | None = None,
+        page: int | None = None,
     ) -> str:
         """Read one page of persisted parsed Markdown for (provider, identifier, format).
 
-        A plain not-found if absent. Paginated the same way as `parse_full_text` - see
+        A plain not-found if absent. `page` (PDF-only, 1-indexed) resolves directly against
+        this document's manifest.sqlite via StorageBackend - never through a provider/parser,
+        since this endpoint is documented as never triggering a fetch/parse. Requesting `page`
+        before parse_full_text has ever populated the manifest is a not-found, not a silent
+        fallback to character offset 0.
+
+        Paginated the same way as `parse_full_text` - see
         docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole
         - `limit` defaults to `PRIORIS_MCP_MAX_INLINE_CHARS` when unset.
 
         Returns the `MarkdownPage` serialised to JSON - FastMCP's resource templates, unlike its
         tools, don't auto-serialise a returned Pydantic model into resource content.
         """
+        if page is not None and format != "pdf":
+            raise InvalidRequestError(f"page is not supported for format {format!r}")
         storage_identifier = await self._resolve_storage_identifier(provider, identifier, format)
-        markdown_bytes = await self._storage.read(provider, storage_identifier, f"{format}-markdown")
-        page = paginate_text(
-            markdown_bytes.decode("utf-8"), offset, limit if limit is not None else EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS
+        markdown_bytes = await self._storage.read(provider, storage_identifier, format, artefact="markdown")
+        markdown = markdown_bytes.decode("utf-8")
+        manifest = self._storage.manifest_for(provider, storage_identifier)
+
+        base_offset = offset
+        if page is not None:
+            leaf = await manifest.leaf_for_page(format, page)
+            if leaf is None:
+                raise FileNotFoundError(f"page {page} does not exist for {provider}:{storage_identifier}:{format}")
+            base_offset = leaf["start"] + offset
+
+        page_data = paginate_text(
+            markdown, base_offset, limit if limit is not None else EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS
         )
+        total_pages = None
+        page_range = None
+        if format == "pdf":
+            total_pages = await manifest.total_pages(format)
+            page_range = await manifest.page_range_for_span(format, page_data["offset"], len(page_data["content"]))
+
         return MarkdownPage(
-            markdown=page["content"],
-            offset=page["offset"],
-            limit=page["limit"],
-            total_length=page["total_length"],
-            has_more=page["has_more"],
+            markdown=page_data["content"],
+            offset=page_data["offset"],
+            limit=page_data["limit"],
+            total_length=page_data["total_length"],
+            has_more=page_data["has_more"],
+            total_pages=total_pages,
+            page_range=page_range,
         ).model_dump_json()
 
     async def read_arxiv_categories_resource(self) -> str:

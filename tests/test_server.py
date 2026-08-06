@@ -492,7 +492,7 @@ class TestArxivTools:
         templates = asyncio.run(scenario())
         assert {t.uriTemplate for t in templates} == {
             "research://{provider}/{identifier}/{format}/fulltext",
-            "research://{provider}/{identifier}/{format}/markdown{?offset,limit}",
+            "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
         }
 
     def test_greet_tool_no_longer_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
@@ -1093,6 +1093,118 @@ class TestLocalfileParseFullTextPageParam:
         # tests/test_providers_localfile.py's page-param test from Task 14.
         assert result.structured_content["total_pages"] == 1
         assert result.structured_content["page_range"] == [1, 1]
+
+
+class TestReadMarkdownResourcePageParam:
+    """End-to-end MCP resource tests for the `page` query param on `read_markdown_resource`.
+
+    The artefact-lookup bug fix itself (`self._storage.read(..., artefact="markdown")` replacing
+    the stale pre-Task-6 `f"{format}-markdown"` scheme) is already exercised end-to-end, without
+    `page`, by four existing tests elsewhere in this file that read a `research://.../markdown`
+    resource after a parse:
+    `TestArxivTools::test_research_arxiv_parse_full_text_then_read_markdown_resource`,
+    `TestArxivTools::test_research_arxiv_markdown_resource_honors_offset_and_limit_query_params`,
+    `TestEuropePmcTools::test_research_europepmc_parse_full_text_then_read_markdown_resource`, and
+    `TestLocalFileTools::test_fetch_then_parse_then_read_resources` - all four now pass with the
+    fix in place, so this class does not add a near-duplicate artefact-fix test and instead covers
+    only the new `page` behaviour.
+    """
+
+    def _server_and_client(self, handler, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        # See TestArxivTools._server_and_client's comment for why monkeypatch.setattr (not
+        # setenv) is required for PRIORIS_MCP_STORAGE_DIR.
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path)
+        mcp_obj = PriorisMCP()
+        mcp_obj._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        mcp_obj._arxiv_provider._http_client = mcp_obj._http_client
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def _localfile_server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        # Same as TestLocalfileParseFullTextPageParam._server_and_client - no HTTP stubbing
+        # needed for the local filesystem source.
+        storage_dir = tmp_path / "storage"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_page_param_resolves_pdf_page_offset(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._localfile_server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+                return await client.read_resource(f"research://localfile/{caller_facing_id}/pdf/markdown?page=1")
+
+        resource_result = asyncio.run(scenario())
+        page = MarkdownPage.model_validate_json(resource_result[0].text)
+        # TestLocalFileTools._PDF_BASE64/_PDF_BYTES is a real single-page PDF, so total_pages/
+        # page_range are page-consistent with the requested page=1, same expectation established
+        # for research_localfile_parse_full_text's own page-param test (Task 14) and this file's
+        # TestLocalfileParseFullTextPageParam above.
+        assert page.total_pages == 1
+        assert page.page_range == (1, 1)
+
+    def test_page_with_non_pdf_format_raises_invalid_request(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("page validation on a non-pdf format must reject before any network request")
+
+        client = self._server_and_client(handler, tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.read_resource("research://arxiv/2106.09685v2/html/markdown?page=1")
+
+        with pytest.raises(McpError):
+            asyncio.run(scenario())
+
+    def test_page_before_any_parse_has_happened_is_not_found(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._localfile_server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                # fetch_full_text only - never parse_full_text - so no markdown artefact and no
+                # manifest leaf rows exist yet; page=1 must be a not-found, not a silent fallback.
+                await client.read_resource(f"research://localfile/{caller_facing_id}/pdf/markdown?page=1")
+
+        with pytest.raises(McpError):
+            asyncio.run(scenario())
+
+    def test_page_beyond_total_pages_after_parse_is_not_found(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """Out-of-range `page` after a parse, distinct from the never-parsed case above.
+
+        Here the manifest does have leaf rows (the fixture PDF has exactly one page), but page=2
+        has no corresponding row, so `manifest.leaf_for_page` returns `None` and
+        `read_markdown_resource` must still raise not-found rather than resolving to some
+        fallback offset.
+        """
+        client = self._localfile_server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+                await client.read_resource(f"research://localfile/{caller_facing_id}/pdf/markdown?page=2")
+
+        with pytest.raises(McpError):
+            asyncio.run(scenario())
 
 
 class TestStorageManagementTools:

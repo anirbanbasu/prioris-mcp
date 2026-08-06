@@ -45,7 +45,10 @@ class MarkdownPage(BaseModel):
     ] = None
     page_range: Annotated[
         tuple[int, int] | None,
-        Field(default=None, description="[first_page, last_page] the returned slice spans; null for non-page-aware formats"),
+        Field(
+            default=None,
+            description="[first_page, last_page] the returned slice spans; null for non-page-aware formats",
+        ),
     ] = None
 
 
