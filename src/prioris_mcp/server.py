@@ -403,7 +403,7 @@ class PriorisMCP(MCPMixin):
         self,
         ctx: Context,
         entries: Annotated[
-            list[dict[str, str]],
+            list[DeleteEntryRef],
             Field(description="One or more {provider, identifier, format, artefact} entries to remove"),
         ],
     ) -> DeleteFetchedResult:
@@ -433,25 +433,14 @@ class PriorisMCP(MCPMixin):
         matches = await self._search_index.search(query, provider=provider, identifier=identifier, format=format)
         return SearchFetchedResult(matches=[SearchMatch(**match) for match in matches])
 
-    async def _delete_fetched(self, entries: list[dict[str, str]]) -> DeleteFetchedResult:
+    async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []
         not_found: list[DeleteEntryRef] = []
         for entry in entries:
-            for key in ("provider", "identifier", "format", "artefact"):
-                if key not in entry:
-                    raise InvalidRequestError(f"entry missing required key {key!r}: {entry!r}")
-            removed = await self._storage.delete(
-                entry["provider"], entry["identifier"], entry["format"], entry["artefact"]
-            )
-            if removed and entry["artefact"] in ("markdown", "all"):
-                await self._search_index.remove_document(entry["provider"], entry["identifier"], entry["format"])
-            ref = DeleteEntryRef(
-                provider=entry["provider"],
-                identifier=entry["identifier"],
-                format=entry["format"],
-                artefact=entry["artefact"],
-            )
-            (deleted if removed else not_found).append(ref)
+            removed = await self._storage.delete(entry.provider, entry.identifier, entry.format_, entry.artefact)
+            if removed and entry.artefact in ("markdown", "all"):
+                await self._search_index.remove_document(entry.provider, entry.identifier, entry.format_)
+            (deleted if removed else not_found).append(entry)
         return DeleteFetchedResult(deleted=deleted, not_found=not_found)
 
     async def _resolve_storage_identifier(self, provider: str, identifier: str, format: str) -> str:
