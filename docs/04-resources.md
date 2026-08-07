@@ -9,14 +9,14 @@ Alongside its tools, PriorisMCP exposes three read-only MCP resources.
 | Resource | Returns |
 |---|---|
 | `research://{provider}/{identifier}/{format}/fulltext` | The persisted full text for that item/format, if present — backed by [`StorageBackend`](requirement-specification/02-storage.md). |
-| `research://{provider}/{identifier}/{format}/markdown{?offset,limit}` | One paginated page of the persisted parsed Markdown for that item/format, if present — also backed by `StorageBackend`. |
+| `research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}` | One paginated page of the persisted parsed Markdown for that item/format, if present — also backed by `StorageBackend`. |
 | `research://arxiv/categories` | arXiv's queryable category codes and names (e.g. `cs.LG` → "Machine Learning"), sourced live from arXiv's OAI-PMH `ListSets` endpoint and covered by the standard response-cache TTL rather than `StorageBackend`. |
 
 `{provider}` is `arxiv` or `europepmc`; `{identifier}` is the *canonical* identifier (version-pinned for arXiv, `PMC:{pmcid}` for Europe PMC) that the corresponding `fetch_full_text`/`parse_full_text` call resolved to — not necessarily the identifier originally passed to that call; `{format}` is the source format (`pdf`, `html`, `xml`).
 
 For `provider=localfile`, `{identifier}` is the server-assigned caller-facing identifier `research_localfile_fetch_full_text` returned — there is no server-side path to use instead, since the caller sends content directly.
 
-The markdown resource's optional `offset`/`limit` query parameters mirror `parse_full_text`'s own pagination (same defaults, same `offset`/`limit`/`total_length`/`has_more` fields in the response) — see [Tools → arXiv tools](03-tools.md#arxiv-tools). A caller can page through previously-parsed content this way without re-invoking the tool.
+The markdown resource's optional `offset`/`limit` query parameters mirror `parse_full_text`'s own pagination (same defaults, same `offset`/`limit`/`total_length`/`has_more` fields in the response) — see [Tools → arXiv tools](03-tools.md#arxiv-tools). A caller can page through previously-parsed content this way without re-invoking the tool. `page` (1-indexed, `pdf` format only) mirrors `parse_full_text`'s own `page` parameter: it's resolved directly against that document's persisted manifest, so `offset` becomes relative to the page's start rather than to the whole document; requesting `page` before `parse_full_text` has ever populated the manifest is a not-found, not a silent fallback to character offset 0. The response's `total_pages`/`page_range` fields are populated the same way as `parse_full_text`'s.
 
 `research_*_fetch_full_text` and `research_*_parse_full_text` both return the exact `resource_uri` for their result, so a caller doesn't need to construct these URIs by hand.
 
