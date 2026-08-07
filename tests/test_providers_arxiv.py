@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 import pytest
@@ -17,6 +18,7 @@ from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers.arxiv import ArxivProvider, _bare_id, _is_version_pinned
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
+from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 
 _FEED_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"
@@ -79,12 +81,15 @@ def _provider_with_handler(
 ) -> tuple[ArxivProvider, httpx.AsyncClient]:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     queue = ProviderRequestQueue(base_spacing_seconds=0.0, max_total_backoff_seconds=5.0)
+    # No tmp_path here (this helper's callers never touch storage/parse_full_text), so an
+    # in-memory index is fine - it's constructed only to satisfy the now-required constructor arg.
     provider = ArxivProvider(
         storage=None,
         queue=queue,
         http_client=client,
         pdf_backend=_StubParserBackend(),
         html_backend=_StubParserBackend(),
+        search_index=SqliteFts5SearchIndex(Path(":memory:")),
     )
     return provider, client
 
@@ -379,6 +384,7 @@ def _provider_with_storage(
         http_client=client,
         pdf_backend=_StubParserBackend(),
         html_backend=_StubParserBackend(),
+        search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
     )
     return provider, client
 
@@ -621,6 +627,7 @@ class TestArxivProviderFetchFullText:
                 http_client=client,
                 pdf_backend=_StubParserBackend(),
                 html_backend=_StubParserBackend(),
+                search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
             )
             async with client:
                 return await provider.fetch_full_text("2106.09685v2", "pdf")
@@ -631,13 +638,34 @@ class TestArxivProviderFetchFullText:
 
 
 class _StubParserBackend(ParserBackend):
-    def __init__(self, markdown: str = "# parsed") -> None:
+    """Configurable stub matching `ParserBackend.to_markdown`'s dict contract.
+
+    `markdown` (the default, single-string mode) produces one "page" spanning the whole
+    string - existing call sites passing only `markdown=...` see identical `markdown` output to
+    before this class returned a dict. `markdown_by_page` (mirroring `_CountingParserBackend` in
+    `tests/test_providers_base.py`) builds multiple leaf spans, joined by blank lines, for tests
+    that need real per-page structure (e.g. `page` param resolution).
+    """
+
+    def __init__(self, markdown: str = "# parsed", markdown_by_page: list[str] | None = None) -> None:
         self.markdown = markdown
+        self.markdown_by_page = markdown_by_page
         self.call_count = 0
 
-    async def to_markdown(self, content: bytes) -> str:
+    async def to_markdown(self, content: bytes) -> dict:
         self.call_count += 1
-        return self.markdown
+        pages = self.markdown_by_page if self.markdown_by_page is not None else [self.markdown]
+        markdown_parts: list[str] = []
+        leaf_spans: list[dict] = []
+        offset = 0
+        for i, page in enumerate(pages):
+            if i > 0:
+                markdown_parts.append("\n\n")
+                offset += 2
+            markdown_parts.append(page)
+            leaf_spans.append({"start": offset, "length": len(page)})
+            offset += len(page)
+        return {"markdown": "".join(markdown_parts), "leaf_spans": leaf_spans}
 
 
 def _provider_with_backends(
@@ -656,6 +684,7 @@ def _provider_with_backends(
         http_client=client,
         pdf_backend=pdf_backend or _StubParserBackend(),
         html_backend=html_backend or _StubParserBackend(),
+        search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
         default_inline_char_limit=default_inline_char_limit,
     )
     return provider, client
@@ -697,6 +726,8 @@ class TestArxivProviderParseFullText:
             limit=20000,
             total_length=len("# Parsed PDF"),
             has_more=False,
+            total_pages=1,
+            page_range=(1, 1),
             resource_uri="research://arxiv/2106.09685v2/pdf/markdown",
         )
         assert second == first
@@ -746,6 +777,8 @@ class TestArxivProviderParseFullText:
             limit=4,
             total_length=10,
             has_more=True,
+            total_pages=1,
+            page_range=(1, 1),
             resource_uri="research://arxiv/2106.09685v2/pdf/markdown",
         )
 
@@ -768,6 +801,8 @@ class TestArxivProviderParseFullText:
             limit=3,
             total_length=10,
             has_more=True,
+            total_pages=1,
+            page_range=(1, 1),
             resource_uri="research://arxiv/2106.09685v2/pdf/markdown",
         )
 
@@ -800,8 +835,44 @@ class TestArxivProviderParseFullText:
             limit=20000,
             total_length=len("# Parsed PDF"),
             has_more=False,
+            total_pages=1,
+            page_range=(1, 1),
             resource_uri="research://arxiv/2106.09685v2/pdf/markdown",
         )
+
+
+class TestParseFullTextPageParam:
+    """Tests for `parse_full_text`'s `page` param (resolves a PDF page offset via the manifest)."""
+
+    def test_page_param_resolves_pdf_page_offset(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        pdf_backend = _StubParserBackend(markdown_by_page=["Page one text.", "Page two text."])
+
+        async def scenario():
+            provider, client = _provider_with_backends(handler, tmp_path, pdf_backend=pdf_backend)
+            async with client:
+                await provider._storage.write("arxiv", "2106.09685v2", "pdf", b"raw")
+                return await provider.parse_full_text("2106.09685v2", "pdf", page=2)
+
+        result = asyncio.run(scenario())
+        assert result.markdown == "Page two text."
+        assert result.total_pages == 2
+        assert result.page_range == (2, 2)
+
+    def test_page_with_html_format_raises_invalid_request(self, tmp_path):
+        def handler(req: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not make a network request")
+
+        async def scenario():
+            provider, client = _provider_with_backends(handler, tmp_path)
+            async with client:
+                await provider._storage.write("arxiv", "2106.09685v2", "html", b"<html></html>")
+                await provider.parse_full_text("2106.09685v2", "html", page=1)
+
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(scenario())
 
 
 class TestArxivProviderListCategories:

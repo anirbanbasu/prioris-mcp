@@ -15,12 +15,12 @@ from prioris_mcp.models.europepmc import (
     EuropePmcResolvedIdentifier,
     EuropePmcSearchResult,
 )
-from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers import http as provider_http
-from prioris_mcp.providers.base import ResearchPublicationProvider
+from prioris_mcp.providers.base import ResearchPublicationProvider, persist_parsed_markdown
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import StorageBackend
+from prioris_mcp.storage.search_index import SearchIndex
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +84,14 @@ class EuropePmcProvider(ResearchPublicationProvider):
         queue: ProviderRequestQueue,
         http_client: httpx.AsyncClient,
         xml_backend: ParserBackend,
+        search_index: SearchIndex,
         default_inline_char_limit: int = 20000,
     ) -> None:
         self._storage = storage
         self._queue = queue
         self._http_client = http_client
         self._xml_backend = xml_backend
+        self._search_index = search_index
         self._default_inline_char_limit = default_inline_char_limit
 
     async def _get_json(self, path: str, params: dict) -> dict:
@@ -206,34 +208,27 @@ class EuropePmcProvider(ResearchPublicationProvider):
         storage. A bare PMCID short-circuits inside `resolve_identifier` with only a
         `fetch_metadata` lookup; a MED identifier also costs only `fetch_metadata`.
 
-        Uses `StorageBackend.get_or_create` (keyed on the derived markdown format) so that two
-        concurrent parses of the same (identifier, format) never both invoke the parser backend -
-        see docs/requirement-specification/04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work.
-
-        Returns one paginated page of the Markdown, not the whole string - see
-        docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole.
-        `limit` defaults to `default_inline_char_limit` when unset.
+        Delegates parsing/persistence/pagination to `persist_parsed_markdown` (shared across every
+        provider - see docs/requirement-specification/01-architecture.md#parse_full_text), which
+        also populates this document's leaf/chunk manifest and the search index on a fresh parse.
+        JATS/XML has no page concept - no `page` param exists here (unlike arXiv/localfile's PDF
+        format), so `page=None, page_aware=False` unconditionally; passing a `page` value isn't
+        possible at this signature, so `persist_parsed_markdown`'s `InvalidRequestError` guard for
+        that combination is unreachable from here, not a case this provider needs to test.
         """
         resolved = await self.resolve_identifier(identifier, format)
         canonical_id = resolved.identifier
-        markdown_format = "xml-markdown"
-
-        async def factory() -> bytes:
-            if not await self._storage.exists("europepmc", canonical_id, "xml"):
-                raise NotFoundError(f"Europe PMC full text not fetched yet: identifier={canonical_id}")
-            source_content = await self._storage.read("europepmc", canonical_id, "xml")
-            markdown = await self._xml_backend.to_markdown(source_content)
-            return markdown.encode("utf-8")
-
-        markdown_bytes, _ = await self._storage.get_or_create("europepmc", canonical_id, markdown_format, factory)
-        page = paginate_text(
-            markdown_bytes.decode("utf-8"), offset, limit if limit is not None else self._default_inline_char_limit
+        result = await persist_parsed_markdown(
+            storage=self._storage,
+            search_index=self._search_index,
+            provider="europepmc",
+            canonical_identifier=canonical_id,
+            external_identifier=canonical_id,
+            source_format="xml",
+            backend=self._xml_backend,
+            offset=offset,
+            limit=limit if limit is not None else self._default_inline_char_limit,
+            page=None,
+            page_aware=False,
         )
-        return ParsedFullText(
-            markdown=page["content"],
-            offset=page["offset"],
-            limit=page["limit"],
-            total_length=page["total_length"],
-            has_more=page["has_more"],
-            resource_uri=f"research://europepmc/{canonical_id}/xml/markdown",
-        )
+        return ParsedFullText(**result, resource_uri=f"research://europepmc/{canonical_id}/xml/markdown")

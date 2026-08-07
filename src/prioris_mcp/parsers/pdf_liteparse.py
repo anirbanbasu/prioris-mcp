@@ -25,12 +25,16 @@ logger = logging.getLogger(__name__)
 # a synchronous thread), but the async caller is never blocked past this bound.
 PDF_PARSE_TIMEOUT_SECONDS = 60.0
 
+# An ordinary block-separating joiner between pages - not a page-separator marker inserted then
+# parsed back out, which would be fragile if a page's own content ever contained one.
+_PAGE_JOINER = "\n\n"
+
 
 class LiteParsePdfBackend(ParserBackend):
-    """Converts PDF bytes to Markdown via liteparse's structure-aware extraction."""
+    """Converts PDF bytes to Markdown via liteparse's structure-aware, per-page extraction."""
 
-    async def to_markdown(self, content: bytes) -> str:
-        def _parse() -> str:
+    async def to_markdown(self, content: bytes) -> dict:
+        def _parse() -> dict:
             # Explicit, airgapped-friendly OCR configuration - liteparse's own defaults
             # (ocr_enabled=True, no tessdata_path/ocr_server_url) fall back to lazily downloading
             # Tesseract language data over the network on first use, per
@@ -47,7 +51,18 @@ class LiteParsePdfBackend(ParserBackend):
                 ocr_server_headers=headers or None,
             )
             result = parser.parse(content)
-            return result.text
+            markdown_parts: list[str] = []
+            leaf_spans: list[dict] = []
+            offset = 0
+            for index, page in enumerate(result.pages):
+                if index > 0:
+                    markdown_parts.append(_PAGE_JOINER)
+                    offset += len(_PAGE_JOINER)
+                page_markdown = page.markdown
+                markdown_parts.append(page_markdown)
+                leaf_spans.append({"start": offset, "length": len(page_markdown)})
+                offset += len(page_markdown)
+            return {"markdown": "".join(markdown_parts), "leaf_spans": leaf_spans}
 
         try:
             with anyio.fail_after(PDF_PARSE_TIMEOUT_SECONDS):

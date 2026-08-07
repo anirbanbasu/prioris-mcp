@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import sys
 from importlib.metadata import version
 from typing import Annotated, ClassVar, Literal
@@ -21,7 +22,12 @@ from starlette.middleware.cors import CORSMiddleware
 
 from prioris_mcp import PACKAGE_NAME, EnvVars
 from prioris_mcp.errors import InvalidRequestError
-from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
+from prioris_mcp.middleware import (
+    DecodeBinaryResourceContentMiddleware,
+    EncodeBinaryResourceContentMiddleware,
+    ResponseMetadataMiddleware,
+    StripUnknownArgumentsMiddleware,
+)
 from prioris_mcp.mixin import MCPMixin
 from prioris_mcp.models.arxiv import ArxivFetchMetadataResult, ArxivSearchResult
 from prioris_mcp.models.common import (
@@ -32,11 +38,13 @@ from prioris_mcp.models.common import (
     MarkdownPage,
     ParsedFullText,
     ResolvedIdentifierResult,
+    SearchFetchedResult,
+    SearchMatch,
 )
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.pagination import paginate_text
-from prioris_mcp.parsers.html_markdownify import MarkdownifyHtmlBackend
+from prioris_mcp.parsers.html_to_markdown_backend import HtmlToMarkdownBackend
 from prioris_mcp.parsers.jats_xslt import JatsXsltMarkdownBackend
 from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
 from prioris_mcp.providers.arxiv import ARXIV_BASE_SPACING_SECONDS, ArxivProvider
@@ -45,6 +53,7 @@ from prioris_mcp.providers.identifier_routing import resolve_research_identifier
 from prioris_mcp.providers.localfile import LocalFileProvider, UploadSessionManager
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
+from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 
 package_version = version(PACKAGE_NAME)
 logger = logging.getLogger(__name__)
@@ -119,16 +128,21 @@ class PriorisMCP(MCPMixin):
             "tags": ["research", "storage"],
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
+        {"fn": "research_search_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
     ]
 
     resources: ClassVar[list[dict]] = [
         {"fn": "read_fulltext_resource", "uri": "research://{provider}/{identifier}/{format}/fulltext"},
-        {"fn": "read_markdown_resource", "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit}"},
+        {
+            "fn": "read_markdown_resource",
+            "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
+        },
         {"fn": "read_arxiv_categories_resource", "uri": "research://arxiv/categories"},
     ]
 
     def __init__(self) -> None:
         self._storage = FilesystemStorageBackend()
+        self._search_index = SqliteFts5SearchIndex(EnvVars.PRIORIS_MCP_STORAGE_DIR / "search.sqlite3")
         if EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS:
             logger.warning(
                 "HTTPS certificate verification is DISABLED (PRIORIS_MCP_UNVERIFIED_HTTPS=True) - "
@@ -144,13 +158,14 @@ class PriorisMCP(MCPMixin):
             max_total_backoff_seconds=EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS,
         )
         pdf_backend = LiteParsePdfBackend()
-        html_backend = MarkdownifyHtmlBackend()
+        html_backend = HtmlToMarkdownBackend()
         self._arxiv_provider = ArxivProvider(
             storage=self._storage,
             queue=arxiv_queue,
             http_client=self._http_client,
             pdf_backend=pdf_backend,
             html_backend=html_backend,
+            search_index=self._search_index,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
         )
         europepmc_queue = ProviderRequestQueue(
@@ -163,6 +178,7 @@ class PriorisMCP(MCPMixin):
             queue=europepmc_queue,
             http_client=self._http_client,
             xml_backend=jats_backend,
+            search_index=self._search_index,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
         )
         self._localfile_provider = LocalFileProvider(
@@ -170,6 +186,7 @@ class PriorisMCP(MCPMixin):
             pdf_backend=pdf_backend,
             max_size_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
+            search_index=self._search_index,
             upload_session_manager=UploadSessionManager(
                 ttl_seconds=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_SESSION_TTL_SECONDS,
                 max_chunk_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES,
@@ -241,9 +258,12 @@ class PriorisMCP(MCPMixin):
             int | None,
             Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
         ] = None,
+        page: Annotated[
+            int | None, Field(default=None, description="1-indexed PDF page to page by; pdf format only")
+        ] = None,
     ) -> ParsedFullText:
         """Convert already-fetched arXiv full text into one page of Markdown."""
-        return await self._arxiv_provider.parse_full_text(arxiv_id, format, offset=offset, limit=limit)
+        return await self._arxiv_provider.parse_full_text(arxiv_id, format, offset=offset, limit=limit, page=page)
 
     async def research_europepmc_search(
         self,
@@ -333,9 +353,10 @@ class PriorisMCP(MCPMixin):
             int | None,
             Field(default=None, description="Max Markdown characters to return; defaults to a server-side cap"),
         ] = None,
+        page: Annotated[int | None, Field(default=None, description="1-indexed PDF page to page by")] = None,
     ) -> ParsedFullText:
         """Convert an already-fetched local PDF's full text into one page of Markdown."""
-        return await self._localfile_provider.parse_full_text(id, offset=offset, limit=limit)
+        return await self._localfile_provider.parse_full_text(id, offset=offset, limit=limit, page=page)
 
     async def research_localfile_begin_upload(
         self,
@@ -388,30 +409,51 @@ class PriorisMCP(MCPMixin):
         self,
         ctx: Context,
         entries: Annotated[
-            list[dict[str, str]],
-            Field(description="One or more {provider, identifier, format} entries to remove"),
+            list[DeleteEntryRef],
+            Field(description="One or more {provider, identifier, format, artefact} entries to remove"),
         ],
     ) -> DeleteFetchedResult:
-        """Remove one or more persisted entries, tolerating entries no longer present.
+        """Remove one or more persisted artefacts, tolerating entries no longer present.
 
-        Does not cascade: deleting a source entry (e.g. format="pdf") leaves its derived
-        `parse_full_text` output (format="pdf-markdown") in place as its own manifest entry,
-        since `StorageBackend` has no notion that one format is "derived from" another. To
-        remove everything stored for a fetch+parse, pass one entry per format explicitly - e.g.
-        both {"format": "pdf", ...} and {"format": "pdf-markdown", ...}.
+        `identifier` must match the canonical form actually in storage (e.g. a version-pinned
+        arXiv id like "2403.10131v2", not an unversioned id that may resolve to a newer version
+        by the time this call runs) - use `research_list_fetched` first to find it if unsure.
+
+        `artefact` is "document", "markdown", or "all" - see
+        docs/requirement-specification/02-storage.md#deletion-is-per-artefact-not-per-format.
+        Does not cascade between artefacts: deleting "document" leaves "markdown" in place and
+        vice versa. Deleting "markdown" or "all" also removes that document from the search
+        index.
         """
         return await self._delete_fetched(entries)
 
-    async def _delete_fetched(self, entries: list[dict[str, str]]) -> DeleteFetchedResult:
+    async def research_search_fetched(
+        self,
+        ctx: Context,
+        query: Annotated[str, Field(description="FTS5 query syntax")],
+        provider: Annotated[Literal["arxiv", "europepmc", "localfile"] | None, Field(default=None)] = None,
+        identifier: Annotated[
+            str | None, Field(default=None, description="Scopes to one document; requires provider")
+        ] = None,
+        format: Annotated[str | None, Field(default=None)] = None,
+    ) -> SearchFetchedResult:
+        """Full-text search over previously-persisted chunks (or leaves); never fetches or parses."""
+        if identifier is not None and provider is None:
+            raise InvalidRequestError("identifier requires provider")
+        try:
+            matches = await self._search_index.search(query, provider=provider, identifier=identifier, format=format)
+        except sqlite3.OperationalError as exc:
+            raise InvalidRequestError(f"invalid search query: {exc}") from exc
+        return SearchFetchedResult(matches=[SearchMatch(**match) for match in matches])
+
+    async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []
         not_found: list[DeleteEntryRef] = []
         for entry in entries:
-            for key in ("provider", "identifier", "format"):
-                if key not in entry:
-                    raise InvalidRequestError(f"entry missing required key {key!r}: {entry!r}")
-            removed = await self._storage.delete(entry["provider"], entry["identifier"], entry["format"])
-            ref = DeleteEntryRef(provider=entry["provider"], identifier=entry["identifier"], format=entry["format"])
-            (deleted if removed else not_found).append(ref)
+            removed = await self._storage.delete(entry.provider, entry.identifier, entry.format_, entry.artefact)
+            if removed and entry.artefact in ("markdown", "all"):
+                await self._search_index.remove_document(entry.provider, entry.identifier, entry.format_)
+            (deleted if removed else not_found).append(entry)
         return DeleteFetchedResult(deleted=deleted, not_found=not_found)
 
     async def _resolve_storage_identifier(self, provider: str, identifier: str, format: str) -> str:
@@ -435,28 +477,60 @@ class PriorisMCP(MCPMixin):
         return await self._storage.read(provider, storage_identifier, format)
 
     async def read_markdown_resource(
-        self, provider: str, identifier: str, format: str, offset: int = 0, limit: int | None = None
+        self,
+        provider: str,
+        identifier: str,
+        format: str,
+        offset: int = 0,
+        limit: int | None = None,
+        page: int | None = None,
     ) -> str:
         """Read one page of persisted parsed Markdown for (provider, identifier, format).
 
-        A plain not-found if absent. Paginated the same way as `parse_full_text` - see
+        A plain not-found if absent. `page` (PDF-only, 1-indexed) resolves directly against
+        this document's manifest.sqlite via StorageBackend - never through a provider/parser,
+        since this endpoint is documented as never triggering a fetch/parse. Requesting `page`
+        before parse_full_text has ever populated the manifest is a not-found, not a silent
+        fallback to character offset 0.
+
+        Paginated the same way as `parse_full_text` - see
         docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole
         - `limit` defaults to `PRIORIS_MCP_MAX_INLINE_CHARS` when unset.
 
         Returns the `MarkdownPage` serialised to JSON - FastMCP's resource templates, unlike its
         tools, don't auto-serialise a returned Pydantic model into resource content.
         """
+        if page is not None and format != "pdf":
+            raise InvalidRequestError(f"page is not supported for format {format!r}")
         storage_identifier = await self._resolve_storage_identifier(provider, identifier, format)
-        markdown_bytes = await self._storage.read(provider, storage_identifier, f"{format}-markdown")
-        page = paginate_text(
-            markdown_bytes.decode("utf-8"), offset, limit if limit is not None else EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS
+        markdown_bytes = await self._storage.read(provider, storage_identifier, format, artefact="markdown")
+        markdown = markdown_bytes.decode("utf-8")
+        manifest = self._storage.manifest_for(provider, storage_identifier)
+
+        base_offset = offset
+        if page is not None:
+            leaf = await manifest.leaf_for_page(format, page)
+            if leaf is None:
+                raise FileNotFoundError(f"page {page} does not exist for {provider}:{storage_identifier}:{format}")
+            base_offset = leaf["start"] + offset
+
+        page_data = paginate_text(
+            markdown, base_offset, limit if limit is not None else EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS
         )
+        total_pages = None
+        page_range = None
+        if format == "pdf":
+            total_pages = await manifest.total_pages(format)
+            page_range = await manifest.page_range_for_span(format, page_data["offset"], len(page_data["content"]))
+
         return MarkdownPage(
-            markdown=page["content"],
-            offset=page["offset"],
-            limit=page["limit"],
-            total_length=page["total_length"],
-            has_more=page["has_more"],
+            markdown=page_data["content"],
+            offset=page_data["offset"],
+            limit=page_data["limit"],
+            total_length=page_data["total_length"],
+            has_more=page_data["has_more"],
+            total_pages=total_pages,
+            page_range=page_range,
         ).model_dump_json()
 
     async def read_arxiv_categories_resource(self) -> str:
@@ -478,6 +552,14 @@ def app() -> FastMCP:  # pragma: no cover
     mcp_obj = PriorisMCP()
     app_with_features = mcp_obj.register_features(app)
     app_with_features.add_middleware(StripUnknownArgumentsMiddleware())
+    # Encode/DecodeBinaryResourceContentMiddleware sandwich ResponseCachingMiddleware: fastmcp's
+    # cache wrapper JSON-serialises via Pydantic, whose default bytes encoding is a UTF-8 decode -
+    # it crashes on non-UTF-8-safe resource content (e.g. a fetched PDF's fulltext resource).
+    # FastMCP's middleware chain runs first-added-outermost (see _run_middleware in
+    # fastmcp/server/server.py), so Decode (must see every read, hit or miss) is added before
+    # ResponseCachingMiddleware, and Encode (must only run next to the real resource handler, on
+    # a cache miss) is added after it - see middleware.py for the full rationale.
+    app_with_features.add_middleware(DecodeBinaryResourceContentMiddleware())
     app_with_features.add_middleware(
         ResponseCachingMiddleware(
             list_tools_settings=ListToolsSettings(
@@ -523,6 +605,7 @@ def app() -> FastMCP:  # pragma: no cover
             ),
         )
     )
+    app_with_features.add_middleware(EncodeBinaryResourceContentMiddleware())
     # The last middleware must be the one to attach response metadata
     app_with_features.add_middleware(ResponseMetadataMiddleware())
     return app_with_features

@@ -18,12 +18,12 @@ from prioris_mcp.models.arxiv import (
     ArxivSearchResult,
 )
 from prioris_mcp.models.common import FullTextFetchResult, ParsedFullText
-from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers import http as provider_http
-from prioris_mcp.providers.base import ResearchPublicationProvider
+from prioris_mcp.providers.base import ResearchPublicationProvider, persist_parsed_markdown
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import StorageBackend
+from prioris_mcp.storage.search_index import SearchIndex
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +137,7 @@ class ArxivProvider(ResearchPublicationProvider):
         http_client: httpx.AsyncClient,
         pdf_backend: ParserBackend,
         html_backend: ParserBackend,
+        search_index: SearchIndex,
         default_inline_char_limit: int = 20000,
     ) -> None:
         self._storage = storage
@@ -144,6 +145,7 @@ class ArxivProvider(ResearchPublicationProvider):
         self._http_client = http_client
         self._pdf_backend = pdf_backend
         self._html_backend = html_backend
+        self._search_index = search_index
         self._default_inline_char_limit = default_inline_char_limit
 
     async def _get(self, params: dict) -> bytes:
@@ -295,7 +297,7 @@ class ArxivProvider(ResearchPublicationProvider):
         )
 
     async def parse_full_text(
-        self, identifier: str, format: str, offset: int = 0, limit: int | None = None
+        self, identifier: str, format: str, offset: int = 0, limit: int | None = None, page: int | None = None
     ) -> ParsedFullText:
         """See docs/requirement-specification/06-interface-specification.md#research_arxiv_parse_full_text.
 
@@ -306,36 +308,27 @@ class ArxivProvider(ResearchPublicationProvider):
         network call; an unversioned one costs a `fetch_metadata` lookup only, never a
         `fetch_full_text` call.
 
-        Uses `StorageBackend.get_or_create` (keyed on the derived markdown format) so that two
-        concurrent parses of the same (identifier, format) never both invoke the parser backend -
-        see docs/requirement-specification/04-non-functional-requirements.md#storage-must-de-duplicate-in-flight-work-not-just-completed-work.
-
-        Returns one paginated page of the Markdown, not the whole string - see
-        docs/requirement-specification/04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole.
-        `limit` defaults to `default_inline_char_limit` when unset.
+        Delegates parsing/persistence/pagination to `persist_parsed_markdown` (shared across every
+        provider - see docs/requirement-specification/01-architecture.md#parse_full_text), which
+        also populates this document's leaf/chunk manifest and the search index on a fresh parse.
+        `page` is only meaningful for `pdf` (page-aware); passing it for `html` raises
+        `InvalidRequestError` from within that helper.
         """
         canonical_id = (await self.resolve_identifier(identifier, format)).identifier
-        markdown_format = f"{format}-markdown"
         backend = self._pdf_backend if format == "pdf" else self._html_backend
-
-        async def factory() -> bytes:
-            if not await self._storage.exists("arxiv", canonical_id, format):
-                raise NotFoundError(f"arXiv full text not fetched yet: identifier={canonical_id}, format={format}")
-            source_content = await self._storage.read("arxiv", canonical_id, format)
-            markdown = await backend.to_markdown(source_content)
-            return markdown.encode("utf-8")
-
-        markdown_bytes, _ = await self._storage.get_or_create("arxiv", canonical_id, markdown_format, factory)
-        page = paginate_text(
-            markdown_bytes.decode("utf-8"), offset, limit if limit is not None else self._default_inline_char_limit
+        result = await persist_parsed_markdown(
+            storage=self._storage,
+            search_index=self._search_index,
+            provider="arxiv",
+            canonical_identifier=canonical_id,
+            external_identifier=canonical_id,
+            source_format=format,
+            backend=backend,
+            offset=offset,
+            limit=limit if limit is not None else self._default_inline_char_limit,
+            page=page,
+            page_aware=(format == "pdf"),
         )
         return ParsedFullText(
-            markdown=page["content"],
-            offset=page["offset"],
-            limit=page["limit"],
-            total_length=page["total_length"],
-            has_more=page["has_more"],
-            # See the matching comment in fetch_full_text: canonical_id is percent-encoded so an
-            # old-style slash-bearing identifier still resolves as a single {identifier} segment.
-            resource_uri=f"research://arxiv/{quote(canonical_id, safe='')}/{format}/markdown",
+            **result, resource_uri=f"research://arxiv/{quote(canonical_id, safe='')}/{format}/markdown"
         )

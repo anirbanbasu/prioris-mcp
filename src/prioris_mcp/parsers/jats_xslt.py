@@ -60,7 +60,7 @@ class JatsXsltMarkdownBackend(ParserBackend):
             self._transform = etree.XSLT(xslt_root)
         return self._transform
 
-    async def to_markdown(self, content: bytes) -> str:
+    async def to_markdown(self, content: bytes) -> dict:
         def _transform_to_html() -> bytes:
             # Held for the transform's true lifetime (released only once this function returns or
             # raises), not tied to the calling task's own cancellation - see

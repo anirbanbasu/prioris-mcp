@@ -19,10 +19,10 @@ from anyio import to_thread
 from prioris_mcp.errors import FileTooLargeError, InvalidRequestError, NotFoundError
 from prioris_mcp.models.common import ParsedFullText
 from prioris_mcp.models.localfile import LocalFileFetchResult, LocalFileUploadChunkResult
-from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.base import ParserBackend
-from prioris_mcp.providers.base import ResearchPublicationProvider
+from prioris_mcp.providers.base import ResearchPublicationProvider, persist_parsed_markdown
 from prioris_mcp.storage import KeyedAsyncLockManager, StorageBackend
+from prioris_mcp.storage.search_index import SearchIndex
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +174,7 @@ class LocalFileProvider(ResearchPublicationProvider):
         pdf_backend: ParserBackend,
         max_size_bytes: int,
         upload_session_manager: UploadSessionManager,
+        search_index: SearchIndex,
         default_inline_char_limit: int = 20000,
     ) -> None:
         self._storage = storage
@@ -181,6 +182,7 @@ class LocalFileProvider(ResearchPublicationProvider):
         self._max_size_bytes = max_size_bytes
         self._default_inline_char_limit = default_inline_char_limit
         self._upload_sessions = upload_session_manager
+        self._search_index = search_index
         # Guards the check-existing-hash-then-mint-then-write sequence in fetch_full_text so two
         # concurrent calls for the same content never both mint a caller-facing ID or both write -
         # see docs/requirement-specification/07-test-specification.md#cross-cutting-concurrency.
@@ -285,38 +287,44 @@ class LocalFileProvider(ResearchPublicationProvider):
     # a default value here doesn't trigger ty's invalid-method-override check, unlike
     # fetch_full_text's first-positional-parameter rename above).
     async def parse_full_text(
-        self, identifier: str, format: str = "pdf", offset: int = 0, limit: int | None = None
+        self,
+        identifier: str,
+        format: str = "pdf",
+        offset: int = 0,
+        limit: int | None = None,
+        page: int | None = None,
     ) -> ParsedFullText:
         """See docs/requirement-specification/06-interface-specification.md#research_localfile_parse_full_text.
 
         Never re-reads the original path and never triggers fetch_full_text - `identifier` is
         looked up purely via the storage manifest (docs/requirement-specification/01-architecture.md#parse_full_text).
+
+        Delegates parsing/persistence/pagination to `persist_parsed_markdown` (shared across every
+        provider - see docs/requirement-specification/01-architecture.md#parse_full_text), which
+        also populates this document's leaf/chunk manifest and the search index on a fresh parse.
+        Format is always "pdf" here (see docs/requirement-specification/01-architecture.md#local-filesystem-source),
+        so `page_aware` is unconditionally True - no `InvalidRequestError` case for an unsupported
+        format/page combination exists, unlike arXiv's html rejection.
         """
         if format != "pdf":
             raise InvalidRequestError(f"Unsupported format for local filesystem source: {format}")
         content_hash = await self._storage.find_canonical_identifier("localfile", identifier, "pdf")
         if content_hash is None:
             raise NotFoundError(f"Local file identifier not recognised: {identifier}")
-
-        async def factory() -> bytes:
-            source_content = await self._storage.read("localfile", content_hash, "pdf")
-            markdown = await self._pdf_backend.to_markdown(source_content)
-            return markdown.encode("utf-8")
-
-        markdown_bytes, _ = await self._storage.get_or_create(
-            "localfile", content_hash, "pdf-markdown", factory, public_identifier=identifier
+        result = await persist_parsed_markdown(
+            storage=self._storage,
+            search_index=self._search_index,
+            provider="localfile",
+            canonical_identifier=content_hash,
+            external_identifier=identifier,
+            source_format="pdf",
+            backend=self._pdf_backend,
+            offset=offset,
+            limit=limit if limit is not None else self._default_inline_char_limit,
+            page=page,
+            page_aware=True,
         )
-        page = paginate_text(
-            markdown_bytes.decode("utf-8"), offset, limit if limit is not None else self._default_inline_char_limit
-        )
-        return ParsedFullText(
-            markdown=page["content"],
-            offset=page["offset"],
-            limit=page["limit"],
-            total_length=page["total_length"],
-            has_more=page["has_more"],
-            resource_uri=f"research://localfile/{quote(identifier, safe='')}/pdf/markdown",
-        )
+        return ParsedFullText(**result, resource_uri=f"research://localfile/{quote(identifier, safe='')}/pdf/markdown")
 
     async def begin_upload(self, filename: str | None = None) -> str:
         """See docs/requirement-specification/06-interface-specification.md#research_localfile_begin_upload."""

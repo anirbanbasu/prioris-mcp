@@ -14,6 +14,7 @@ from prioris_mcp.models.localfile import LocalFileFetchResult, LocalFileUploadCh
 from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
 from prioris_mcp.providers.localfile import PDF_MAGIC_PREFIX, LocalFileProvider, UploadSessionManager
 from prioris_mcp.storage import FilesystemStorageBackend
+from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 
 # A structurally valid minimal PDF, not just a "%PDF-" magic-prefix stub: earlier tasks only
 # needed PDF_BYTES to survive fetch_full_text's magic-byte sniff (see
@@ -68,6 +69,7 @@ def _provider(
             max_total_bytes=max_size_bytes,
             max_concurrent=upload_max_concurrent,
         ),
+        search_index=SqliteFts5SearchIndex(tmp_path / "search.sqlite3"),
     )
 
 
@@ -452,13 +454,27 @@ class TestLocalFileProviderParseFullText:
             asyncio.run(provider.parse_full_text("20260729-1430-a3f2", format="html"))
 
 
+class TestParseFullTextPageParam:
+    """docs/requirement-specification/06-interface-specification.md#research_localfile_parse_full_text - page param."""
+
+    def test_page_param_resolves_pdf_page_offset(self, tmp_path: Path):
+        provider = _provider(tmp_path)
+        fetch_result = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
+        result = asyncio.run(provider.parse_full_text(fetch_result.id, page=1))
+        # PDF_BYTES (this file's shared fixture) is single-page, so a two-page split isn't
+        # available to assert against - see this task's brief for why fabricating a genuine
+        # multi-page PDF byte string is unnecessary here (already covered by Task 10's tests).
+        assert result.total_pages == 1
+        assert result.page_range == (1, 1)
+
+
 class TestLocalFileProviderDeleteDoesNotTouchOriginal:
     """docs/requirement-specification/07-test-specification.md#storage-management-acceptance-criteria."""
 
     def test_delete_via_storage_backend_removes_only_the_storage_copy(self, tmp_path: Path):
         provider = _provider(tmp_path)
         fetched = asyncio.run(provider.fetch_full_text(PDF_BASE64, filename="paper.pdf"))
-        asyncio.run(provider._storage.delete("localfile", fetched.id, "pdf"))
+        asyncio.run(provider._storage.delete("localfile", fetched.id, "pdf", artefact="document"))
         assert asyncio.run(provider._storage.find_canonical_identifier("localfile", fetched.id, "pdf")) is None
 
 
