@@ -1,11 +1,18 @@
 import asyncio
+import base64
 import logging
 
 import httpx
 import pytest
 from fastmcp import Client, FastMCP
+from fastmcp.server.middleware.caching import ReadResourceSettings, ResponseCachingMiddleware
 
-from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
+from prioris_mcp.middleware import (
+    DecodeBinaryResourceContentMiddleware,
+    EncodeBinaryResourceContentMiddleware,
+    ResponseMetadataMiddleware,
+    StripUnknownArgumentsMiddleware,
+)
 from prioris_mcp.server import PriorisMCP
 
 logger = logging.getLogger(__name__)
@@ -187,6 +194,109 @@ class TestStripUnknownArgumentsMiddleware:
         assert "unknown1" in log_messages, "Expected 'unknown1' in logs"
         assert "unknown2" in log_messages, "Expected 'unknown2' in logs"
         assert "unknown3" in log_messages, "Expected 'unknown3' in logs"
+
+
+class TestBinaryResourceContentCachingMiddleware:
+    """Dedicated test class for Encode/DecodeBinaryResourceContentMiddleware.
+
+    Sandwiches a real `ResponseCachingMiddleware` (caching enabled) between the two, matching
+    server.py's app() ordering, so these tests exercise the actual bug this pair fixes: fastmcp's
+    cache wrapper crashes JSON-serialising raw (non-UTF-8-safe) `bytes` resource content.
+    """
+
+    # A minimal, valid, liteparse-parseable PDF - same fixture convention as
+    # TestLocalFileTools._PDF_BYTES in test_server.py.
+    _PDF_BYTES = b"""%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 44 >>
+stream
+BT /F1 24 Tf 20 100 Td (Hello World) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+0
+%%EOF"""
+
+    def _server_and_client(self):
+        """Build a fresh server+client pair with the caching sandwich, mirroring app()'s ordering."""
+        server = FastMCP()
+        mcp_obj = _stubbed_mcp_obj()
+        server_with_features = mcp_obj.register_features(server)
+        server_with_features.add_middleware(DecodeBinaryResourceContentMiddleware())
+        server_with_features.add_middleware(
+            ResponseCachingMiddleware(read_resource_settings=ReadResourceSettings(ttl=3600, enabled=True))
+        )
+        server_with_features.add_middleware(EncodeBinaryResourceContentMiddleware())
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_binary_fulltext_resource_round_trips_on_cache_miss_and_hit(self):
+        """A non-UTF-8-safe fulltext resource must not crash, and must round-trip byte-for-byte.
+
+        The first read is a cache miss (exercises Encode's bytes branch, then Decode's marked
+        branch); the second is a cache hit (Encode never runs at all - only Decode's marked
+        branch reverses what's already stored encoded).
+        """
+        client = self._server_and_client()
+        payload = b"%PDF-1.4\n" + bytes([0xBF, 0x00, 0x01, 0x02]) + b"trailer garbage"
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": base64.b64encode(payload).decode("ascii")},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                uri = f"research://localfile/{caller_facing_id}/pdf/fulltext"
+                first_read = await client.read_resource(uri)
+                second_read = await client.read_resource(uri)
+                return first_read, second_read
+
+        first_read, second_read = asyncio.run(scenario())
+        assert base64.b64decode(first_read[0].blob) == payload
+        assert base64.b64decode(second_read[0].blob) == payload
+        assert first_read[0].mimeType == "application/octet-stream"
+
+    def test_text_resource_passes_through_untouched_on_cache_miss_and_hit(self):
+        """A `str`-content resource (parsed Markdown) is untouched by either middleware.
+
+        Exercises Encode's non-bytes passthrough branch and Decode's unmarked passthrough branch,
+        on both a cache miss and a cache hit.
+        """
+        client = self._server_and_client()
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": base64.b64encode(self._PDF_BYTES).decode("ascii")},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+                uri = f"research://localfile/{caller_facing_id}/pdf/markdown"
+                first_read = await client.read_resource(uri)
+                second_read = await client.read_resource(uri)
+                return first_read, second_read
+
+        first_read, second_read = asyncio.run(scenario())
+        assert "Hello World" in first_read[0].text
+        assert first_read[0].text == second_read[0].text
 
 
 class TestResponseMetadataMiddleware:

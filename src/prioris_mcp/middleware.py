@@ -1,8 +1,10 @@
+import base64
 import logging
 import time
 from importlib.metadata import PackageMetadata, metadata as importlib_metadata
 from typing import ClassVar
 
+from fastmcp.resources import ResourceContent, ResourceResult
 from fastmcp.server.middleware import Middleware
 
 from prioris_mcp import PACKAGE_NAME
@@ -32,6 +34,60 @@ class StripUnknownArgumentsMiddleware(Middleware):
                 stack_info=True,
             )
         return await call_next(context)
+
+
+class EncodeBinaryResourceContentMiddleware(Middleware):
+    """Base64-encodes binary resource content before it can reach `ResponseCachingMiddleware`.
+
+    `ResponseCachingMiddleware` JSON-serialises cached values via Pydantic, whose default `bytes`
+    encoding is a UTF-8 decode - fine for text resources, but it crashes on any resource whose raw
+    bytes aren't valid UTF-8 (e.g. a fetched PDF's `fulltext` resource). Must be registered
+    *before* `ResponseCachingMiddleware` in `server.py`'s `app()` chain, so this only runs on a
+    cache miss - a cache hit already holds the already-encoded form. Paired with
+    `DecodeBinaryResourceContentMiddleware`, which reverses this on every read regardless of hit
+    or miss.
+    """
+
+    META_MARKER: ClassVar[str] = "_prioris_mcp_base64_encoded"
+
+    async def on_read_resource(self, context, call_next):
+        """Base64-encode any `bytes` content items so caching never sees raw binary."""
+        result = await call_next(context)
+        contents = [
+            ResourceContent(
+                base64.b64encode(item.content).decode("ascii"),
+                mime_type=item.mime_type,
+                meta={**(item.meta or {}), self.META_MARKER: True},
+            )
+            if isinstance(item.content, bytes)
+            else item
+            for item in result.contents
+        ]
+        return ResourceResult(contents=contents, meta=result.meta)
+
+
+class DecodeBinaryResourceContentMiddleware(Middleware):
+    """Reverses `EncodeBinaryResourceContentMiddleware`'s base64 encoding on every read.
+
+    Must be registered *after* `ResponseCachingMiddleware` in `server.py`'s `app()` chain, so it
+    runs on both a fresh read and a cache hit - a cache hit never reaches
+    `EncodeBinaryResourceContentMiddleware`, so only a middleware outside the cache boundary can
+    restore the original bytes for the caller.
+    """
+
+    async def on_read_resource(self, context, call_next):
+        """Base64-decode any content item `EncodeBinaryResourceContentMiddleware` marked."""
+        result = await call_next(context)
+        contents = []
+        for item in result.contents:
+            if item.meta and item.meta.get(EncodeBinaryResourceContentMiddleware.META_MARKER):
+                meta = {k: v for k, v in item.meta.items() if k != EncodeBinaryResourceContentMiddleware.META_MARKER}
+                contents.append(
+                    ResourceContent(base64.b64decode(item.content), mime_type=item.mime_type, meta=meta or None)
+                )
+            else:
+                contents.append(item)
+        return ResourceResult(contents=contents, meta=result.meta)
 
 
 class ResponseMetadataMiddleware(Middleware):

@@ -21,7 +21,12 @@ from starlette.middleware.cors import CORSMiddleware
 
 from prioris_mcp import PACKAGE_NAME, EnvVars
 from prioris_mcp.errors import InvalidRequestError
-from prioris_mcp.middleware import ResponseMetadataMiddleware, StripUnknownArgumentsMiddleware
+from prioris_mcp.middleware import (
+    DecodeBinaryResourceContentMiddleware,
+    EncodeBinaryResourceContentMiddleware,
+    ResponseMetadataMiddleware,
+    StripUnknownArgumentsMiddleware,
+)
 from prioris_mcp.mixin import MCPMixin
 from prioris_mcp.models.arxiv import ArxivFetchMetadataResult, ArxivSearchResult
 from prioris_mcp.models.common import (
@@ -543,6 +548,14 @@ def app() -> FastMCP:  # pragma: no cover
     mcp_obj = PriorisMCP()
     app_with_features = mcp_obj.register_features(app)
     app_with_features.add_middleware(StripUnknownArgumentsMiddleware())
+    # Encode/DecodeBinaryResourceContentMiddleware sandwich ResponseCachingMiddleware: fastmcp's
+    # cache wrapper JSON-serialises via Pydantic, whose default bytes encoding is a UTF-8 decode -
+    # it crashes on non-UTF-8-safe resource content (e.g. a fetched PDF's fulltext resource).
+    # FastMCP's middleware chain runs first-added-outermost (see _run_middleware in
+    # fastmcp/server/server.py), so Decode (must see every read, hit or miss) is added before
+    # ResponseCachingMiddleware, and Encode (must only run next to the real resource handler, on
+    # a cache miss) is added after it - see middleware.py for the full rationale.
+    app_with_features.add_middleware(DecodeBinaryResourceContentMiddleware())
     app_with_features.add_middleware(
         ResponseCachingMiddleware(
             list_tools_settings=ListToolsSettings(
@@ -588,6 +601,7 @@ def app() -> FastMCP:  # pragma: no cover
             ),
         )
     )
+    app_with_features.add_middleware(EncodeBinaryResourceContentMiddleware())
     # The last middleware must be the one to attach response metadata
     app_with_features.add_middleware(ResponseMetadataMiddleware())
     return app_with_features
