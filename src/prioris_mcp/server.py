@@ -43,7 +43,7 @@ from prioris_mcp.models.common import (
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.pagination import paginate_text
-from prioris_mcp.parsers.html_markdownify import MarkdownifyHtmlBackend
+from prioris_mcp.parsers.html_to_markdown_backend import HtmlToMarkdownBackend
 from prioris_mcp.parsers.jats_xslt import JatsXsltMarkdownBackend
 from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
 from prioris_mcp.providers.arxiv import ARXIV_BASE_SPACING_SECONDS, ArxivProvider
@@ -157,7 +157,7 @@ class PriorisMCP(MCPMixin):
             max_total_backoff_seconds=EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS,
         )
         pdf_backend = LiteParsePdfBackend()
-        html_backend = MarkdownifyHtmlBackend()
+        html_backend = HtmlToMarkdownBackend()
         self._arxiv_provider = ArxivProvider(
             storage=self._storage,
             queue=arxiv_queue,
