@@ -11,11 +11,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Chunked upload for the local filesystem source: `research_localfile_begin_upload`, `research_localfile_upload_chunk`, `research_localfile_finalize_upload` (fix [issue #17](https://github.com/anirbanbasu/prioris-mcp/issues/17)).
 - `src/prioris_mcp/models/` (`arxiv`, `europepmc`, `localfile`, `common`): typed, per-shape Pydantic output models for every `research_*` tool and resource, replacing the previous ad hoc `dict` returns across the arXiv/Europe PMC/local filesystem providers and identifier routing.
 - Explicit, airgapped-friendly OCR configuration for `LiteParsePdfBackend`: `PRIORIS_MCP_PDF_OCR_ENABLED`, `PRIORIS_MCP_PDF_OCR_TESSDATA_PATH` (falls back to `TESSDATA_PREFIX`), `PRIORIS_MCP_PDF_OCR_SERVER_URL`, and `PRIORIS_MCP_PDF_OCR_SERVER_HEADERS`, instead of relying on liteparse's own defaults (which lazily download Tesseract language data over the network) — see [Configuration](docs/02-configuration.md) and [Security](docs/requirement-specification/05-security.md#ocr-language-data-is-a-network-dependency-of-parse_full_text) (fix [issue #11](https://github.com/anirbanbasu/prioris-mcp/issues/11)).
+- A SQLite-backed storage catalogue and per-document manifest (`storage/catalogue.py`, `storage/manifest.py`), replacing the previous flat JSONL manifest, with automatic migration of existing storage directories on first use (`storage/migration.py`) (fix [issue #18](https://github.com/anirbanbasu/prioris-mcp/issues/18)).
+- `research_search_fetched`: full-text search over previously-persisted document/markdown chunks, backed by a pluggable `SearchIndex` (SQLite FTS5 in v1), optionally scoped by provider/identifier/format (fix [issue #18](https://github.com/anirbanbasu/prioris-mcp/issues/18)).
+- A `page` parameter on `research_arxiv_parse_full_text` and `research_localfile_parse_full_text` (and the corresponding `.../markdown` resource template), resolved against the per-document manifest so a specific PDF page's Markdown can be retrieved directly instead of paging by character offset alone (fix [issue #12](https://github.com/anirbanbasu/prioris-mcp/issues/12)).
 
 ### Changed
 
 - **Breaking:** `research_localfile_fetch_full_text` now accepts `content_base64` (base64-encoded PDF bytes) and an optional `filename` hint instead of a server-side `path`, so "local" means local to the MCP client consistently across transports rather than local to wherever the server process happens to run (addresses [issue #6](https://github.com/anirbanbasu/prioris-mcp/issues/6), see "Fixed" section below). The `PRIORIS_MCP_LOCAL_FILE_ROOT` environment variable is removed as a result (no server-side path is resolved anymore); `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` still bounds the decoded content size.
 - **Breaking:** every tool's business-logic failures (`not_found`, `format_unavailable`, `unsupported_provider`, `invalid_request`, `file_too_large`, `rate_limited`, `provider_unavailable`) no longer come back as the structured `{"error": "<code>", "message": "<detail>"}` envelope. Providers now raise their typed exception directly, and FastMCP surfaces it to the caller as an opaque `ToolError` with a human-readable message only — there is no longer a machine-readable error code in the response.
+- `research_delete_fetched`'s `entries` now require an `artefact` field (`"document"`, `"markdown"`, or `"all"`) — deletion is per-artefact rather than per-(provider, identifier, format) as a whole, and deleting `"markdown"`/`"all"` also removes that document from the search index.
+- `ParserBackend.to_markdown` now returns `{"markdown": str, "leaf_spans": [...]}` instead of a bare Markdown string, carrying the leaf/page structure storage needs for page-aware retrieval and search indexing.
+- Swapped the HTML-to-Markdown conversion library from `markdownify` to `html-to-markdown`, for correct `rowspan`/`colspan` table handling.
 
 ### Deprecated
 
@@ -30,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Fixed [issue #10](https://github.com/anirbanbasu/prioris-mcp/issues/10) through [PR #14](https://github.com/anirbanbasu/prioris-mcp/pull/14).
 - Fixed [issue #9](https://github.com/anirbanbasu/prioris-mcp/issues/9), [issue #8](https://github.com/anirbanbasu/prioris-mcp/issues/8) and [issue #7](https://github.com/anirbanbasu/prioris-mcp/issues/7) through [PR #15](https://github.com/anirbanbasu/prioris-mcp/pull/15).
 - Fixed [issue #6](https://github.com/anirbanbasu/prioris-mcp/issues/6) through [PR #16](https://github.com/anirbanbasu/prioris-mcp/pull/16).
+- Reading a fetched PDF via the `research://.../pdf/fulltext` resource template no longer crashes with an unhandled `UnicodeDecodeError` when response caching is enabled; binary resource content is now base64-encoded/decoded around the cache layer.
 
 ### Security
 
