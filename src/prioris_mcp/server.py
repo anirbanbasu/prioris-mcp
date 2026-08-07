@@ -409,6 +409,10 @@ class PriorisMCP(MCPMixin):
     ) -> DeleteFetchedResult:
         """Remove one or more persisted artefacts, tolerating entries no longer present.
 
+        `identifier` must match the canonical form actually in storage (e.g. a version-pinned
+        arXiv id like "2403.10131v2", not an unversioned id that may resolve to a newer version
+        by the time this call runs) - use `research_list_fetched` first to find it if unsure.
+
         `artefact` is "document", "markdown", or "all" - see
         docs/requirement-specification/02-storage.md#deletion-is-per-artefact-not-per-format.
         Does not cascade between artefacts: deleting "document" leaves "markdown" in place and
