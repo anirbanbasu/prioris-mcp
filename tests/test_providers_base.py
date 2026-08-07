@@ -275,6 +275,69 @@ class TestPersistParsedMarkdownFreshParse:
         asyncio.run(scenario())
 
 
+class TestPersistParsedMarkdownMigratedDocument:
+    """Test rebuild of manifest/search rows for a migrated document with an empty manifest.
+
+    Simulates what storage/migration.py actually does: copy the document and markdown artefacts
+    onto disk directly, bypassing persist_parsed_markdown entirely, so no manifest/search rows
+    are ever created. The first parse_full_text call after migration must detect the empty
+    manifest (served_from_storage=True but total_pages == 0) and rebuild it by re-parsing the
+    source document, without disturbing the already-persisted markdown.
+    """
+
+    def test_rebuilds_manifest_and_search_index_for_migrated_document(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"%PDF-1.4 raw", artefact="document")
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"Page one.\n\nPage two.", artefact="markdown")
+            backend = _CountingParserBackend(["Page one.", "Page two."])
+            result = await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=2,
+                page_aware=True,
+            )
+            assert result["markdown"] == "Page two."
+            assert backend.call_count == 1
+
+            manifest = storage.manifest_for("arxiv", "2106.09685v2")
+            assert await manifest.total_pages("pdf") == 2
+
+            results = await search_index.search("Page")
+            assert any(row["identifier"] == "2106.09685v2" for row in results)
+
+        asyncio.run(scenario())
+
+    def test_raises_not_found_when_source_document_missing_for_rebuild(self, tmp_path):
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"Page one.\n\nPage two.", artefact="markdown")
+            backend = _CountingParserBackend(["Page one.", "Page two."])
+            with pytest.raises(NotFoundError):
+                await persist_parsed_markdown(
+                    storage=storage,
+                    search_index=search_index,
+                    provider="arxiv",
+                    canonical_identifier="2106.09685v2",
+                    external_identifier="2106.09685v2",
+                    source_format="pdf",
+                    backend=backend,
+                    offset=0,
+                    limit=1000,
+                    page=None,
+                    page_aware=True,
+                )
+
+        asyncio.run(scenario())
+
+
 class TestPersistParsedMarkdownPageParam:
     """Test page parameter resolves offset to page start and validates bounds."""
 

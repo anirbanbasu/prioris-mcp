@@ -112,8 +112,9 @@ async def persist_parsed_markdown(
     Shared by every ResearchPublicationProvider's parse_full_text - see
     docs/requirement-specification/01-architecture.md#parse_full_text. On a fresh parse
     (`served_from_storage=False`), also populates this document's leaf/chunk manifest rows and
-    the global search index - a cache hit skips that, since it's already correct from the
-    original parse.
+    the global search index - a cache hit normally skips that, since it's already correct from
+    the original parse, except for a migrated document whose manifest was never populated (see
+    `storage/migration.py`), which gets its manifest/search rows rebuilt here on first access.
 
     Raises:
         InvalidRequestError: `page` was given but `page_aware` is False.
@@ -144,7 +145,17 @@ async def persist_parsed_markdown(
     markdown = markdown_bytes.decode("utf-8")
     manifest = storage.manifest_for(provider, canonical_identifier)
 
-    if not served_from_storage:
+    needs_manifest_rebuild = served_from_storage and await manifest.total_pages(source_format) == 0
+    if not served_from_storage or needs_manifest_rebuild:
+        if needs_manifest_rebuild:
+            if not await storage.exists(provider, canonical_identifier, source_format, artefact="document"):
+                raise NotFoundError(
+                    f"cannot rebuild manifest for {provider}:{canonical_identifier}:{source_format}: "
+                    "source document is no longer available"
+                )
+            source_content = await storage.read(provider, canonical_identifier, source_format, artefact="document")
+            parsed = await backend.to_markdown(source_content)
+            leaf_spans_holder.extend(parsed["leaf_spans"])
         await manifest.replace_leaf_rows(source_format, leaf_spans_holder)
         chunks = detect_chunks(markdown)
         await manifest.replace_chunk_rows(source_format, chunks, scheme="heading-bounded-v1")

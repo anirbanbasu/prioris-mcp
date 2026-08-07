@@ -42,7 +42,7 @@ class EncodeBinaryResourceContentMiddleware(Middleware):
     `ResponseCachingMiddleware` JSON-serialises cached values via Pydantic, whose default `bytes`
     encoding is a UTF-8 decode - fine for text resources, but it crashes on any resource whose raw
     bytes aren't valid UTF-8 (e.g. a fetched PDF's `fulltext` resource). Must be registered
-    *before* `ResponseCachingMiddleware` in `server.py`'s `app()` chain, so this only runs on a
+    *after* `ResponseCachingMiddleware` in `server.py`'s `app()` chain, so this only runs on a
     cache miss - a cache hit already holds the already-encoded form. Paired with
     `DecodeBinaryResourceContentMiddleware`, which reverses this on every read regardless of hit
     or miss.
@@ -69,7 +69,7 @@ class EncodeBinaryResourceContentMiddleware(Middleware):
 class DecodeBinaryResourceContentMiddleware(Middleware):
     """Reverses `EncodeBinaryResourceContentMiddleware`'s base64 encoding on every read.
 
-    Must be registered *after* `ResponseCachingMiddleware` in `server.py`'s `app()` chain, so it
+    Must be registered *before* `ResponseCachingMiddleware` in `server.py`'s `app()` chain, so it
     runs on both a fresh read and a cache hit - a cache hit never reaches
     `EncodeBinaryResourceContentMiddleware`, so only a middleware outside the cache boundary can
     restore the original bytes for the caller.
