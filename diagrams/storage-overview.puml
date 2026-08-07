@@ -1,0 +1,70 @@
+@startuml storage-overview
+skinparam defaultFontName "Inter"
+skinparam backgroundColor white
+skinparam rectangle {
+    RoundCorner 8
+    BackgroundColor White
+    BorderColor #666666
+}
+skinparam component {
+    BackgroundColor #E8F1FB
+    BorderColor #3C7FC0
+}
+skinparam interface {
+    BackgroundColor #FFF3CD
+    BorderColor #B8952E
+}
+skinparam database {
+    BackgroundColor #999999
+    BorderColor #8A8A8A
+    FontColor White
+}
+skinparam folder {
+    BackgroundColor #F5F5F5
+    BorderColor #999999
+}
+skinparam artifact {
+    BackgroundColor White
+    BorderColor #999999
+}
+skinparam arrow {
+    Color #666666
+}
+
+interface "StorageBackend\nexists / write / read / list / delete" as StorageBackend
+interface "SearchIndex\nindex_entries / remove_document / search" as SearchIndex
+
+component "FilesystemStorageBackend\n(v1, only implementation)" as FS
+component "SqliteFts5SearchIndex\n(v1, only implementation)" as SearchImpl
+
+FS ..|> StorageBackend
+SearchImpl ..|> SearchIndex
+StorageBackend -[hidden]-> SearchIndex
+FS -[hidden]-> SearchImpl
+
+rectangle "$XDG_DATA_HOME/prioris-mcp/downloads/" as Root {
+    database "catalogue.sqlite\none row per (provider, canonical id,\nformat, artefact)" as Catalogue
+    database "search.sqlite3\ndisposable FTS5 cache,\nrebuildable from manifest + markdown" as SearchDb
+    Catalogue -[hidden]-> SearchDb
+
+    folder "documents/<document-hash>/\nsha256(provider, canonical identifier)" as DocDir {
+        database "manifest.sqlite\nleaf / chunk / summary rows,\nspans into this document's markdown" as Manifest
+        Manifest -[hidden]-> FormatDir
+
+        folder "<format>/  (e.g. pdf/, html/)" as FormatDir {
+            artifact "document\nraw fetched bytes" as Document
+            artifact "markdown\nparsed Markdown" as Markdown
+            artifact "metadata.jsonl\nfetch/parse timestamps, sizes" as MetaJsonl
+        }
+    }
+    SearchDb -[hidden]-> DocDir
+}
+
+FS --> Catalogue : list / exists / delete
+FS --> Document : write / read
+FS --> Markdown : write / read
+FS --> Manifest : parse_full_text writes\nleaf / chunk rows
+SearchImpl --> SearchDb : index_entries / search
+SearchImpl ..> Manifest : synced from chunk\n(or leaf) rows on parse/delete
+
+@enduml

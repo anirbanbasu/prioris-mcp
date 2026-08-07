@@ -1,0 +1,36 @@
+@startuml system-architecture-overview-c4
+!include <C4/C4_Container>
+
+skinparam defaultFontName "Inter"
+skinparam dpi 250
+
+title Container diagram for PriorisMCP
+
+Person(researcher, "Researcher", "Uses an MCP client to look up prior art")
+
+System_Boundary(c1, "PriorisMCP") {
+    Container(server, "PriorisMCP server", "Python, FastMCP", "Exposes research_* tools, resources and prompts over MCP")
+    ContainerDb(storage, "Storage", "SQLite catalogue and manifest, filesystem", "Persists fetched documents and Markdown")
+    ContainerDb(search, "Search index", "SQLite FTS5", "Full-text search over persisted content")
+}
+
+System_Ext(arxiv, "arXiv", "Research publication API")
+System_Ext(europepmc, "Europe PMC", "Research publication API")
+System_Ext(ocr, "External OCR server", "Optional remote OCR delegation")
+
+Rel(researcher, server, "Calls research_* tools", "MCP: stdio / streamable-http")
+Rel(server, arxiv, "Fetches metadata and full text", "HTTPS")
+Rel(server, europepmc, "Fetches metadata and full text", "HTTPS")
+Rel(server, ocr, "Delegates PDF OCR", "HTTPS, if OCR_SERVER_URL set")
+Rel(server, storage, "Persists and reads")
+Rel(server, search, "Indexes and queries")
+
+note right of server
+  PDF OCR defaults to local, air-gapped
+  Tesseract (tessdata_path) - the external
+  OCR server is opt-in only.
+end note
+
+SHOW_LEGEND()
+
+@enduml

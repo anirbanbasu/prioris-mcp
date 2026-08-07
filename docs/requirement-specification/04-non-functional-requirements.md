@@ -12,6 +12,10 @@ An MCP client (an LLM) may legitimately invoke variations of the same tool in pa
 
 ### Rate limiting must serialise, not just gate
 
+![Rate-limit queue and adaptive backoff sequence](../images/rate-limit-sequence.svg)
+
+Two concurrent calls into the same provider (call A and call B above) enter the tool layer together, but the provider's queue admits them to the network one at a time, spaced by that provider's rate limit — call B simply waits its turn rather than racing call A's own "has enough time passed?" check. When an outbound request does draw a 429 (call B above), the queue retries it in place with doubling spacing, invisibly to the tool call that triggered it, until either a retry succeeds or the bounded backoff budget runs out — only the latter surfaces as `rate_limited` to the caller. A non-429 failure (timeout, connection error, 5xx) takes the third path shown above: it surfaces immediately as `provider_unavailable`, with no retry at all, since a 5xx or timeout carries no equivalent "wait, then it clears" guarantee.
+
 [Architecture → Caching and rate limiting](01-architecture.md#caching-and-rate-limiting) states each provider's outbound rate limit (arXiv: documented 1 request per 3 seconds; Europe PMC: the same, self-imposed — see [Functional requirements](03-functional-requirements.md)). A check that only asks "has 3 seconds passed since the last request?" is correct for sequential calls but insufficient under concurrency: several parallel tool invocations against the same provider can each see "yes, enough time has passed" and fire together, breaching the limit.
 
 Each provider must therefore serialise its own outbound requests through a single queue (or equivalent), so that concurrent tool invocations against that provider are admitted to the network one at a time, spaced according to its rate limit, rather than racing against a shared check. This applies within a provider; it does not require coordinating across providers, since the rate limit itself is per-source.

@@ -4,6 +4,14 @@ icon: lucide/layers
 
 # Architecture
 
+![Architecture overview for PriorisMCP](../images/system-architecture-overview-detailed.svg)
+
+An MCP client's call enters through the middleware chain — `StripUnknownArgumentsMiddleware`, `ResponseCachingMiddleware`, then `ResponseMetadataMiddleware`, applied in that fixed order (see `server.py`'s `app()`) — before reaching the tools, resources, and prompts registered on `PriorisMCP` via `MCPMixin` (see [`mixin.py`](../../src/prioris_mcp/mixin.py)). From there, an identifier that isn't already provider-native (a DOI, for instance) passes through the grouping-level identifier routing described below before a `ResearchPublicationProvider` implementation — `ArxivProvider`, `EuropePmcProvider`, or `LocalFileProvider` — is selected to service the call.
+
+Each provider hands full text off to a `ParserBackend` for that format: `LiteParsePdfBackend` for PDF (arXiv and the local filesystem source), `HtmlToMarkdownBackend` for arXiv's HTML, and `JatsXsltMarkdownBackend` for Europe PMC's JATS XML. `LiteParsePdfBackend` OCRs scanned pages via a locally bundled, air-gapped Tesseract engine by default (`tessdata_path`, no network call); delegating OCR to an external server instead is an opt-in alternative, off by default, and is not on the path any v1 deployment takes unless explicitly configured — see [`parse_full_text`](#parse_full_text) below.
+
+Parsed Markdown, and the document bytes it was parsed from, are persisted through `FilesystemStorageBackend` into the SQLite catalogue/manifest and indexed into `SqliteFts5SearchIndex` for full-text search — see [Storage](02-storage.md) for both. Only `ArxivProvider` and `EuropePmcProvider` make outbound calls to their respective external APIs; `LocalFileProvider` has no external dependency of its own, since the caller supplies the document's bytes directly (see [Local filesystem source](#local-filesystem-source) below).
+
 ## Provider groupings
 
 Prior-art sources are grouped by domain, not treated as one flat list of sources. Each grouping gets its own provider interface, because the operations and data shapes that make sense for one domain do not necessarily fit another:

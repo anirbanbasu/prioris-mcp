@@ -1,0 +1,52 @@
+@startuml rate-limit-sequence
+skinparam defaultFontName "Inter"
+skinparam backgroundColor white
+skinparam sequence {
+    ArrowColor #666666
+    LifeLineBorderColor #666666
+    ParticipantBackgroundColor #E8F1FB
+    ParticipantBorderColor #3C7FC0
+    ActorBackgroundColor #08427B
+    ActorBorderColor #073B6F
+    DatabaseBackgroundColor #999999
+    DatabaseBorderColor #8A8A8A
+    DatabaseFontColor White
+}
+
+actor "MCP client" as Client
+participant "PriorisMCP tool\n(e.g. research_arxiv_fetch_metadata)" as Tool
+participant "Provider queue\n(serialised, per provider)" as Queue
+database "arXiv / Europe PMC" as API
+
+Client -> Tool : call A
+Client -> Tool : call B (concurrent)
+Tool -> Queue : enqueue A
+Tool -> Queue : enqueue B
+
+Queue -> API : request A
+API --> Queue : 200 OK
+Queue --> Tool : result A
+
+note over Queue, API
+    Never two requests in flight at once -
+    call B waits for its own turn, spaced
+    by the provider's rate limit (>= 3s)
+end note
+
+Queue -> API : request B
+API --> Queue : 429 Too Many Requests
+
+loop adaptive backoff: 3s, 6s, 12s, 24s, 48s, ...\nuntil success or 60s budget exhausted
+    Queue -> API : retry B
+end
+
+alt retry succeeds within budget
+    API --> Queue : 200 OK
+    Queue --> Tool : result B
+else budget exhausted
+    Queue --> Tool : rate_limited error
+else non-429 failure (timeout / connection error / 5xx)
+    Queue --> Tool : provider_unavailable error\n(surfaced immediately, no retry)
+end
+
+@enduml

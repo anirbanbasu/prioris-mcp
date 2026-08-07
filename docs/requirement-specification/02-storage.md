@@ -4,6 +4,14 @@ icon: lucide/hard-drive
 
 # Storage
 
+![Storage layout for PriorisMCP](../images/storage-overview.svg)
+
+`StorageBackend` and `SearchIndex` are separate interfaces (see [Architecture → `SearchIndex`](01-architecture.md#searchindex) for why), each with exactly one v1 implementation: `FilesystemStorageBackend` and `SqliteFts5SearchIndex` respectively. Both write under the same local-disk root, `$XDG_DATA_HOME/prioris-mcp/downloads/`, but to different files for different reasons — see [Separate SQLite files, not one shared database](#separate-sqlite-files-not-one-shared-database) below.
+
+`catalogue.sqlite` is the one top-level, cross-document index: a single row per `(provider, canonical identifier, format, artefact)` entry, backing `list`/`exists`/`delete`. Everything else content-bearing lives one level down, under a per-document `documents/<document-hash>/` directory keyed by `sha256(provider, canonical identifier)` — never a raw identifier, for the path-safety reasons in [Storage keys are hashed](#storage-keys-are-hashed-not-built-from-the-raw-identifier) below. Each such directory holds one `manifest.sqlite` (structural `leaf`/`chunk`/`summary` rows, shared across every format fetched for that document) alongside one subdirectory per format actually fetched (`pdf/`, `html/`, ...), each holding that format's own `document`/`markdown` artefacts and `metadata.jsonl`.
+
+`search.sqlite3` sits beside `catalogue.sqlite` at the top level but is architecturally distinct from it: a disposable FTS5 cache synced from `manifest.sqlite` chunk/leaf rows whenever a document is parsed or deleted, never itself a source of truth, and safe to delete and rebuild at any time — unlike `catalogue.sqlite` and `manifest.sqlite`, which are durable.
+
 ## Purpose
 
 `fetch_full_text` and `parse_full_text` are the two capabilities in [`ResearchPublicationProvider`](01-architecture.md) that produce content requiring persistence. `search`, `list_top_n`, and `fetch_metadata` results are small and already covered by the server's response-caching middleware. Full text (a PDF, an HTML document, ...) and its parsed Markdown are different: potentially large (full text) or expensive to produce (parsing is CPU-heavy), so a repeat request for either shouldn't need to redo the work if it doesn't have to. The `StorageBackend` abstraction is where both are persisted.

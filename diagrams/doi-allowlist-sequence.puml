@@ -1,0 +1,44 @@
+@startuml doi-allowlist-sequence
+skinparam defaultFontName "Inter"
+skinparam backgroundColor white
+skinparam sequence {
+    ArrowColor #666666
+    LifeLineBorderColor #666666
+    ParticipantBackgroundColor #E8F1FB
+    ParticipantBorderColor #3C7FC0
+    ActorBackgroundColor #08427B
+    ActorBorderColor #073B6F
+    DatabaseBackgroundColor #999999
+    DatabaseBorderColor #8A8A8A
+    DatabaseFontColor White
+}
+
+actor "MCP client" as Client
+participant "research_resolve_identifier" as Tool
+database "doi.org / Crossref" as Doi
+participant "Domain allowlist check\n(arxiv.org, europepmc.org / NCBI PMC)" as Allowlist
+participant "ArxivProvider /\nEuropePmcProvider" as Provider
+
+Client -> Tool : identifier = DOI, format
+Tool -> Doi : GET https://doi.org/{doi}
+Doi --> Tool : redirect to landing URL
+
+Tool -> Allowlist : check redirect domain
+
+alt domain is arxiv.org or europepmc.org / NCBI PMC
+    Allowlist --> Tool : allowed
+    Tool -> Provider : resolve_identifier(...)
+    Provider --> Tool : resolved URL, canonical id, format
+    Tool --> Client : ResolvedIdentifierResult
+else any other domain
+    Allowlist --> Tool : not allowed
+    Tool --> Client : unsupported_provider error
+    note right of Tool
+        The allowlist check happens
+        before any further request -
+        the landing domain itself is
+        never contacted.
+    end note
+end
+
+@enduml

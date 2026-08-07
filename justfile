@@ -86,3 +86,56 @@ vulnerability-scan:
     @echo "Running Open Source Vulnerability scanner..."
     @osv-scanner scan source -r .
     @echo "Vulnerability scan complete."
+
+# Render a PlantUML diagram to SVG or PNG using an ephemeral plantuml-server Docker container
+# with the vendored Inter font installed. Output is named after the .puml file's own basename,
+# so the file must declare a matching `@startuml <basename>`. dpi only affects PNG output; add
+# `skinparam dpi <n>` in the .puml source itself to control it.
+render-plantuml file format="svg" outdir="docs/images":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    container="plantuml-session"
+    fontdir="/usr/share/fonts/truetype/inter"
+
+    if ! docker ps --format '{{{{.Names}}' | grep -qx "$container"; then
+        echo "Starting ephemeral plantuml-server container '$container'..."
+        docker run -d --rm --name "$container" plantuml/plantuml-server:latest >/dev/null
+    fi
+
+    jar=""
+    for i in $(seq 1 30); do
+        jar=$(docker exec "$container" sh -c "find /tmp -maxdepth 6 -iname 'plantuml*.jar' 2>/dev/null" | head -1)
+        [ -n "$jar" ] && break
+        sleep 1
+    done
+    if [ -z "$jar" ]; then
+        echo "Error: plantuml.jar did not appear inside '$container' in time." >&2
+        exit 1
+    fi
+
+    if ! docker exec "$container" test -f "$fontdir/Inter-Regular.ttf" 2>/dev/null; then
+        echo "Installing Inter font into container..."
+        docker exec --user root "$container" mkdir -p "$fontdir"
+        for f in diagrams/fonts/inter/*.ttf; do
+            docker cp "$f" "$container:$fontdir/"
+        done
+        docker exec --user root "$container" fc-cache -f >/dev/null
+    fi
+
+    name=$(basename "{{file}}" .puml)
+    docker cp "{{file}}" "$container:/tmp/${name}.puml"
+    docker exec "$container" /opt/java/openjdk/bin/java -jar "$jar" -t{{format}} -charset UTF-8 "/tmp/${name}.puml"
+    if [ "{{format}}" = "svg" ]; then
+        # PlantUML emits a single quoted font-family (e.g. font-family="'Inter'") with no
+        # fallback, so viewers without Inter installed substitute a font while the SVG still
+        # forces glyphs to Inter-measured textLength widths, distorting the substitute badly.
+        # Rewriting to a real CSS fallback list at least substitutes a metrics-similar sans-serif.
+        docker exec "$container" sed -i "s/font-family=\"'Inter'\"/font-family=\"Inter, sans-serif\"/g" "/tmp/${name}.svg"
+    fi
+    mkdir -p "{{outdir}}"
+    docker cp "$container:/tmp/${name}.{{format}}" "{{outdir}}/${name}.{{format}}"
+    echo "Rendered {{outdir}}/${name}.{{format}}"
+
+# Stop the ephemeral plantuml-server container started by render-plantuml
+stop-plantuml-session:
+    @docker stop plantuml-session >/dev/null 2>&1 && echo "Stopped plantuml-session." || echo "plantuml-session is not running."

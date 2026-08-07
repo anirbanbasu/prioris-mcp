@@ -1,0 +1,81 @@
+@startuml system-architecture-overview-detailed
+skinparam defaultFontName "Inter"
+skinparam backgroundColor white
+skinparam rectangle {
+    RoundCorner 8
+    BackgroundColor White
+    BorderColor #666666
+}
+skinparam component {
+    BackgroundColor #E8F1FB
+    BorderColor #3C7FC0
+}
+skinparam database {
+    BackgroundColor #999999
+    BorderColor #8A8A8A
+    FontColor White
+}
+skinparam arrow {
+    Color #666666
+}
+
+actor "MCP client\ne.g. Claude, an IDE" as Client
+
+rectangle "PriorisMCP server" as PriorisMCP {
+    rectangle "Middleware chain" as MW {
+        component "StripUnknown-\nArgumentsMiddleware" as MW1
+        component "ResponseCaching-\nMiddleware" as MW2
+        component "ResponseMetadata-\nMiddleware" as MW3
+        MW1 --> MW2
+        MW2 --> MW3
+    }
+
+    component "Tools / resources / prompts\n(MCPMixin-registered)" as Core
+    component "Identifier routing\n(arXiv / Europe PMC / DOI)" as Router
+
+    rectangle "ResearchPublicationProvider" as Providers {
+        component "ArxivProvider" as Arxiv
+        component "EuropePmcProvider" as EuropePmc
+        component "LocalFileProvider" as LocalFile
+    }
+
+    rectangle "ParserBackend" as Parsers {
+        component "LiteParsePdfBackend" as Pdf
+        component "HtmlToMarkdownBackend" as Html
+        component "JatsXsltMarkdownBackend" as Jats
+        component "Local Tesseract OCR\nvia tessdata_path (default, air-gapped)" as Tesseract
+    }
+
+    rectangle "Storage" as Storage {
+        database "FilesystemStorageBackend\ndocuments and Markdown" as FS
+        database "SQLite catalogue\n& per-document manifest" as Catalogue
+        database "SqliteFts5SearchIndex" as Search
+    }
+
+    MW --> Core
+    Core --> Router
+    Router --> Arxiv
+    Router --> EuropePmc
+    Router --> LocalFile
+    Arxiv --> Pdf
+    Arxiv --> Html
+    EuropePmc --> Jats
+    LocalFile --> Pdf
+    Pdf --> Tesseract
+    Pdf --> FS
+    Html --> FS
+    Jats --> FS
+    FS --> Catalogue
+    FS --> Search
+}
+
+database "arXiv API" as ArxivApi
+database "Europe PMC API" as EuropePmcApi
+database "External OCR server\noptional remote delegation" as OcrServer
+
+Client <--> MW1 : MCP: stdio /\nstreamable-http
+Arxiv <--> ArxivApi
+EuropePmc <--> EuropePmcApi
+Pdf ..> OcrServer : if OCR_SERVER_URL set
+
+@enduml
