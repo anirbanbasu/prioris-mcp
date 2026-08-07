@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [unreleased]
 
+## [0.1.1] - 2026-08-07
+
 ### Added
 
 - Chunked upload for the local filesystem source: `research_localfile_begin_upload`, `research_localfile_upload_chunk`, `research_localfile_finalize_upload` (fix [issue #17](https://github.com/anirbanbasu/prioris-mcp/issues/17)).
@@ -101,6 +103,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Concurrently *executing* (not just concurrently *awaited*) JATS-to-HTML transforms are capped by `PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS` (default `min(4, os.cpu_count())`), closing an unbounded-thread-accumulation risk under sustained malicious input.
 - The Europe PMC provider only ever follows its own same-domain `fullTextXML` endpoint for full-text retrieval, never the publisher- or third-party-hosted full-text URLs surfaced in search results.
 
-[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0.post2...HEAD
-[0.1.0.post2]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0...v0.1.0.post2
-[0.1.0]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.0.1...v0.1.0
+[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0.post2...v0.1.1
+[0.1.0.post2]: https://github.com/anirbanbasu/prioris-mcp/compare/v.0.1.0...v0.1.0.post2
+[0.1.0]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.0.1...v.0.1.0
