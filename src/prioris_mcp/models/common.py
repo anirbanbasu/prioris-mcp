@@ -118,7 +118,14 @@ class StorageEntry(BaseModel):
     identifier: Annotated[str, Field(..., strict=True, description="The externally-visible identifier.")]
     format_: Annotated[str, Field(..., alias="format", strict=True, description="The format of the persisted entry.")]
     artefact: Annotated[Literal["document", "markdown"], Field(..., description="The type of artefact.")]
-    fetched_at_or_parsed_at: Annotated[str, Field(..., strict=True, description="When this entry was fetched.")]
+    fetched_at_or_parsed_at: Annotated[
+        str,
+        Field(
+            ...,
+            strict=True,
+            description="When this entry was fetched, or, for a markdown artefact, when it was parsed.",
+        ),
+    ]
     size_bytes: Annotated[int, Field(..., strict=True, description="The size of the persisted entry in bytes.")]
 
 

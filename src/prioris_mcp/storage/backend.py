@@ -74,7 +74,7 @@ class StorageBackend(ABC):
     async def list(self, provider: str | None = None, format: str | None = None) -> list[dict]:
         """Enumerate persisted catalogue entries, optionally filtered by provider/format.
 
-        Each entry: {"provider", "identifier", "format", "artefact", "fetched_at", "size_bytes"}.
+        Each entry: {"provider", "identifier", "format", "artefact", "fetched_at_or_parsed_at", "size_bytes"}.
         """
 
     @abstractmethod

@@ -1,4 +1,5 @@
 import logging
+import sqlite3
 import sys
 from importlib.metadata import version
 from typing import Annotated, ClassVar, Literal
@@ -439,7 +440,10 @@ class PriorisMCP(MCPMixin):
         """Full-text search over previously-persisted chunks (or leaves); never fetches or parses."""
         if identifier is not None and provider is None:
             raise InvalidRequestError("identifier requires provider")
-        matches = await self._search_index.search(query, provider=provider, identifier=identifier, format=format)
+        try:
+            matches = await self._search_index.search(query, provider=provider, identifier=identifier, format=format)
+        except sqlite3.OperationalError as exc:
+            raise InvalidRequestError(f"invalid search query: {exc}") from exc
         return SearchFetchedResult(matches=[SearchMatch(**match) for match in matches])
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:

@@ -1484,3 +1484,13 @@ class TestResearchSearchFetched:
         assert matches[0]["provider"] == "localfile"
         assert matches[0]["identifier"] == caller_facing_id
         assert matches[0]["format"] == "pdf"
+
+    def test_invalid_fts5_query_syntax_raises_invalid_request(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_search_fetched", arguments={"query": "C++"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
