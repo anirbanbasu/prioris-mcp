@@ -311,4 +311,10 @@ class SqliteNotesBackend(NotesBackend):
         return await to_thread.run_sync(_search_by_ids)
 
     async def export(self, note_id: str) -> NoteExport:
-        raise NotImplementedError  # implemented in Task 9
+        note = await self.read(note_id)
+        frontmatter = note.model_dump(mode="json", by_alias=True, exclude={"text"})
+        return NoteExport(
+            suggested_filename=f"{note.id}.md",
+            frontmatter=frontmatter,
+            markdown_body=note.text,
+        )

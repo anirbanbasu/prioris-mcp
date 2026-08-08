@@ -1,6 +1,7 @@
 import asyncio
 
 import pytest
+import yaml
 
 from prioris_mcp.models.notes import Anchor, AnchorLocation, AuthorFilter
 from prioris_mcp.notes.search_index import SqliteFts5NotesSearchIndex
@@ -278,3 +279,47 @@ class TestSqliteNotesBackendSearchKeyword:
         created = asyncio.run(backend.create("arxiv", "A", "pdf", "about apples"))
         asyncio.run(backend.delete(created.id))
         assert asyncio.run(backend.search(keyword="apples")).notes == []
+
+
+class TestSqliteNotesBackendExport:
+    """Test SqliteNotesBackend.export method."""
+
+    def test_export_missing_note_raises_file_not_found(self, tmp_path):
+        backend = _backend(tmp_path)
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(backend.export("does-not-exist"))
+
+    def test_export_suggested_filename_is_note_id(self, tmp_path):
+        backend = _backend(tmp_path)
+        created = asyncio.run(backend.create("arxiv", "2106.09685v2", "pdf", "a note"))
+        export = asyncio.run(backend.export(created.id))
+        assert export.suggested_filename == f"{created.id}.md"
+
+    def test_export_markdown_body_is_exactly_the_note_text(self, tmp_path):
+        backend = _backend(tmp_path)
+        created = asyncio.run(backend.create("arxiv", "2106.09685v2", "pdf", "a note about the ablation study"))
+        export = asyncio.run(backend.export(created.id))
+        assert export.markdown_body == "a note about the ablation study"
+
+    def test_export_frontmatter_carries_every_non_text_field(self, tmp_path):
+        backend = _backend(tmp_path)
+        created = asyncio.run(
+            backend.create("arxiv", "2106.09685v2", "pdf", "a note", tags=["x"], author_name="Dr. Advisor")
+        )
+        export = asyncio.run(backend.export(created.id))
+        assert export.frontmatter["id"] == created.id
+        assert export.frontmatter["provider"] == "arxiv"
+        assert export.frontmatter["canonical_identifier"] == "2106.09685v2"
+        assert export.frontmatter["format"] == "pdf"
+        assert export.frontmatter["tags"] == ["x"]
+        assert export.frontmatter["author_name"] == "Dr. Advisor"
+        assert export.frontmatter["created_at"] == created.created_at
+        assert export.frontmatter["updated_at"] == created.updated_at
+        assert "text" not in export.frontmatter
+
+    def test_export_frontmatter_is_valid_yaml(self, tmp_path):
+        backend = _backend(tmp_path)
+        created = asyncio.run(backend.create("arxiv", "2106.09685v2", "pdf", "a note", tags=["x", "y"]))
+        export = asyncio.run(backend.export(created.id))
+        round_tripped = yaml.safe_load(yaml.safe_dump(export.frontmatter))
+        assert round_tripped["tags"] == ["x", "y"]
