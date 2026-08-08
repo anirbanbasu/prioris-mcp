@@ -88,6 +88,14 @@ class EnvVars:
         default=_default_data_home / "prioris-mcp" / "downloads",
     )
 
+    PRIORIS_MCP_NOTES_DIR = env.path(
+        "PRIORIS_MCP_NOTES_DIR",
+        # Sibling of PRIORIS_MCP_STORAGE_DIR's `downloads`, not inside it - notes are
+        # user-authored, not fetched content. See
+        # docs/requirement-specification/08-notes-storage.md#storage-layout.
+        default=_default_data_home / "prioris-mcp" / "notes",
+    )
+
     PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS = env.float(
         "PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS",
         # Total time a single tool call's rate-limit backoff may spend retrying before giving up
