@@ -14,6 +14,7 @@ from pydantic import TypeAdapter
 
 from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, NoteExport, PagedNotes
 from prioris_mcp.notes.backend import NotesBackend
+from prioris_mcp.notes.search_index import NotesSearchIndex
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS notes (
@@ -56,9 +57,10 @@ def _row_to_note(row: sqlite3.Row) -> Note:
 class SqliteNotesBackend(NotesBackend):
     """SQLite-backed NotesBackend; `notes.sqlite` is the durable source of truth."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, search_index: NotesSearchIndex) -> None:
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._search_index = search_index
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path)
@@ -108,6 +110,7 @@ class SqliteNotesBackend(NotesBackend):
                 )
 
         await to_thread.run_sync(_create)
+        await self._search_index.index_note(note_id, text)
         return Note(
             id=note_id,
             provider=provider,
@@ -161,7 +164,10 @@ class SqliteNotesBackend(NotesBackend):
                 updated_row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
                 return _row_to_note(updated_row)
 
-        return await to_thread.run_sync(_update)
+        updated = await to_thread.run_sync(_update)
+        if text is not None:
+            await self._search_index.index_note(note_id, updated.text)
+        return updated
 
     async def delete(self, note_id: str) -> bool:
         def _delete() -> bool:
@@ -169,7 +175,10 @@ class SqliteNotesBackend(NotesBackend):
                 cursor = conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
                 return cursor.rowcount > 0
 
-        return await to_thread.run_sync(_delete)
+        removed = await to_thread.run_sync(_delete)
+        if removed:
+            await self._search_index.remove_note(note_id)
+        return removed
 
     def _build_search_where_and_params(
         self,
@@ -248,9 +257,6 @@ class SqliteNotesBackend(NotesBackend):
             raise ValueError(
                 "canonical_identifier requires provider — canonical identifiers are only unique within a provider's own scheme"
             )
-        if keyword is not None:
-            raise NotImplementedError  # implemented in Task 8
-
         where, params = self._build_search_where_and_params(
             provider,
             canonical_identifier,
@@ -276,7 +282,33 @@ class SqliteNotesBackend(NotesBackend):
                     notes=notes, offset=offset, limit=limit, total=total, has_more=offset + len(notes) < total
                 )
 
-        return await to_thread.run_sync(_search)
+        if keyword is None:
+            return await to_thread.run_sync(_search)
+
+        matching_ids = await self._search_index.search(keyword)
+
+        def _search_by_ids() -> PagedNotes:
+            if not matching_ids:
+                return PagedNotes(notes=[], offset=offset, limit=limit, total=0, has_more=False)
+            placeholders = ", ".join("?" for _ in matching_ids)
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"SELECT * FROM notes {where} AND id IN ({placeholders})", (*params, *matching_ids)
+                ).fetchall()
+            structurally_matching_ids = {row["id"] for row in rows}
+            by_id = {row["id"]: _row_to_note(row) for row in rows}
+            ordered_ids = [note_id for note_id in matching_ids if note_id in structurally_matching_ids]
+            total = len(ordered_ids)
+            page_ids = ordered_ids[offset : offset + limit]
+            return PagedNotes(
+                notes=[by_id[note_id] for note_id in page_ids],
+                offset=offset,
+                limit=limit,
+                total=total,
+                has_more=offset + len(page_ids) < total,
+            )
+
+        return await to_thread.run_sync(_search_by_ids)
 
     async def export(self, note_id: str) -> NoteExport:
         raise NotImplementedError  # implemented in Task 9
