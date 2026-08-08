@@ -4,7 +4,7 @@ icon: lucide/gauge
 
 # Non-functional requirements
 
-This page covers cross-cutting qualities that apply across capabilities and providers, rather than the behaviour of any one tool — the counterpart to [Functional requirements](03-functional-requirements.md). v1 scopes this to **concurrency**, since it's the one cross-cutting property the SRS so far has been silent on despite it directly constraining the design in [Architecture](01-architecture.md) and [Storage](02-storage.md). Other NFR categories (performance targets, availability, observability, ...) are future work, not addressed yet.
+This page covers cross-cutting qualities that apply across capabilities and providers, rather than the behaviour of any one tool — the counterpart to [Functional requirements](03-functional-requirements.md). v1 scopes this to **concurrency**, since it's the one cross-cutting property the SRS so far has been silent on despite it directly constraining the design in [Architecture](01-architecture.md) and [Storage](storage/01-document-storage.md). Other NFR categories (performance targets, availability, observability, ...) are future work, not addressed yet.
 
 ## Concurrency
 
@@ -40,15 +40,15 @@ For the same reason, every arXiv call goes to `https://export.arxiv.org/api/quer
 
 ### Storage must de-duplicate in-flight work, not just completed work
 
-[Storage → `StorageBackend`](02-storage.md#storagebackend) already de-duplicates *completed* downloads and parses via `exists`. That's insufficient under concurrency: if two calls for the same `(provider, canonical identifier, format, artefact)` key arrive close together, both can observe `exists` as false before either has finished `write`-ing, and both proceed — a duplicate concurrent download (for `fetch_full_text`) or a duplicate concurrent parse (for `parse_full_text`) for the same key.
+[Storage → `StorageBackend`](storage/01-document-storage.md#storagebackend) already de-duplicates *completed* downloads and parses via `exists`. That's insufficient under concurrency: if two calls for the same `(provider, canonical identifier, format, artefact)` key arrive close together, both can observe `exists` as false before either has finished `write`-ing, and both proceed — a duplicate concurrent download (for `fetch_full_text`) or a duplicate concurrent parse (for `parse_full_text`) for the same key.
 
 `StorageBackend` (or the layer calling it) must guarantee that only one fetch and only one parse is ever in flight for a given key at a time: a second concurrent request for a key already being fetched or parsed must wait for that in-flight operation to complete and be served its result, rather than starting a redundant one. This is an in-flight lock, distinct from `exists` (which only reflects already-completed work).
 
 ### Cross-process storage concurrency is bounded by embedded SQLite's topology
 
-The in-flight lock above is process-local (an `asyncio.Lock`): it prevents two concurrent tool calls *within one PriorisMCP process* from racing on the same key, but does nothing for two independent PriorisMCP *processes* sharing the same storage root (e.g. two parallel agent sessions, each launching its own MCP server against the same `PRIORIS_MCP_STORAGE_DIR`). That guarantee instead comes from `catalogue.sqlite`/`manifest.sqlite`/`search.sqlite3`'s own SQLite-level atomicity (unique constraints, `INSERT ... ON CONFLICT`), which holds across any number of local writer processes sharing one properly lock-capable filesystem — see [Storage → Embedded SQLite vs. a client-server database](02-storage.md#embedded-sqlite-vs-a-client-server-database).
+The in-flight lock above is process-local (an `asyncio.Lock`): it prevents two concurrent tool calls *within one PriorisMCP process* from racing on the same key, but does nothing for two independent PriorisMCP *processes* sharing the same storage root (e.g. two parallel agent sessions, each launching its own MCP server against the same `PRIORIS_MCP_STORAGE_DIR`). That guarantee instead comes from `catalogue.sqlite`/`manifest.sqlite`/`search.sqlite3`'s own SQLite-level atomicity (unique constraints, `INSERT ... ON CONFLICT`), which holds across any number of local writer processes sharing one properly lock-capable filesystem — see [Storage → Embedded SQLite vs. a client-server database](storage/01-document-storage.md#embedded-sqlite-vs-a-client-server-database).
 
-This holds only for that topology: any number of writer processes on one machine, sharing one local, non-network-mounted, non-cloud-synced filesystem. A deployment where writer processes can't share a single such filesystem — genuinely different machines or replicas — must use a real client-server database in front of the catalogue/manifest/search roles instead, per the same section of [Storage](02-storage.md#embedded-sqlite-vs-a-client-server-database); that topology is out of scope for v1, which targets single-machine deployment only.
+This holds only for that topology: any number of writer processes on one machine, sharing one local, non-network-mounted, non-cloud-synced filesystem. A deployment where writer processes can't share a single such filesystem — genuinely different machines or replicas — must use a real client-server database in front of the catalogue/manifest/search roles instead, per the same section of [Storage](storage/01-document-storage.md#embedded-sqlite-vs-a-client-server-database); that topology is out of scope for v1, which targets single-machine deployment only.
 
 ## Response size
 

@@ -8,7 +8,7 @@ Alongside its tools, PriorisMCP exposes three read-only MCP resources.
 
 | Resource | Returns |
 |---|---|
-| `research://{provider}/{identifier}/{format}/fulltext` | The persisted full text for that item/format, if present — backed by [`StorageBackend`](requirement-specification/02-storage.md). |
+| `research://{provider}/{identifier}/{format}/fulltext` | The persisted full text for that item/format, if present — backed by [`StorageBackend`](requirement-specification/storage/01-document-storage.md). |
 | `research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}` | One paginated page of the persisted parsed Markdown for that item/format, if present — also backed by `StorageBackend`. |
 | `research://arxiv/categories` | arXiv's queryable category codes and names (e.g. `cs.LG` → "Machine Learning"), sourced live from arXiv's OAI-PMH `ListSets` endpoint and covered by the standard response-cache TTL rather than `StorageBackend`. |
 
@@ -28,4 +28,4 @@ The markdown resource's optional `offset`/`limit` query parameters mirror `parse
 - `research://arxiv/categories` always attempts a live call to arXiv's OAI-PMH endpoint on a cache miss (there's no persisted-content precondition the way there is for `fulltext`/`markdown`) — repeat reads within `PRIORIS_MCP_RESPONSE_CACHE_TTL` are served from the response cache, not re-fetched.
 - There is no per-item metadata resource: metadata is only ever response-cached (see [Tools → Caching and rate limiting](03-tools.md#caching-and-rate-limiting)), never written to `StorageBackend`, so there's no stable location for it the way there is for full text and Markdown.
 
-See [Storage](requirement-specification/02-storage.md) for how `fulltext`/`markdown` content is persisted and keyed, and [Functional requirements → Resources](requirement-specification/03-functional-requirements.md#resources) for the behavioural requirements these implement.
+See [Storage](requirement-specification/storage/01-document-storage.md) for how `fulltext`/`markdown` content is persisted and keyed, and [Functional requirements → Resources](requirement-specification/03-functional-requirements.md#resources) for the behavioural requirements these implement.
