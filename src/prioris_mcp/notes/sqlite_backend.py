@@ -12,7 +12,7 @@ from pathlib import Path
 from anyio import to_thread
 from pydantic import TypeAdapter
 
-from prioris_mcp.models.notes import Anchor, Note, NoteExport, PagedNotes
+from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, NoteExport, PagedNotes
 from prioris_mcp.notes.backend import NotesBackend
 
 _SCHEMA = """
@@ -171,8 +171,112 @@ class SqliteNotesBackend(NotesBackend):
 
         return await to_thread.run_sync(_delete)
 
-    async def search(self, **kwargs) -> PagedNotes:
-        raise NotImplementedError  # implemented in Tasks 7-8
+    def _build_search_where_and_params(
+        self,
+        provider: str | None,
+        canonical_identifier: str | None,
+        format: str | None,
+        date_from: str | None,
+        date_to: str | None,
+        author_filter: AuthorFilter,
+        author_name: str | None,
+        tags_all: list[str] | None,
+        tags_any: list[str] | None,
+        tags_exclude: list[str] | None,
+    ) -> tuple[str, list[str]]:
+        """Build WHERE clause and params list for search query.
+
+        Returns a tuple of (where_clause, params_list).
+        """
+        where = "WHERE 1=1"
+        params: list[str] = []
+        if provider is not None:
+            where += " AND provider = ?"
+            params.append(provider)
+        if canonical_identifier is not None:
+            where += " AND canonical_identifier = ?"
+            params.append(canonical_identifier)
+        if format is not None:
+            where += " AND format = ?"
+            params.append(format)
+        if date_from is not None:
+            where += " AND created_at >= ?"
+            params.append(date_from)
+        if date_to is not None:
+            where += " AND created_at <= ?"
+            params.append(date_to)
+        if author_filter == AuthorFilter.MINE:
+            where += " AND author_name IS NULL"
+        elif author_filter == AuthorFilter.NAMED:
+            where += " AND author_name = ?"
+            params.append(author_name)
+        for tag in tags_all or []:
+            where += " AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value = ?)"
+            params.append(tag)
+        if tags_any:
+            placeholders = ", ".join("?" for _ in tags_any)
+            where += f" AND EXISTS (SELECT 1 FROM json_each(tags) WHERE value IN ({placeholders}))"
+            params.extend(tags_any)
+        if tags_exclude:
+            placeholders = ", ".join("?" for _ in tags_exclude)
+            where += f" AND NOT EXISTS (SELECT 1 FROM json_each(tags) WHERE value IN ({placeholders}))"
+            params.extend(tags_exclude)
+        return where, params
+
+    async def search(
+        self,
+        *,
+        provider: str | None = None,
+        canonical_identifier: str | None = None,
+        format: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        keyword: str | None = None,
+        author_filter: AuthorFilter = AuthorFilter.ANY,
+        author_name: str | None = None,
+        tags_all: list[str] | None = None,
+        tags_any: list[str] | None = None,
+        tags_exclude: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> PagedNotes:
+        if author_filter == AuthorFilter.NAMED and author_name is None:
+            raise ValueError("author_filter=NAMED requires author_name")
+        if author_filter != AuthorFilter.NAMED and author_name is not None:
+            raise ValueError("author_name is only used when author_filter=NAMED")
+        if canonical_identifier is not None and provider is None:
+            raise ValueError(
+                "canonical_identifier requires provider — canonical identifiers are only unique within a provider's own scheme"
+            )
+        if keyword is not None:
+            raise NotImplementedError  # implemented in Task 8
+
+        where, params = self._build_search_where_and_params(
+            provider,
+            canonical_identifier,
+            format,
+            date_from,
+            date_to,
+            author_filter,
+            author_name,
+            tags_all,
+            tags_any,
+            tags_exclude,
+        )
+
+        def _search() -> PagedNotes:
+            with self._connect() as conn:
+                total = conn.execute(f"SELECT COUNT(*) AS n FROM notes {where}", params).fetchone()["n"]
+                rows = conn.execute(
+                    f"SELECT * FROM notes {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    (*params, limit, offset),
+                ).fetchall()
+                notes = [_row_to_note(row) for row in rows]
+                return PagedNotes(
+                    notes=notes, offset=offset, limit=limit, total=total, has_more=offset + len(notes) < total
+                )
+
+        return await to_thread.run_sync(_search)
 
     async def export(self, note_id: str) -> NoteExport:
         raise NotImplementedError  # implemented in Task 9

@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from prioris_mcp.models.notes import Anchor, AnchorLocation
+from prioris_mcp.models.notes import Anchor, AnchorLocation, AuthorFilter
 from prioris_mcp.notes.sqlite_backend import SqliteNotesBackend
 
 
@@ -114,3 +114,115 @@ class TestSqliteNotesBackendDelete:
         assert asyncio.run(backend.delete(created.id)) is True
         with pytest.raises(FileNotFoundError):
             asyncio.run(backend.read(created.id))
+
+
+class TestSqliteNotesBackendSearchStructuredFilters:
+    """Test SqliteNotesBackend.search method with structured filters."""
+
+    def _seed(self, backend):
+        asyncio.run(backend.create("arxiv", "A", "pdf", "note A", author_name=None, tags=["x", "y"]))
+        asyncio.run(backend.create("arxiv", "B", "pdf", "note B", author_name="Dr. Advisor", tags=["x"]))
+        asyncio.run(backend.create("europepmc", "C", "pdf", "note C", author_name=None, tags=["y", "z"]))
+
+    def test_no_filters_returns_everything_newest_first(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        result = asyncio.run(backend.search())
+        assert [n.canonical_identifier for n in result.notes] == ["C", "B", "A"]
+        assert result.total == 3
+        assert result.has_more is False
+
+    def test_provider_filter(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        result = asyncio.run(backend.search(provider="europepmc"))
+        assert [n.canonical_identifier for n in result.notes] == ["C"]
+
+    def test_provider_and_canonical_identifier_filter(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        result = asyncio.run(backend.search(provider="arxiv", canonical_identifier="B"))
+        assert [n.canonical_identifier for n in result.notes] == ["B"]
+
+    def test_canonical_identifier_without_provider_raises(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        with pytest.raises(ValueError, match="provider"):
+            asyncio.run(backend.search(canonical_identifier="B"))
+
+    def test_pagination(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        page = asyncio.run(backend.search(offset=0, limit=2))
+        assert len(page.notes) == 2
+        assert page.total == 3
+        assert page.has_more is True
+        next_page = asyncio.run(backend.search(offset=2, limit=2))
+        assert len(next_page.notes) == 1
+        assert next_page.has_more is False
+
+    def test_author_filter_any_is_default_and_returns_all(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        result = asyncio.run(backend.search())
+        assert len(result.notes) == 3
+
+    def test_author_filter_mine_returns_only_null_author(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        result = asyncio.run(backend.search(author_filter=AuthorFilter.MINE))
+        assert {n.canonical_identifier for n in result.notes} == {"A", "C"}
+
+    def test_author_filter_named_returns_only_that_author(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        result = asyncio.run(backend.search(author_filter=AuthorFilter.NAMED, author_name="Dr. Advisor"))
+        assert {n.canonical_identifier for n in result.notes} == {"B"}
+
+    def test_author_filter_named_without_author_name_raises(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        with pytest.raises(ValueError, match="author_name"):
+            asyncio.run(backend.search(author_filter=AuthorFilter.NAMED))
+
+    def test_author_name_without_named_filter_raises(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        with pytest.raises(ValueError, match="author_name"):
+            asyncio.run(backend.search(author_filter=AuthorFilter.ANY, author_name="Dr. Advisor"))
+
+    def test_tags_all_requires_every_tag(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        result = asyncio.run(backend.search(tags_all=["x", "y"]))
+        assert {n.canonical_identifier for n in result.notes} == {"A"}
+
+    def test_tags_any_requires_at_least_one_tag(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        result = asyncio.run(backend.search(tags_any=["z"]))
+        assert {n.canonical_identifier for n in result.notes} == {"C"}
+
+    def test_tags_exclude_removes_matching_notes(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        result = asyncio.run(backend.search(tags_exclude=["x"]))
+        assert {n.canonical_identifier for n in result.notes} == {"C"}
+
+    def test_format_filter(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        asyncio.run(backend.create("arxiv", "D", "epub", "note D", author_name=None, tags=[]))
+        asyncio.run(backend.create("arxiv", "E", "pdf", "note E", author_name=None, tags=[]))
+        result = asyncio.run(backend.search(format="epub"))
+        assert {n.canonical_identifier for n in result.notes} == {"D"}
+
+    def test_date_range_filters_by_created_at(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        far_future = "2999-01-01T00:00:00+00:00"
+        result = asyncio.run(backend.search(date_from=far_future))
+        assert result.notes == []
+
+    def test_date_to_filter(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        self._seed(backend)
+        far_past = "1970-01-01T00:00:00+00:00"
+        result = asyncio.run(backend.search(date_to=far_past))
+        assert result.notes == []
