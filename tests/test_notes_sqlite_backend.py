@@ -68,3 +68,49 @@ class TestSqliteNotesBackendRead:
         created = asyncio.run(backend.create("arxiv", "2106.09685v2", "pdf", "a note"))
         read_back = asyncio.run(backend.read(created.id))
         assert read_back == created
+
+
+class TestSqliteNotesBackendUpdate:
+    """Test SqliteNotesBackend.update method."""
+
+    def test_update_missing_note_raises_file_not_found(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(backend.update("does-not-exist", text="new text"))
+
+    def test_update_text_bumps_updated_at_but_not_created_at(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        created = asyncio.run(backend.create("arxiv", "2106.09685v2", "pdf", "original text"))
+        updated = asyncio.run(backend.update(created.id, text="revised text"))
+        assert updated.text == "revised text"
+        assert updated.created_at == created.created_at
+        assert updated.updated_at != created.created_at
+
+    def test_update_only_touches_given_fields(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        created = asyncio.run(backend.create("arxiv", "2106.09685v2", "pdf", "text", tags=["a"]))
+        updated = asyncio.run(backend.update(created.id, tags=["a", "b"]))
+        assert updated.text == "text"
+        assert updated.tags == ["a", "b"]
+
+    def test_update_can_clear_anchors_and_metadata_with_empty_values(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        created = asyncio.run(backend.create("arxiv", "2106.09685v2", "pdf", "text", metadata={"k": "v"}))
+        updated = asyncio.run(backend.update(created.id, anchors=[], metadata={}))
+        assert updated.anchors == []
+        assert updated.metadata == {}
+
+
+class TestSqliteNotesBackendDelete:
+    """Test SqliteNotesBackend.delete method."""
+
+    def test_delete_missing_note_returns_false(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        assert asyncio.run(backend.delete("does-not-exist")) is False
+
+    def test_delete_removes_note(self, tmp_path):
+        backend = SqliteNotesBackend(tmp_path / "notes.sqlite")
+        created = asyncio.run(backend.create("arxiv", "2106.09685v2", "pdf", "text"))
+        assert asyncio.run(backend.delete(created.id)) is True
+        with pytest.raises(FileNotFoundError):
+            asyncio.run(backend.read(created.id))

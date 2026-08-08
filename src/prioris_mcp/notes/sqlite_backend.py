@@ -132,11 +132,44 @@ class SqliteNotesBackend(NotesBackend):
 
         return await to_thread.run_sync(_read)
 
-    async def update(self, note_id, *, text=None, anchors=None, tags=None, metadata=None) -> Note:
-        raise NotImplementedError  # implemented in Task 6
+    async def update(
+        self,
+        note_id: str,
+        *,
+        text: str | None = None,
+        anchors: list[Anchor] | None = None,
+        tags: list[str] | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> Note:
+        now = datetime.now(UTC).isoformat()
+
+        def _update() -> Note:
+            with self._connect() as conn:
+                row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+                if row is None:
+                    raise FileNotFoundError(note_id)
+                new_text = text if text is not None else row["text"]
+                new_anchors_json = (
+                    _ANCHOR_LIST_ADAPTER.dump_json(anchors).decode() if anchors is not None else row["anchors"]
+                )
+                new_tags_json = json.dumps(tags) if tags is not None else row["tags"]
+                new_metadata_json = json.dumps(metadata) if metadata is not None else row["metadata"]
+                conn.execute(
+                    "UPDATE notes SET text = ?, anchors = ?, tags = ?, metadata = ?, updated_at = ? WHERE id = ?",
+                    (new_text, new_anchors_json, new_tags_json, new_metadata_json, now, note_id),
+                )
+                updated_row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
+                return _row_to_note(updated_row)
+
+        return await to_thread.run_sync(_update)
 
     async def delete(self, note_id: str) -> bool:
-        raise NotImplementedError  # implemented in Task 6
+        def _delete() -> bool:
+            with self._connect() as conn:
+                cursor = conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+                return cursor.rowcount > 0
+
+        return await to_thread.run_sync(_delete)
 
     async def search(self, **kwargs) -> PagedNotes:
         raise NotImplementedError  # implemented in Tasks 7-8
