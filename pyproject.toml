@@ -52,6 +52,7 @@ docs = [
 test = [
     "coverage>=7.9.1",
     "pytest>=8.4.1",
+    "pyyaml>=6.0.3",
 ]
 
 [tool.ty.rules]

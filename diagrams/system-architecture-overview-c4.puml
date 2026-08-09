@@ -12,6 +12,7 @@ System_Boundary(c1, "PriorisMCP") {
     Container(server, "PriorisMCP server", "Python, FastMCP", "Exposes research_* tools, resources and prompts over MCP")
     ContainerDb(storage, "Storage", "SQLite catalogue and manifest, filesystem", "Persists fetched documents and Markdown")
     ContainerDb(search, "Search index", "SQLite FTS5", "Full-text search over persisted content")
+    ContainerDb(notes, "Notes storage", "SQLite (notes.sqlite + FTS5 notes-search.sqlite3)", "Persists user-authored notes, independent of fetched content")
 }
 
 System_Ext(arxiv, "arXiv", "Research publication API")
@@ -24,6 +25,7 @@ Rel(server, europepmc, "Fetches metadata and full text", "HTTPS")
 Rel(server, ocr, "Delegates PDF OCR", "HTTPS, if OCR_SERVER_URL set")
 Rel(server, storage, "Persists and reads")
 Rel(server, search, "Indexes and queries")
+Rel(server, notes, "Persists and reads")
 
 note right of server
   PDF OCR defaults to local, air-gapped

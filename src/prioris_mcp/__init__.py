@@ -6,6 +6,7 @@ from typing import cast
 from environs import Env
 from marshmallow import ValidationError
 from marshmallow.validate import OneOf, Range
+from rich.console import Console
 from rich.logging import RichHandler
 
 PACKAGE_NAME = "prioris-mcp"
@@ -86,6 +87,14 @@ class EnvVars:
         # Data, not configuration, hence XDG_DATA_HOME (not XDG_CONFIG_HOME) - see
         # docs/requirement-specification/02-storage.md.
         default=_default_data_home / "prioris-mcp" / "downloads",
+    )
+
+    PRIORIS_MCP_NOTES_DIR = env.path(
+        "PRIORIS_MCP_NOTES_DIR",
+        # Sibling of PRIORIS_MCP_STORAGE_DIR's `downloads`, not inside it - notes are
+        # user-authored, not fetched content. See
+        # docs/requirement-specification/storage/02-notes-storage.md#storage-layout.
+        default=_default_data_home / "prioris-mcp" / "notes",
     )
 
     PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS = env.float(
@@ -180,5 +189,8 @@ logging.basicConfig(
     level=EnvVars.PRIORIS_MCP_LOG_LEVEL,
     format="%(message)s",
     datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=False, markup=True, show_path=False, show_time=False)],
+    # stdout is reserved for the JSON-RPC stream under stdio transport; logs must not share it.
+    handlers=[
+        RichHandler(rich_tracebacks=False, markup=True, show_path=False, show_time=False, console=Console(stderr=True))
+    ],
 )

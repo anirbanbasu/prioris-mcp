@@ -18,7 +18,7 @@ The [local filesystem tools](#local-filesystem) and [storage management tools](#
 
 **Resource URIs.** Both `fetch_full_text` and `parse_full_text` return the resource URI templates from [Functional requirements → Resources](03-functional-requirements.md#resources), instantiated for that call, e.g. `research://arxiv/2106.09685v2/pdf/fulltext`, `research://europepmc/MED:26551875/xml/markdown`, or `research://localfile/20260729-1430-a3f2/pdf/fulltext`.
 
-**Pagination.** `parse_full_text` and the `.../markdown` resource template both accept `offset`/`limit` (integers, optional) and return one bounded page of Markdown rather than the whole string — see [Non-functional requirements → Inline text is paginated, not returned whole](04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole). Every `parse_full_text` output below includes `offset`, `limit`, `total_length`, and `has_more` alongside `markdown`, even though the per-tool sections list only `markdown`/`resource_uri` for brevity. `research_arxiv_parse_full_text` (PDF only) and `research_localfile_parse_full_text` (always PDF) additionally accept an optional, 1-indexed `page`, and their output additionally includes `total_pages`/`page_range` — always present in the output schema, `null` for a call that isn't page-aware (e.g. `research_arxiv_parse_full_text` with `format="html"`), since FastMCP derives one static schema per tool and can't conditionally omit a field per call — see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text) and [Storage → Per-document structure](02-storage.md#per-document-structure-manifestsqlite-replaces-structurejsonl).
+**Pagination.** `parse_full_text` and the `.../markdown` resource template both accept `offset`/`limit` (integers, optional) and return one bounded page of Markdown rather than the whole string — see [Non-functional requirements → Inline text is paginated, not returned whole](04-non-functional-requirements.md#inline-text-is-paginated-not-returned-whole). Every `parse_full_text` output below includes `offset`, `limit`, `total_length`, and `has_more` alongside `markdown`, even though the per-tool sections list only `markdown`/`resource_uri` for brevity. `research_arxiv_parse_full_text` (PDF only) and `research_localfile_parse_full_text` (always PDF) additionally accept an optional, 1-indexed `page`, and their output additionally includes `total_pages`/`page_range` — always present in the output schema, `null` for a call that isn't page-aware (e.g. `research_arxiv_parse_full_text` with `format="html"`), since FastMCP derives one static schema per tool and can't conditionally omit a field per call — see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text) and [Storage → Per-document structure](storage/01-document-storage.md#per-document-structure-manifestsqlite-replaces-structurejsonl).
 
 ## arXiv
 
@@ -98,7 +98,7 @@ Every arXiv tool that returns article data (`search`, `list_top_n`, `fetch_metad
 
 **Input:** `arxiv_id` (string, required), `format` (`pdf` \| `html`, required — the already-persisted source format to parse), `offset` (integer, optional, default 0), `limit` (integer, optional, default `PRIORIS_MCP_MAX_INLINE_CHARS`), `page` (integer, optional, 1-indexed — **`pdf` only**).
 
-**Behaviour:** when `page` is given, it's resolved against the [per-document manifest](02-storage.md#per-document-structure-manifestsqlite-replaces-structurejsonl) to that page's starting offset, and `offset` becomes relative to it (default 0) rather than to the document. Passing `page` with `format="html"` fails with `invalid_request` — HTML has no page concept to resolve against.
+**Behaviour:** when `page` is given, it's resolved against the [per-document manifest](storage/01-document-storage.md#per-document-structure-manifestsqlite-replaces-structurejsonl) to that page's starting offset, and `offset` becomes relative to it (default 0) rather than to the document. Passing `page` with `format="html"` fails with `invalid_request` — HTML has no page concept to resolve against.
 
 **Output:** `{"markdown": <string>, "offset": <int>, "limit": <int>, "total_length": <int>, "has_more": <bool>, "total_pages": <int | null>, "page_range": <[int, int] | null — the page(s) the returned slice spans>, "resource_uri": "research://arxiv/{id}/{format}/markdown"}`. `total_pages`/`page_range` are always present in the output schema (FastMCP derives one static schema per tool from its Python return type, so a field can't be conditionally omitted per call) but are `null` for `format="html"`, which has no page concept to resolve against. Returns `not_found` if that `(arxiv_id, format)` hasn't been fetched (see [Architecture → `parse_full_text`](01-architecture.md#parse_full_text) — never triggers a fetch itself).
 
@@ -167,7 +167,7 @@ Europe PMC publishes no numeric rate limit; per [Functional requirements → Eur
 
 ## Local filesystem
 
-**Conventions.** The identifier for this source is the server-assigned **caller-facing identifier** (see [Storage → Caller-facing identifiers](02-storage.md#caller-facing-identifiers-for-sources-without-one)), format `YYYYMMDD-HHmm-XXXX` (minute-resolution timestamp, `-`, 4-character lowercase base-36 random suffix — e.g. `20260729-1430-a3f2`). The caller sends file *content*, base64-encoded, not a server-side path — see [Architecture → Local filesystem source](01-architecture.md#local-filesystem-source) for why: a path is only meaningful if the caller and the server process share a filesystem, which `stdio` transport happens to provide but `streamable-http`/`http` do not.
+**Conventions.** The identifier for this source is the server-assigned **caller-facing identifier** (see [Storage → Caller-facing identifiers](storage/01-document-storage.md#caller-facing-identifiers-for-sources-without-one)), format `YYYYMMDD-HHmm-XXXX` (minute-resolution timestamp, `-`, 4-character lowercase base-36 random suffix — e.g. `20260729-1430-a3f2`). The caller sends file *content*, base64-encoded, not a server-side path — see [Architecture → Local filesystem source](01-architecture.md#local-filesystem-source) for why: a path is only meaningful if the caller and the server process share a filesystem, which `stdio` transport happens to provide but `streamable-http`/`http` do not.
 
 ### `research_localfile_fetch_full_text`
 
@@ -179,9 +179,9 @@ Europe PMC publishes no numeric rate limit; per [Functional requirements → Eur
 2. Decode `content_base64`; fail with `invalid_request` if it isn't valid base64.
 3. Re-check the *decoded* length against `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` and fail with `file_too_large` if it's still over (the encoded-length check in step 1 only bounds the worst case to the nearest multiple of 3 bytes, so this catches the remaining gap).
 4. Sniff the decoded content to confirm it is a PDF (e.g. the `%PDF-` magic prefix); fail with `invalid_request` if it is not, regardless of `filename`'s extension.
-5. Compute the SHA-256 hash of the decoded bytes. Check whether `(provider="localfile", content_hash, format="pdf")` already exists in storage (see [Storage → Content-hash canonicalisation](02-storage.md#content-hash-canonicalisation-for-the-local-filesystem-source)):
+5. Compute the SHA-256 hash of the decoded bytes. Check whether `(provider="localfile", content_hash, format="pdf")` already exists in storage (see [Storage → Content-hash canonicalisation](storage/01-document-storage.md#content-hash-canonicalisation-for-the-local-filesystem-source)):
       - If it exists, reuse the caller-facing identifier already on record for that hash; skip the `write`.
-      - If not, mint a new caller-facing identifier (retrying on the rare catalogue collision — see [Storage → Caller-facing identifiers](02-storage.md#caller-facing-identifiers-for-sources-without-one)), `write` the content, and record the catalogue entry (caller-facing ID, content hash, format, `filename` if given, fetch timestamp, size).
+      - If not, mint a new caller-facing identifier (retrying on the rare catalogue collision — see [Storage → Caller-facing identifiers](storage/01-document-storage.md#caller-facing-identifiers-for-sources-without-one)), `write` the content, and record the catalogue entry (caller-facing ID, content hash, format, `filename` if given, fetch timestamp, size).
 
 **Output:** `{"id": <caller-facing identifier>, "location": <reference>, "format": "pdf", "size_bytes": <int>, "served_from_storage": <bool>, "resource_uri": "research://localfile/{id}/pdf/fulltext"}`.
 
@@ -233,13 +233,13 @@ Kept unchanged in behaviour as the small-file path — no forced migration. It r
 
 **Input:** `provider` (`"arxiv"` \| `"europepmc"` \| `"localfile"`, optional — omitting it lists all providers), `format` (string, optional — further filters within the selected provider(s)).
 
-**Output:** `{"entries": [{"provider": <string>, "identifier": <string>, "format": <string>, "artefact": "document"|"markdown", "fetched_at_or_parsed_at": <ISO 8601 string>, "size_bytes": <int>}, ...]}`, read from `catalogue.sqlite` (see [Storage → The catalogue](02-storage.md#the-catalogue-cataloguesqlite)).
+**Output:** `{"entries": [{"provider": <string>, "identifier": <string>, "format": <string>, "artefact": "document"|"markdown", "fetched_at_or_parsed_at": <ISO 8601 string>, "size_bytes": <int>}, ...]}`, read from `catalogue.sqlite` (see [Storage → The catalogue](storage/01-document-storage.md#the-catalogue-cataloguesqlite)).
 
 ### `research_delete_fetched`
 
 **Input:** `entries` (list of `{"provider": <string>, "identifier": <string>, "format": <string>, "artefact": "document"|"markdown"|"all"}`, required, one or more).
 
-**Behaviour:** removes each matching persisted artefact from `StorageBackend`. `artefact="all"` removes the whole format directory (`document`, `markdown`, any extracted `images/`, `metadata.jsonl`) and that format's rows from the document's shared `manifest.sqlite`; if that was the last format directory for the document, the document-hash directory — including its now-empty `manifest.sqlite` — is removed too (see [Storage → Deletion is per-artefact, not per-format](02-storage.md#deletion-is-per-artefact-not-per-format)). Deleting `artefact="markdown"` or `artefact="all"` also removes any extracted image artefacts and manifest rows anchored to that `markdown`, when [extracted PDF images](#extracted-pdf-images-optional) are enabled. An entry naming a `(provider, identifier, format, artefact)` combination not currently in storage is reported in `not_found`, not treated as a failure of the whole call — the same partial-failure tolerance `research_arxiv_fetch_metadata`/`research_europepmc_fetch_metadata` already have for unrecognised identifiers.
+**Behaviour:** removes each matching persisted artefact from `StorageBackend`. `artefact="all"` removes the whole format directory (`document`, `markdown`, any extracted `images/`, `metadata.jsonl`) and that format's rows from the document's shared `manifest.sqlite`; if that was the last format directory for the document, the document-hash directory — including its now-empty `manifest.sqlite` — is removed too (see [Storage → Deletion is per-artefact, not per-format](storage/01-document-storage.md#deletion-is-per-artefact-not-per-format)). Deleting `artefact="markdown"` or `artefact="all"` also removes any extracted image artefacts and manifest rows anchored to that `markdown`, when [extracted PDF images](#extracted-pdf-images-optional) are enabled. An entry naming a `(provider, identifier, format, artefact)` combination not currently in storage is reported in `not_found`, not treated as a failure of the whole call — the same partial-failure tolerance `research_arxiv_fetch_metadata`/`research_europepmc_fetch_metadata` already have for unrecognised identifiers.
 
 **Does not cascade between artefacts:** deleting `artefact="document"` leaves `markdown` in place, and vice versa — still listed by `research_list_fetched`, still readable, still independently deletable. This preserves the same independent-deletability guarantee the previous flat-format design had (there, expressed as two separately-deletable *formats*, `pdf` and `pdf-markdown`; here as two separately-deletable *artefacts* within one format directory). A caller that wants to fully remove everything stored for a fetch+parse passes `artefact="all"`, or deletes `document` and `markdown` separately.
 
@@ -249,13 +249,61 @@ Kept unchanged in behaviour as the small-file path — no forced migration. It r
 
 **Input:** `query` (string, required — FTS5 query syntax), `provider` (string, optional), `identifier` (string, optional — scopes to one document; requires `provider`), `format` (string, optional).
 
-**Behaviour:** runs `query` against the global FTS5 index via the [`SearchIndex`](01-architecture.md#searchindex) abstraction (see [Storage → Full-text search](02-storage.md#full-text-search-the-searchsqlite3-index)) over persisted chunks — or, for a document with none, its leaves — applying whichever of `provider`/`identifier`/`format` are given as an additional `WHERE` filter alongside `MATCH`. A query can legitimately match both a section and one of its own nested subsections, since every heading-nesting level is indexed as its own row — overlapping matches are expected, not deduplicated. Never triggers a fetch or parse; searching before anything has been persisted simply returns no results, not an error.
+**Behaviour:** runs `query` against the global FTS5 index via the [`SearchIndex`](01-architecture.md#searchindex) abstraction (see [Storage → Full-text search](storage/01-document-storage.md#full-text-search-the-searchsqlite3-index)) over persisted chunks — or, for a document with none, its leaves — applying whichever of `provider`/`identifier`/`format` are given as an additional `WHERE` filter alongside `MATCH`. A query can legitimately match both a section and one of its own nested subsections, since every heading-nesting level is indexed as its own row — overlapping matches are expected, not deduplicated. Never triggers a fetch or parse; searching before anything has been persisted simply returns no results, not an error.
 
 **Output:** `{"matches": [{"provider": <string>, "identifier": <string>, "format": <string>, "snippet": <string>, "offset": <int>, "score": <float>}, ...]}`, ranked by FTS5's `bm25()` (most relevant first). `offset` is the matched entry's `span_start` in the document's own coordinate space, not an FTS5-internal offset — a caller can pass it straight to `parse_full_text`'s `offset` parameter to re-fetch surrounding context.
 
+## Notes
+
+**v2** — see [SRS overview → Scope](index.md#v2), [Architecture → `NotesBackend`](01-architecture.md#notesbackend), and [Notes storage](storage/02-notes-storage.md). No upstream API to ground against — this is a PriorisMCP design decision, like [local filesystem](#local-filesystem) and [storage management](#storage-management) above.
+
+**Conventions.** `anchors` is `list[Anchor]`: `{"location": {"page_number": <int|null>, "section_heading": <string|null>, "paragraph_index": <int|null>} | null, "selectors": {"exact_text_quote": <string|null>, "prefix_context": <string|null>, "suffix_context": <string|null>} | null}` — an entry with both `location` and `selectors` absent, or all-null within them, fails with `invalid_request` (`Anchor`'s own Pydantic validation, before the call reaches `NotesBackend`). `tags` is `list[str]`. `metadata` is `dict[str, str] | null`, opaque — never validated or interpreted beyond being a string-to-string mapping. A note's full shape (`Note` in `models/notes.py`): `{"id": <string>, "provider": <string>, "canonical_identifier": <string>, "format": <string|null>, "text": <string>, "anchors": [<Anchor>, ...], "author_name": <string|null>, "tags": [<string>, ...], "metadata": <object|null>, "created_at": <ISO 8601 string>, "updated_at": <ISO 8601 string>}`.
+
+### `research_notes_create`
+
+**Input:** `provider` (`"arxiv"` \| `"europepmc"` \| `"localfile"`, required), `identifier` (string, required — provider-native, not yet canonicalised), `format` (string, optional — omit for a note predating any fetch), `text` (string, required), `anchors` (list of `Anchor`, optional, default `[]`), `author_name` (string, optional, default `null` — `null` means self), `tags` (list of strings, optional, default `[]`), `metadata` (object of string keys/values, optional, default `null`).
+
+**Behaviour:** resolves `identifier` to its canonical/pinned form via the owning provider's own `resolve_identifier` before persisting (skipped when `format` is omitted) — see [Notes storage → `NotesBackend`](storage/02-notes-storage.md#notesbackend). For `provider="localfile"`, `identifier` is used as-is (already a stable, server-assigned caller-facing id — see [Storage → Caller-facing identifiers](storage/01-document-storage.md#caller-facing-identifiers-for-sources-without-one); `LocalFileProvider` has no `resolve_identifier` to call). Fails with `invalid_request` if `provider` isn't one of the three above, or if any `anchors` entry is fully empty.
+
+**Output:** the created `Note` (see [Conventions](#conventions) above).
+
+### `research_notes_read`
+
+**Input:** `note_id` (string, required — an id returned by `research_notes_create`).
+
+**Output:** the matching `Note`, or fails with `not_found` if no note has this id.
+
+### `research_notes_update`
+
+**Input:** `note_id` (string, required), `text`/`anchors`/`tags`/`metadata` (each optional; a field left unset is unchanged — there is no way to distinguish "unset" from "explicitly cleared" for `text`, but `anchors: []`/`tags: []`/`metadata: {}` are valid, distinct-from-unset ways to clear those three).
+
+**Behaviour:** `provider`/`canonical_identifier`/`format`/`author_name` cannot be changed by this tool.
+
+**Output:** the updated `Note`, or fails with `not_found` if `note_id` doesn't exist.
+
+### `research_notes_delete`
+
+**Input:** `note_id` (string, required).
+
+**Output:** `true` if a note was found and removed, `false` if it was already absent — never an error for an absent id.
+
+### `research_notes_search`
+
+**Input:** `provider` (string, optional), `canonical_identifier` (string, optional), `format` (string, optional), `date_from`/`date_to` (ISO 8601 string, optional — filters on `created_at`), `keyword` (string, optional — matched against `text` only), `author_filter` (`"any"` \| `"mine"` \| `"named"`, optional, default `"any"`), `author_name` (string, optional — only meaningful with `author_filter="named"`), `tags_all`/`tags_any`/`tags_exclude` (list of strings, each optional, default `[]` — must-have-every / must-have-at-least-one / must-have-none), `offset` (integer, optional, default 0), `limit` (integer, optional, default 50).
+
+**Behaviour:** every filter is optional; no filters at all returns every note, paginated. `canonical_identifier` given without `provider` fails with `invalid_request` — see [Notes storage → `search`](storage/02-notes-storage.md#search-is-structured-filtering-plus-optional-keyword-matching) for why. `author_filter="named"` without `author_name` (or `author_name` given with any other `author_filter`) fails with `invalid_request`. Default order is `created_at` descending (most recent first); a `keyword` orders by relevance instead. Never triggers a fetch or parse.
+
+**Output:** `{"notes": [<Note>, ...], "offset": <int>, "limit": <int>, "total": <int>, "has_more": <bool>}`.
+
+### `notes://{note_id}/export` (resource)
+
+**v2.** See [Notes storage → Export](storage/02-notes-storage.md#export) and [Security → Notes export does not write files](05-security.md#notes-export-does-not-write-files) for why this is a resource, not a tool.
+
+**Output:** `{"suggested_filename": <string>, "frontmatter": <object — every Note field except text>, "markdown_body": <string — exactly the note's text>}`, JSON-serialised (`.model_dump_json()`) — resource templates, unlike tools, don't auto-serialise a returned Pydantic model into resource content, same as `.../markdown` and `research://arxiv/categories` above. Reading an id that doesn't exist is a plain not-found, same as `research://{provider}/{identifier}/{format}/fulltext` above.
+
 ## Extracted PDF images (optional)
 
-Off by default, gated by `PRIORIS_MCP_PDF_EXTRACT_IMAGES` (see [Storage → Future: extracted PDF images](02-storage.md#future-extracted-pdf-images) and [Functional requirements → Extracted PDF images](03-functional-requirements.md#extracted-pdf-images-optional)). When enabled, each extracted image becomes readable as its own MCP resource; the exact URI template is not yet decided — it must not leak filesystem paths (see [Security → Extracted PDF image resources must not leak filesystem paths](05-security.md#extracted-pdf-image-resources-must-not-leak-filesystem-paths)) — and is left open for when this capability is actually implemented, rather than pinned down speculatively here. `research_delete_fetched`'s cascade behaviour for image artefacts is already specified above.
+Off by default, gated by `PRIORIS_MCP_PDF_EXTRACT_IMAGES` (see [Storage → Future: extracted PDF images](storage/01-document-storage.md#future-extracted-pdf-images) and [Functional requirements → Extracted PDF images](03-functional-requirements.md#extracted-pdf-images-optional)). When enabled, each extracted image becomes readable as its own MCP resource; the exact URI template is not yet decided — it must not leak filesystem paths (see [Security → Extracted PDF image resources must not leak filesystem paths](05-security.md#extracted-pdf-image-resources-must-not-leak-filesystem-paths)) — and is left open for when this capability is actually implemented, rather than pinned down speculatively here. `research_delete_fetched`'s cascade behaviour for image artefacts is already specified above.
 
 ## `research_resolve_identifier`
 

@@ -21,10 +21,11 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 from prioris_mcp import PACKAGE_NAME, EnvVars
-from prioris_mcp.errors import InvalidRequestError
+from prioris_mcp.errors import InvalidRequestError, NotFoundError
 from prioris_mcp.middleware import (
     DecodeBinaryResourceContentMiddleware,
     EncodeBinaryResourceContentMiddleware,
+    NotesCacheBypassMiddleware,
     ResponseMetadataMiddleware,
     StripUnknownArgumentsMiddleware,
 )
@@ -43,6 +44,10 @@ from prioris_mcp.models.common import (
 )
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
+from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, PagedNotes
+from prioris_mcp.notes.backend import NotesBackend
+from prioris_mcp.notes.search_index import NotesSearchIndex, SqliteFts5NotesSearchIndex
+from prioris_mcp.notes.sqlite_backend import SqliteNotesBackend
 from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.html_to_markdown_backend import HtmlToMarkdownBackend
 from prioris_mcp.parsers.jats_xslt import JatsXsltMarkdownBackend
@@ -129,6 +134,15 @@ class PriorisMCP(MCPMixin):
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
         {"fn": "research_search_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
+        {"fn": "research_notes_create", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
+        {"fn": "research_notes_read", "tags": ["research", "notes"], "annotations": {"readOnlyHint": True}},
+        {"fn": "research_notes_update", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
+        {
+            "fn": "research_notes_delete",
+            "tags": ["research", "notes"],
+            "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        },
+        {"fn": "research_notes_search", "tags": ["research", "notes"], "annotations": {"readOnlyHint": True}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -138,6 +152,7 @@ class PriorisMCP(MCPMixin):
             "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
         },
         {"fn": "read_arxiv_categories_resource", "uri": "research://arxiv/categories"},
+        {"fn": "read_notes_export_resource", "uri": "notes://{note_id}/export"},
     ]
 
     def __init__(self) -> None:
@@ -193,6 +208,12 @@ class PriorisMCP(MCPMixin):
                 max_total_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES,
                 max_concurrent=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS,
             ),
+        )
+        self._notes_search_index: NotesSearchIndex = SqliteFts5NotesSearchIndex(
+            EnvVars.PRIORIS_MCP_NOTES_DIR / "notes-search.sqlite3"
+        )
+        self._notes_backend: NotesBackend = SqliteNotesBackend(
+            EnvVars.PRIORIS_MCP_NOTES_DIR / "notes.sqlite", self._notes_search_index
         )
 
     async def research_arxiv_search(
@@ -446,6 +467,104 @@ class PriorisMCP(MCPMixin):
             raise InvalidRequestError(f"invalid search query: {exc}") from exc
         return SearchFetchedResult(matches=[SearchMatch(**match) for match in matches])
 
+    async def research_notes_create(
+        self,
+        ctx: Context,
+        provider: Annotated[Literal["arxiv", "europepmc", "localfile"], Field(description="Owning provider")],
+        identifier: Annotated[str, Field(description="Provider-native identifier; canonicalised before storing")],
+        format: Annotated[str | None, Field(default=None, description="Omit for a note predating any fetch")] = None,
+        author_name: Annotated[str | None, Field(default=None, description="Null means self")] = None,
+        metadata: Annotated[dict[str, str] | None, Field(default=None, description="Caller-owned, opaque")] = None,
+        *,
+        anchors: Annotated[list[Anchor], Field(default_factory=list, description="Unresolved positional hints")],
+        tags: Annotated[list[str], Field(default_factory=list)],
+        text: Annotated[str, Field(description="Free-form Markdown - the note itself")],
+    ) -> Note:
+        """Create a new user-authored note against a document, or against a bare identifier."""
+        canonical_identifier = await self._resolve_canonical_identifier_for_notes(provider, identifier, format)
+        return await self._notes_backend.create(
+            provider,
+            canonical_identifier,
+            format,
+            text,
+            anchors=anchors,
+            author_name=author_name,
+            tags=tags,
+            metadata=metadata,
+        )
+
+    async def research_notes_read(
+        self, ctx: Context, note_id: Annotated[str, Field(description="A note id returned by research_notes_create")]
+    ) -> Note:
+        """Read a single note by id."""
+        try:
+            return await self._notes_backend.read(note_id)
+        except FileNotFoundError as exc:
+            raise NotFoundError(str(exc)) from exc
+
+    async def research_notes_update(
+        self,
+        ctx: Context,
+        note_id: Annotated[str, Field(description="A note id returned by research_notes_create")],
+        text: Annotated[str | None, Field(default=None)] = None,
+        anchors: Annotated[list[Anchor] | None, Field(default=None)] = None,
+        tags: Annotated[list[str] | None, Field(default=None)] = None,
+        metadata: Annotated[dict[str, str] | None, Field(default=None)] = None,
+    ) -> Note:
+        """Partially edit an existing note; fields left as None are unchanged."""
+        try:
+            return await self._notes_backend.update(note_id, text=text, anchors=anchors, tags=tags, metadata=metadata)
+        except FileNotFoundError as exc:
+            raise NotFoundError(str(exc)) from exc
+
+    async def research_notes_delete(
+        self, ctx: Context, note_id: Annotated[str, Field(description="A note id returned by research_notes_create")]
+    ) -> bool:
+        """Delete a note by id. Returns False, not an error, if it's already absent."""
+        return await self._notes_backend.delete(note_id)
+
+    async def research_notes_search(
+        self,
+        ctx: Context,
+        provider: Annotated[Literal["arxiv", "europepmc", "localfile"] | None, Field(default=None)] = None,
+        canonical_identifier: Annotated[str | None, Field(default=None)] = None,
+        format: Annotated[str | None, Field(default=None)] = None,
+        date_from: Annotated[str | None, Field(default=None, description="ISO 8601")] = None,
+        date_to: Annotated[str | None, Field(default=None, description="ISO 8601")] = None,
+        keyword: Annotated[str | None, Field(default=None, description="FTS5 query syntax over note text")] = None,
+        author_filter: Annotated[AuthorFilter, Field(default=AuthorFilter.ANY)] = AuthorFilter.ANY,
+        author_name: Annotated[
+            str | None, Field(default=None, description="Only used when author_filter=named")
+        ] = None,
+        *,
+        tags_all: Annotated[list[str], Field(default_factory=list)],
+        tags_any: Annotated[list[str], Field(default_factory=list)],
+        tags_exclude: Annotated[list[str], Field(default_factory=list)],
+        offset: Annotated[int, Field(default=0)] = 0,
+        limit: Annotated[int, Field(default=50)] = 50,
+    ) -> PagedNotes:
+        """Search/list notes; no filters at all returns everything, paged, newest first."""
+        try:
+            return await self._notes_backend.search(
+                provider=provider,
+                canonical_identifier=canonical_identifier,
+                format=format,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                author_filter=author_filter,
+                author_name=author_name,
+                tags_all=tags_all,
+                tags_any=tags_any,
+                tags_exclude=tags_exclude,
+                offset=offset,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+        except sqlite3.OperationalError as exc:
+            raise InvalidRequestError(f"invalid search query: {exc}") from exc
+
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []
         not_found: list[DeleteEntryRef] = []
@@ -470,6 +589,31 @@ class PriorisMCP(MCPMixin):
         if canonical is None:
             raise FileNotFoundError(identifier)
         return canonical
+
+    async def _resolve_canonical_identifier_for_notes(self, provider: str, identifier: str, format: str | None) -> str:
+        """Pin `identifier` to its canonical form for a new/updated note.
+
+        When `format` is given, delegates to the owning provider's own `resolve_identifier`
+        (arXiv/Europe PMC) and takes its `.identifier`, mirroring `StorageBackend`'s own
+        canonicalisation - this keeps a note pointed at the same storage-key identifier a fetched
+        artefact would end up under. `localfile` notes use the given identifier as-is: it's
+        already a stable, server-assigned caller-facing ID, not something `LocalFileProvider` can
+        re-resolve (it doesn't implement `resolve_identifier` at all). When `format` is `None` -
+        a note that predates any fetch - resolution is skipped entirely and the given identifier
+        is stored as-is, since there is no fetched artefact whose storage-key stability this needs
+        to protect yet.
+        """
+        if format is None:
+            return identifier
+        if provider == "arxiv":
+            resolved = await self._arxiv_provider.resolve_identifier(identifier, format)
+            return resolved.identifier
+        if provider == "europepmc":
+            resolved = await self._europepmc_provider.resolve_identifier(identifier, format)
+            return resolved.identifier
+        if provider == "localfile":
+            return identifier
+        raise InvalidRequestError(f"unrecognised provider: {provider!r}")
 
     async def read_fulltext_resource(self, provider: str, identifier: str, format: str) -> bytes:
         """Read persisted full text for (provider, identifier, format); a plain not-found if absent."""
@@ -540,6 +684,16 @@ class PriorisMCP(MCPMixin):
         """
         return (await self._arxiv_provider.list_categories()).model_dump_json()
 
+    async def read_notes_export_resource(self, note_id: str) -> str:
+        """Read one note's file representation, for the caller to write to disk itself.
+
+        Returns the `NoteExport` serialised to JSON - see `read_markdown_resource` for why.
+        `frontmatter` is a plain JSON object, not pre-rendered YAML - the caller renders it into
+        whatever frontmatter dialect its target tool expects before writing `markdown_body` to a
+        file.
+        """
+        return (await self._notes_backend.export(note_id)).model_dump_json()
+
 
 def app() -> FastMCP:  # pragma: no cover
     """Create and configure the FastMCP application instance."""
@@ -552,6 +706,10 @@ def app() -> FastMCP:  # pragma: no cover
     mcp_obj = PriorisMCP()
     app_with_features = mcp_obj.register_features(app)
     app_with_features.add_middleware(StripUnknownArgumentsMiddleware())
+    # NotesCacheBypassMiddleware runs before the Encode/Decode sandwich below and fully bypasses
+    # it for notes:// URIs, dispatching straight to the resource handler with run_middleware=False
+    # so mutable note content is never read from - or written to - the response cache.
+    app_with_features.add_middleware(NotesCacheBypassMiddleware())
     # Encode/DecodeBinaryResourceContentMiddleware sandwich ResponseCachingMiddleware: fastmcp's
     # cache wrapper JSON-serialises via Pydantic, whose default bytes encoding is a UTF-8 decode -
     # it crashes on non-UTF-8-safe resource content (e.g. a fetched PDF's fulltext resource).

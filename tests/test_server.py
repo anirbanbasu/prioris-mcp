@@ -11,6 +11,7 @@ from fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import McpError
 
 from prioris_mcp import EnvVars
+from prioris_mcp.errors import InvalidRequestError
 from prioris_mcp.models.arxiv import ArxivCategoriesResult, ArxivCategory
 from prioris_mcp.models.common import ArxivResolvedIdentifierResult, MarkdownPage
 from prioris_mcp.server import PriorisMCP
@@ -151,6 +152,80 @@ class TestMCPServer:
         assert upload_sessions._ttl_seconds == 42.0
         assert upload_sessions._max_chunk_bytes == 4096
         assert upload_sessions._max_concurrent == 3
+
+
+class TestNotesBackendWiring:
+    """Tests for the NotesBackend/NotesSearchIndex wiring in `PriorisMCP.__init__`."""
+
+    def test_notes_backend_and_search_index_are_constructed(self):
+        server = PriorisMCP()
+        assert server._notes_backend is not None
+        assert server._notes_search_index is not None
+
+    def test_resolve_canonical_identifier_arxiv_pinned_id_needs_no_network_call(self):
+        """A version-pinned id short-circuits ArxivProvider.resolve_identifier's own network path.
+
+        The `_is_version_pinned` check means this exercises real resolution without mocking HTTP -
+        mirrors tests/test_providers_arxiv.py::TestArxivProviderResolveIdentifier's own convention
+        of using a genuinely unmocked call for the version-pinned case.
+        """
+        server = PriorisMCP()
+        canonical = asyncio.run(server._resolve_canonical_identifier_for_notes("arxiv", "2106.09685v2", "pdf"))
+        assert canonical == "2106.09685v2"
+
+    def test_resolve_canonical_identifier_europepmc_delegates_to_provider_resolve_identifier(self):
+        """The europepmc branch always makes a network call, unlike arXiv's version-pinned shortcut.
+
+        `EuropePmcProvider.resolve_identifier` always calls `fetch_metadata`, so this stubs the
+        HTTP client the same way `TestEuropePmcTools._server_and_client` does elsewhere in this
+        file, rather than hitting the network.
+        """
+        import json
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=json.dumps(
+                    {
+                        "hitCount": 1,
+                        "resultList": {
+                            "result": [
+                                {
+                                    "id": "26551875",
+                                    "source": "MED",
+                                    "pmid": "26551875",
+                                    "pmcid": "PMC4767193",
+                                    "title": "A Paper",
+                                    "inEPMC": "Y",
+                                }
+                            ]
+                        },
+                    }
+                ).encode("utf-8"),
+            )
+
+        server = PriorisMCP()
+        server._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        server._europepmc_provider._http_client = server._http_client
+        canonical = asyncio.run(server._resolve_canonical_identifier_for_notes("europepmc", "MED:26551875", "xml"))
+        assert canonical == "PMC:4767193"
+
+    def test_resolve_canonical_identifier_localfile_passes_through_unchanged(self):
+        server = PriorisMCP()
+        canonical = asyncio.run(
+            server._resolve_canonical_identifier_for_notes("localfile", "20260729-1430-a3f2", "pdf")
+        )
+        assert canonical == "20260729-1430-a3f2"
+
+    def test_resolve_canonical_identifier_skips_resolution_when_format_is_none(self):
+        server = PriorisMCP()
+        canonical = asyncio.run(server._resolve_canonical_identifier_for_notes("arxiv", "2106.09685", None))
+        assert canonical == "2106.09685"
+
+    def test_resolve_canonical_identifier_rejects_unknown_provider(self):
+        server = PriorisMCP()
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(server._resolve_canonical_identifier_for_notes("not-a-real-provider", "x", "pdf"))
 
 
 class TestArxivTools:
@@ -473,11 +548,12 @@ class TestArxivTools:
         with pytest.raises(McpError):
             asyncio.run(scenario())
 
-    def test_exactly_two_resource_templates_are_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
-        """No metadata resource exists.
+    def test_expected_resource_templates_are_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        """Verify that research and notes resource templates are registered.
 
-        Only the fulltext/markdown templates documented in
-        docs/requirement-specification/06-interface-specification.md#resources are registered.
+        Fulltext/markdown for research documents (documented in
+        docs/requirement-specification/06-interface-specification.md#resources), and notes
+        export.
         """
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -493,6 +569,7 @@ class TestArxivTools:
         assert {t.uriTemplate for t in templates} == {
             "research://{provider}/{identifier}/{format}/fulltext",
             "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
+            "notes://{note_id}/export",
         }
 
     def test_greet_tool_no_longer_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
@@ -1493,4 +1570,354 @@ class TestResearchSearchFetched:
                 return await client.call_tool("research_search_fetched", arguments={"query": "C++"})
 
         with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+
+class TestResearchNotesCreate:
+    """End-to-end MCP tool tests for research_notes_create."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_creates_note_and_returns_it(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "20260729-1430-a3f2",
+                        "format": "pdf",
+                        "text": "a note about the ablation study",
+                    },
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["text"] == "a note about the ablation study"
+        assert result.structured_content["provider"] == "localfile"
+        assert result.structured_content["canonical_identifier"] == "20260729-1430-a3f2"
+
+    def test_rejects_empty_anchor(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "20260729-1430-a3f2",
+                        "format": "pdf",
+                        "text": "a note",
+                        "anchors": [{}],
+                    },
+                )
+
+        with pytest.raises(ToolError, match="location or selectors"):
+            asyncio.run(scenario())
+
+
+class TestResearchNotesRead:
+    """End-to-end MCP tool tests for research_notes_read."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_reads_created_note(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-1",
+                        "format": "pdf",
+                        "text": "a note",
+                    },
+                )
+                note_id = created.structured_content["id"]
+                result = await client.call_tool("research_notes_read", arguments={"note_id": note_id})
+                return result
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["text"] == "a note"
+
+    def test_read_missing_note_raises(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_read", arguments={"note_id": "does-not-exist"})
+
+        with pytest.raises(ToolError, match="note not found: 'does-not-exist'"):
+            asyncio.run(scenario())
+
+
+class TestResearchNotesUpdate:
+    """End-to-end MCP tool tests for research_notes_update."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_updates_text(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-1",
+                        "format": "pdf",
+                        "text": "original",
+                    },
+                )
+                note_id = created.structured_content["id"]
+                result = await client.call_tool(
+                    "research_notes_update",
+                    arguments={"note_id": note_id, "text": "revised"},
+                )
+                return result
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["text"] == "revised"
+
+    def test_update_missing_note_raises(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_update",
+                    arguments={"note_id": "does-not-exist", "text": "x"},
+                )
+
+        with pytest.raises(ToolError, match="note not found: 'does-not-exist'"):
+            asyncio.run(scenario())
+
+
+class TestResearchNotesDelete:
+    """End-to-end MCP tool tests for research_notes_delete."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_deletes_existing_note(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-1",
+                        "format": "pdf",
+                        "text": "a note",
+                    },
+                )
+                note_id = created.structured_content["id"]
+                result = await client.call_tool("research_notes_delete", arguments={"note_id": note_id})
+                return result
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"] is True
+
+    def test_delete_missing_note_returns_false(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_delete", arguments={"note_id": "does-not-exist"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"] is False
+
+
+class TestResearchNotesSearch:
+    """End-to-end MCP tool tests for research_notes_search."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_no_filters_lists_everything(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-1",
+                        "format": "pdf",
+                        "text": "note 1",
+                    },
+                )
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-2",
+                        "format": "pdf",
+                        "text": "note 2",
+                    },
+                )
+                return await client.call_tool("research_notes_search", arguments={})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["total"] == 2
+
+    def test_keyword_filters_by_text(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-3",
+                        "format": "pdf",
+                        "text": "mentions latency specifically",
+                    },
+                )
+                return await client.call_tool("research_notes_search", arguments={"keyword": "latency"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["total"] >= 1
+
+    def test_author_filter_named_without_author_name_is_a_tool_error(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"author_filter": "named"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_canonical_identifier_without_provider_is_a_tool_error(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"canonical_identifier": "id-1"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_malformed_fts5_keyword_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"keyword": "AND"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_invalid_date_from_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"date_from": "not-a-date"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+
+class TestNotesExportResource:
+    """End-to-end MCP resource tests for notes://{note_id}/export."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_export_resource_returns_note_export_shape(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-1",
+                        "format": "pdf",
+                        "text": "a note about the ablation study",
+                        "tags": ["methodology"],
+                    },
+                )
+                note_id = created.structured_content["id"]
+                result = await client.read_resource(f"notes://{note_id}/export")
+                import json
+
+                payload = json.loads(result[0].text)
+                assert payload["suggested_filename"] == f"{note_id}.md"
+                assert payload["markdown_body"] == "a note about the ablation study"
+                assert payload["frontmatter"]["tags"] == ["methodology"]
+                return True
+
+        assert asyncio.run(scenario())
+
+    def test_export_resource_missing_note_is_not_found(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.read_resource("notes://does-not-exist/export")
+
+        with pytest.raises(McpError):
             asyncio.run(scenario())

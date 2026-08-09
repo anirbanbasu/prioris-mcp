@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [unreleased]
 
+### Added
+
+- `research_notes_create`/`research_notes_read`/`research_notes_update`/`research_notes_delete`: CRUD for user-authored notes against a document, or against a bare identifier predating any fetch, backed by a pluggable `NotesBackend` (SQLite in v1).
+- `research_notes_search`: structured filtering (provider, canonical identifier, format, date range, author, tags) plus optional FTS5 keyword search over note text, paged and returned newest first.
+- `notes://{note_id}/export`: a read-only resource returning a note's file representation (`suggested_filename`, `frontmatter`, `markdown_body`) for the caller to write to disk itself; never served from the response cache, since notes are mutable.
+- `PRIORIS_MCP_NOTES_DIR`: environment variable controlling where the notes SQLite databases are persisted, a sibling of `PRIORIS_MCP_STORAGE_DIR`'s `downloads`.
+
 ## [0.1.1] - 2026-08-07
 
 ### Added

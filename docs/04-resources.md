@@ -4,13 +4,14 @@ icon: lucide/folder-open
 
 # Resources
 
-Alongside its tools, PriorisMCP exposes three read-only MCP resources.
+Alongside its tools, PriorisMCP exposes four read-only MCP resources.
 
 | Resource | Returns |
 |---|---|
-| `research://{provider}/{identifier}/{format}/fulltext` | The persisted full text for that item/format, if present — backed by [`StorageBackend`](requirement-specification/02-storage.md). |
+| `research://{provider}/{identifier}/{format}/fulltext` | The persisted full text for that item/format, if present — backed by [`StorageBackend`](requirement-specification/storage/01-document-storage.md). |
 | `research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}` | One paginated page of the persisted parsed Markdown for that item/format, if present — also backed by `StorageBackend`. |
 | `research://arxiv/categories` | arXiv's queryable category codes and names (e.g. `cs.LG` → "Machine Learning"), sourced live from arXiv's OAI-PMH `ListSets` endpoint and covered by the standard response-cache TTL rather than `StorageBackend`. |
+| `notes://{note_id}/export` | That note's file representation — a `NoteExport` (JSON, not YAML frontmatter) with `suggested_filename`, `frontmatter` (every `Note` field except `text`), and `markdown_body` (exactly the note's own `text`) — backed by [`NotesBackend`](requirement-specification/storage/02-notes-storage.md). |
 
 `{provider}` is `arxiv` or `europepmc`; `{identifier}` is the *canonical* identifier (version-pinned for arXiv, `PMC:{pmcid}` for Europe PMC) that the corresponding `fetch_full_text`/`parse_full_text` call resolved to — not necessarily the identifier originally passed to that call; `{format}` is the source format (`pdf`, `html`, `xml`).
 
@@ -27,5 +28,6 @@ The markdown resource's optional `offset`/`limit` query parameters mirror `parse
 - Reading `fulltext` or `markdown` **never** triggers a fetch or a parse — reading one that doesn't exist yet is a plain not-found, not an error requiring special handling. Call the corresponding tool (see [Tools](03-tools.md)) first.
 - `research://arxiv/categories` always attempts a live call to arXiv's OAI-PMH endpoint on a cache miss (there's no persisted-content precondition the way there is for `fulltext`/`markdown`) — repeat reads within `PRIORIS_MCP_RESPONSE_CACHE_TTL` are served from the response cache, not re-fetched.
 - There is no per-item metadata resource: metadata is only ever response-cached (see [Tools → Caching and rate limiting](03-tools.md#caching-and-rate-limiting)), never written to `StorageBackend`, so there's no stable location for it the way there is for full text and Markdown.
+- `notes://{note_id}/export` never writes anything to disk itself — it hands the caller a `NoteExport`, and the caller is responsible for writing `frontmatter`/`markdown_body` to a file if it wants one; see [Security → Notes export does not write files](requirement-specification/05-security.md#notes-export-does-not-write-files). Unlike the other three resources above, it is **never** served from the response cache, because notes are mutable (create/update/delete) — see [Tools → Caching and rate limiting](03-tools.md#caching-and-rate-limiting) for why, and `NotesCacheBypassMiddleware` for the mechanism.
 
-See [Storage](requirement-specification/02-storage.md) for how `fulltext`/`markdown` content is persisted and keyed, and [Functional requirements → Resources](requirement-specification/03-functional-requirements.md#resources) for the behavioural requirements these implement.
+See [Storage](requirement-specification/storage/01-document-storage.md) for how `fulltext`/`markdown` content is persisted and keyed, and [Functional requirements → Resources](requirement-specification/03-functional-requirements.md#resources) for the behavioural requirements these implement.

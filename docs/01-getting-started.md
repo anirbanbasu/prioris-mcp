@@ -143,7 +143,7 @@ This will generate something like the following output (exact statement count gr
 ```bash
 Name    Stmts   Miss    Cover   Missing
 ---------------------------------------
-TOTAL     696      0  100.00%
+TOTAL    1775      0  100.00%
 ```
 
 See the [Contributing guide](https://github.com/anirbanbasu/prioris-mcp/blob/master/CONTRIBUTING.md) for the full development workflow.
