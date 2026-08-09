@@ -688,6 +688,9 @@ class PriorisMCP(MCPMixin):
         """Read one note's file representation, for the caller to write to disk itself.
 
         Returns the `NoteExport` serialised to JSON - see `read_markdown_resource` for why.
+        `frontmatter` is a plain JSON object, not pre-rendered YAML - the caller renders it into
+        whatever frontmatter dialect its target tool expects before writing `markdown_body` to a
+        file.
         """
         return (await self._notes_backend.export(note_id)).model_dump_json()
 

@@ -92,7 +92,17 @@ class NoteExport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     suggested_filename: Annotated[str, Field(..., strict=True)]
-    frontmatter: Annotated[dict, Field(..., description="Every Note field except text, as a plain dict.")]
+    frontmatter: Annotated[
+        dict,
+        Field(
+            ...,
+            description=(
+                "Every Note field except text, as a plain dict - not pre-rendered YAML. The "
+                "caller renders this into whatever frontmatter dialect its target tool expects "
+                "(e.g. YAML for an Obsidian vault) before writing markdown_body to a file."
+            ),
+        ),
+    ]
     markdown_body: Annotated[str, Field(..., strict=True, description="Exactly the note's own text field.")]
 
 
