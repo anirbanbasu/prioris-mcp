@@ -136,6 +136,11 @@ class PriorisMCP(MCPMixin):
         {"fn": "research_notes_create", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
         {"fn": "research_notes_read", "tags": ["research", "notes"], "annotations": {"readOnlyHint": True}},
         {"fn": "research_notes_update", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
+        {
+            "fn": "research_notes_delete",
+            "tags": ["research", "notes"],
+            "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        },
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -508,6 +513,12 @@ class PriorisMCP(MCPMixin):
             return await self._notes_backend.update(note_id, text=text, anchors=anchors, tags=tags, metadata=metadata)
         except FileNotFoundError as exc:
             raise NotFoundError(str(exc)) from exc
+
+    async def research_notes_delete(
+        self, ctx: Context, note_id: Annotated[str, Field(description="A note id returned by research_notes_create")]
+    ) -> bool:
+        """Delete a note by id. Returns False, not an error, if it's already absent."""
+        return await self._notes_backend.delete(note_id)
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []

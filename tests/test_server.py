@@ -1718,3 +1718,48 @@ class TestResearchNotesUpdate:
 
         with pytest.raises(ToolError):
             asyncio.run(scenario())
+
+
+class TestResearchNotesDelete:
+    """End-to-end MCP tool tests for research_notes_delete."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_deletes_existing_note(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-1",
+                        "format": "pdf",
+                        "text": "a note",
+                    },
+                )
+                note_id = created.structured_content["id"]
+                result = await client.call_tool("research_notes_delete", arguments={"note_id": note_id})
+                return result
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"] is True
+
+    def test_delete_missing_note_returns_false(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_delete", arguments={"note_id": "does-not-exist"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"] is False
