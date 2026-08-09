@@ -43,7 +43,7 @@ from prioris_mcp.models.common import (
 )
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
-from prioris_mcp.models.notes import Anchor, Note
+from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, PagedNotes
 from prioris_mcp.notes.backend import NotesBackend
 from prioris_mcp.notes.search_index import NotesSearchIndex, SqliteFts5NotesSearchIndex
 from prioris_mcp.notes.sqlite_backend import SqliteNotesBackend
@@ -141,6 +141,7 @@ class PriorisMCP(MCPMixin):
             "tags": ["research", "notes"],
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
+        {"fn": "research_notes_search", "tags": ["research", "notes"], "annotations": {"readOnlyHint": True}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -519,6 +520,46 @@ class PriorisMCP(MCPMixin):
     ) -> bool:
         """Delete a note by id. Returns False, not an error, if it's already absent."""
         return await self._notes_backend.delete(note_id)
+
+    async def research_notes_search(
+        self,
+        ctx: Context,
+        provider: Annotated[Literal["arxiv", "europepmc", "localfile"] | None, Field(default=None)] = None,
+        canonical_identifier: Annotated[str | None, Field(default=None)] = None,
+        format: Annotated[str | None, Field(default=None)] = None,
+        date_from: Annotated[str | None, Field(default=None, description="ISO 8601")] = None,
+        date_to: Annotated[str | None, Field(default=None, description="ISO 8601")] = None,
+        keyword: Annotated[str | None, Field(default=None, description="FTS5 query syntax over note text")] = None,
+        author_filter: Annotated[AuthorFilter, Field(default=AuthorFilter.ANY)] = AuthorFilter.ANY,
+        author_name: Annotated[
+            str | None, Field(default=None, description="Only used when author_filter=named")
+        ] = None,
+        *,
+        tags_all: Annotated[list[str], Field(default_factory=list)],
+        tags_any: Annotated[list[str], Field(default_factory=list)],
+        tags_exclude: Annotated[list[str], Field(default_factory=list)],
+        offset: Annotated[int, Field(default=0)] = 0,
+        limit: Annotated[int, Field(default=50)] = 50,
+    ) -> PagedNotes:
+        """Search/list notes; no filters at all returns everything, paged, newest first."""
+        try:
+            return await self._notes_backend.search(
+                provider=provider,
+                canonical_identifier=canonical_identifier,
+                format=format,
+                date_from=date_from,
+                date_to=date_to,
+                keyword=keyword,
+                author_filter=author_filter,
+                author_name=author_name,
+                tags_all=tags_all,
+                tags_any=tags_any,
+                tags_exclude=tags_exclude,
+                offset=offset,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from exc
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []

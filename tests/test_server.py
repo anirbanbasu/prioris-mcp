@@ -1763,3 +1763,88 @@ class TestResearchNotesDelete:
 
         result = asyncio.run(scenario())
         assert result.structured_content["result"] is False
+
+
+class TestResearchNotesSearch:
+    """End-to-end MCP tool tests for research_notes_search."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_no_filters_lists_everything(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-1",
+                        "format": "pdf",
+                        "text": "note 1",
+                    },
+                )
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-2",
+                        "format": "pdf",
+                        "text": "note 2",
+                    },
+                )
+                return await client.call_tool("research_notes_search", arguments={})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["total"] == 2
+
+    def test_keyword_filters_by_text(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-3",
+                        "format": "pdf",
+                        "text": "mentions latency specifically",
+                    },
+                )
+                return await client.call_tool("research_notes_search", arguments={"keyword": "latency"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["total"] >= 1
+
+    def test_author_filter_named_without_author_name_is_a_tool_error(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"author_filter": "named"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_canonical_identifier_without_provider_is_a_tool_error(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"canonical_identifier": "id-1"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
