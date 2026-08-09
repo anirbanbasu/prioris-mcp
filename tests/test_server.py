@@ -1569,3 +1569,56 @@ class TestResearchSearchFetched:
 
         with pytest.raises(ToolError):
             asyncio.run(scenario())
+
+
+class TestResearchNotesCreate:
+    """End-to-end MCP tool tests for research_notes_create."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_creates_note_and_returns_it(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "20260729-1430-a3f2",
+                        "format": "pdf",
+                        "text": "a note about the ablation study",
+                    },
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["text"] == "a note about the ablation study"
+        assert result.structured_content["provider"] == "localfile"
+        assert result.structured_content["canonical_identifier"] == "20260729-1430-a3f2"
+
+    def test_rejects_empty_anchor(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "20260729-1430-a3f2",
+                        "format": "pdf",
+                        "text": "a note",
+                        "anchors": [{}],
+                    },
+                )
+
+        with pytest.raises(ToolError, match="location or selectors"):
+            asyncio.run(scenario())

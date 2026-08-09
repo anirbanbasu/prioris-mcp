@@ -43,6 +43,7 @@ from prioris_mcp.models.common import (
 )
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
+from prioris_mcp.models.notes import Anchor, Note
 from prioris_mcp.notes.backend import NotesBackend
 from prioris_mcp.notes.search_index import NotesSearchIndex, SqliteFts5NotesSearchIndex
 from prioris_mcp.notes.sqlite_backend import SqliteNotesBackend
@@ -132,6 +133,7 @@ class PriorisMCP(MCPMixin):
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
         {"fn": "research_search_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
+        {"fn": "research_notes_create", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -454,6 +456,32 @@ class PriorisMCP(MCPMixin):
         except sqlite3.OperationalError as exc:
             raise InvalidRequestError(f"invalid search query: {exc}") from exc
         return SearchFetchedResult(matches=[SearchMatch(**match) for match in matches])
+
+    async def research_notes_create(
+        self,
+        ctx: Context,
+        provider: Annotated[Literal["arxiv", "europepmc", "localfile"], Field(description="Owning provider")],
+        identifier: Annotated[str, Field(description="Provider-native identifier; canonicalised before storing")],
+        format: Annotated[str | None, Field(default=None, description="Omit for a note predating any fetch")] = None,
+        author_name: Annotated[str | None, Field(default=None, description="Null means self")] = None,
+        metadata: Annotated[dict[str, str] | None, Field(default=None, description="Caller-owned, opaque")] = None,
+        *,
+        anchors: Annotated[list[Anchor], Field(default_factory=list, description="Unresolved positional hints")],
+        tags: Annotated[list[str], Field(default_factory=list)],
+        text: Annotated[str, Field(description="Free-form Markdown - the note itself")],
+    ) -> Note:
+        """Create a new user-authored note against a document, or against a bare identifier."""
+        canonical_identifier = await self._resolve_canonical_identifier_for_notes(provider, identifier, format)
+        return await self._notes_backend.create(
+            provider,
+            canonical_identifier,
+            format,
+            text,
+            anchors=anchors,
+            author_name=author_name,
+            tags=tags,
+            metadata=metadata,
+        )
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []
