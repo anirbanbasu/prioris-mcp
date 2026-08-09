@@ -4,6 +4,8 @@ icon: lucide/sticky-note
 
 # Notes storage
 
+![Notes storage layout for PriorisMCP](../../images/notes-storage-overview.svg)
+
 **v2** — see [SRS overview → Scope](../index.md#v2) and [Architecture → `NotesBackend`](../01-architecture.md#notesbackend) for why this is a new abstraction, not an extension of [`StorageBackend`](01-document-storage.md#storagebackend).
 
 ## Purpose

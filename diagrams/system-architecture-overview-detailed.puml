@@ -24,10 +24,16 @@ actor "MCP client\ne.g. Claude, an IDE" as Client
 rectangle "PriorisMCP server" as PriorisMCP {
     rectangle "Middleware chain" as MW {
         component "StripUnknown-\nArgumentsMiddleware" as MW1
-        component "ResponseCaching-\nMiddleware" as MW2
-        component "ResponseMetadata-\nMiddleware" as MW3
+        component "NotesCacheBypass-\nMiddleware" as MW2
+        component "DecodeBinaryResource-\nContentMiddleware" as MW3
+        component "ResponseCaching-\nMiddleware" as MW4
+        component "EncodeBinaryResource-\nContentMiddleware" as MW5
+        component "ResponseMetadata-\nMiddleware" as MW6
         MW1 --> MW2
         MW2 --> MW3
+        MW3 --> MW4
+        MW4 --> MW5
+        MW5 --> MW6
     }
 
     component "Tools / resources / prompts\n(MCPMixin-registered)" as Core
@@ -52,8 +58,14 @@ rectangle "PriorisMCP server" as PriorisMCP {
         database "SqliteFts5SearchIndex" as Search
     }
 
+    rectangle "Notes" as Notes {
+        database "SqliteNotesBackend\nnotes.sqlite - source of truth" as NotesDb
+        database "SqliteFts5NotesSearchIndex\nnotes-search.sqlite3" as NotesSearch
+    }
+
     MW --> Core
     Core --> Router
+    Core --> NotesDb : research_notes_* /\nnotes://{note_id}/export
     Router --> Arxiv
     Router --> EuropePmc
     Router --> LocalFile
@@ -67,6 +79,7 @@ rectangle "PriorisMCP server" as PriorisMCP {
     Jats --> FS
     FS --> Catalogue
     FS --> Search
+    NotesDb --> NotesSearch : index_note / remove_note\non create / update / delete
 }
 
 database "arXiv API" as ArxivApi

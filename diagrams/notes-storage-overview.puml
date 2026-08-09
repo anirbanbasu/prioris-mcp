@@ -1,0 +1,55 @@
+@startuml notes-storage-overview
+skinparam defaultFontName "Inter"
+skinparam backgroundColor white
+skinparam rectangle {
+    RoundCorner 8
+    BackgroundColor White
+    BorderColor #666666
+}
+skinparam component {
+    BackgroundColor #E8F1FB
+    BorderColor #3C7FC0
+}
+skinparam interface {
+    BackgroundColor #FFF3CD
+    BorderColor #B8952E
+}
+skinparam database {
+    BackgroundColor #999999
+    BorderColor #8A8A8A
+    FontColor White
+}
+skinparam folder {
+    BackgroundColor #F5F5F5
+    BorderColor #999999
+}
+skinparam artifact {
+    BackgroundColor White
+    BorderColor #999999
+}
+skinparam arrow {
+    Color #666666
+}
+
+interface "NotesBackend\ncreate / read / update / delete / search / export" as NotesBackend
+interface "NotesSearchIndex\nindex_note / remove_note / search" as NotesSearchIndex
+
+component "SqliteNotesBackend\n(v1, only implementation)" as NotesImpl
+component "SqliteFts5NotesSearchIndex\n(v1, only implementation)" as NotesSearchImpl
+
+NotesImpl ..|> NotesBackend
+NotesSearchImpl ..|> NotesSearchIndex
+NotesBackend -[hidden]-> NotesSearchIndex
+NotesImpl -[hidden]-> NotesSearchImpl
+
+rectangle "$XDG_DATA_HOME/prioris-mcp/notes/" as Root {
+    database "notes.sqlite\ndurable, source of truth -\nthe notes table" as NotesDb
+    database "notes-search.sqlite3\ndisposable FTS5 cache,\nrebuildable from notes.sqlite" as NotesSearchDb
+    NotesDb -[hidden]-> NotesSearchDb
+}
+
+NotesImpl --> NotesDb : create / read / update /\ndelete / search
+NotesImpl --> NotesSearchImpl : index_note / remove_note / search\ndirect calls, not a derived read
+NotesSearchImpl --> NotesSearchDb : index_note / remove_note / search
+
+@enduml
