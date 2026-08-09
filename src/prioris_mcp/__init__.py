@@ -6,6 +6,7 @@ from typing import cast
 from environs import Env
 from marshmallow import ValidationError
 from marshmallow.validate import OneOf, Range
+from rich.console import Console
 from rich.logging import RichHandler
 
 PACKAGE_NAME = "prioris-mcp"
@@ -188,5 +189,8 @@ logging.basicConfig(
     level=EnvVars.PRIORIS_MCP_LOG_LEVEL,
     format="%(message)s",
     datefmt="[%X]",
-    handlers=[RichHandler(rich_tracebacks=False, markup=True, show_path=False, show_time=False)],
+    # stdout is reserved for the JSON-RPC stream under stdio transport; logs must not share it.
+    handlers=[
+        RichHandler(rich_tracebacks=False, markup=True, show_path=False, show_time=False, console=Console(stderr=True))
+    ],
 )
