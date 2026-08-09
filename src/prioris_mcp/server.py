@@ -151,6 +151,7 @@ class PriorisMCP(MCPMixin):
             "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
         },
         {"fn": "read_arxiv_categories_resource", "uri": "research://arxiv/categories"},
+        {"fn": "read_notes_export_resource", "uri": "notes://{note_id}/export"},
     ]
 
     def __init__(self) -> None:
@@ -679,6 +680,13 @@ class PriorisMCP(MCPMixin):
         Returns the `ArxivCategoriesResult` serialised to JSON - see `read_markdown_resource` for why.
         """
         return (await self._arxiv_provider.list_categories()).model_dump_json()
+
+    async def read_notes_export_resource(self, note_id: str) -> str:
+        """Read one note's file representation, for the caller to write to disk itself.
+
+        Returns the `NoteExport` serialised to JSON - see `read_markdown_resource` for why.
+        """
+        return (await self._notes_backend.export(note_id)).model_dump_json()
 
 
 def app() -> FastMCP:  # pragma: no cover

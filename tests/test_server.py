@@ -548,11 +548,12 @@ class TestArxivTools:
         with pytest.raises(McpError):
             asyncio.run(scenario())
 
-    def test_exactly_two_resource_templates_are_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
-        """No metadata resource exists.
+    def test_expected_resource_templates_are_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
+        """Verify that research and notes resource templates are registered.
 
-        Only the fulltext/markdown templates documented in
-        docs/requirement-specification/06-interface-specification.md#resources are registered.
+        Fulltext/markdown for research documents (documented in
+        docs/requirement-specification/06-interface-specification.md#resources), and notes
+        export.
         """
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -568,6 +569,7 @@ class TestArxivTools:
         assert {t.uriTemplate for t in templates} == {
             "research://{provider}/{identifier}/{format}/fulltext",
             "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
+            "notes://{note_id}/export",
         }
 
     def test_greet_tool_no_longer_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
@@ -1847,4 +1849,55 @@ class TestResearchNotesSearch:
                 return await client.call_tool("research_notes_search", arguments={"canonical_identifier": "id-1"})
 
         with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+
+class TestNotesExportResource:
+    """End-to-end MCP resource tests for notes://{note_id}/export."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        storage_dir = tmp_path / "storage"
+        notes_dir = tmp_path / "notes"
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", storage_dir)
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", notes_dir)
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_export_resource_returns_note_export_shape(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-1",
+                        "format": "pdf",
+                        "text": "a note about the ablation study",
+                        "tags": ["methodology"],
+                    },
+                )
+                note_id = created.structured_content["id"]
+                result = await client.read_resource(f"notes://{note_id}/export")
+                import json
+
+                payload = json.loads(result[0].text)
+                assert payload["suggested_filename"] == f"{note_id}.md"
+                assert payload["markdown_body"] == "a note about the ablation study"
+                assert payload["frontmatter"]["tags"] == ["methodology"]
+                return True
+
+        assert asyncio.run(scenario())
+
+    def test_export_resource_missing_note_is_not_found(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                await client.read_resource("notes://does-not-exist/export")
+
+        with pytest.raises(McpError):
             asyncio.run(scenario())
