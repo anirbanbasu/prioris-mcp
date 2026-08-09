@@ -21,7 +21,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 from prioris_mcp import PACKAGE_NAME, EnvVars
-from prioris_mcp.errors import InvalidRequestError
+from prioris_mcp.errors import InvalidRequestError, NotFoundError
 from prioris_mcp.middleware import (
     DecodeBinaryResourceContentMiddleware,
     EncodeBinaryResourceContentMiddleware,
@@ -134,6 +134,7 @@ class PriorisMCP(MCPMixin):
         },
         {"fn": "research_search_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
         {"fn": "research_notes_create", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
+        {"fn": "research_notes_read", "tags": ["research", "notes"], "annotations": {"readOnlyHint": True}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -482,6 +483,15 @@ class PriorisMCP(MCPMixin):
             tags=tags,
             metadata=metadata,
         )
+
+    async def research_notes_read(
+        self, ctx: Context, note_id: Annotated[str, Field(description="A note id returned by research_notes_create")]
+    ) -> Note:
+        """Read a single note by id."""
+        try:
+            return await self._notes_backend.read(note_id)
+        except FileNotFoundError as exc:
+            raise NotFoundError(str(exc)) from exc
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []
