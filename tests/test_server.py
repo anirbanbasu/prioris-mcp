@@ -1667,7 +1667,7 @@ class TestResearchNotesRead:
             async with client:
                 return await client.call_tool("research_notes_read", arguments={"note_id": "does-not-exist"})
 
-        with pytest.raises(ToolError):
+        with pytest.raises(ToolError, match="note not found: 'does-not-exist'"):
             asyncio.run(scenario())
 
 
@@ -1718,7 +1718,7 @@ class TestResearchNotesUpdate:
                     arguments={"note_id": "does-not-exist", "text": "x"},
                 )
 
-        with pytest.raises(ToolError):
+        with pytest.raises(ToolError, match="note not found: 'does-not-exist'"):
             asyncio.run(scenario())
 
 

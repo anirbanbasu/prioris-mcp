@@ -151,7 +151,7 @@ class SqliteNotesBackend(NotesBackend):
             with self._connect() as conn:
                 row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
                 if row is None:
-                    raise FileNotFoundError(note_id)
+                    raise FileNotFoundError(f"note not found: {note_id!r}")
                 return _row_to_note(row)
 
         return await to_thread.run_sync(_read)
@@ -171,7 +171,7 @@ class SqliteNotesBackend(NotesBackend):
             with self._connect() as conn:
                 row = conn.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
                 if row is None:
-                    raise FileNotFoundError(note_id)
+                    raise FileNotFoundError(f"note not found: {note_id!r}")
                 new_text = text if text is not None else row["text"]
                 new_anchors_json = (
                     _ANCHOR_LIST_ADAPTER.dump_json(anchors).decode() if anchors is not None else row["anchors"]

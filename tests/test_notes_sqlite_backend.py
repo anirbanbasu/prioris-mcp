@@ -67,7 +67,7 @@ class TestSqliteNotesBackendRead:
 
     def test_read_missing_note_raises_file_not_found(self, tmp_path):
         backend = _backend(tmp_path)
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError, match="note not found: 'does-not-exist'"):
             asyncio.run(backend.read("does-not-exist"))
 
     def test_read_returns_created_note(self, tmp_path):
@@ -82,7 +82,7 @@ class TestSqliteNotesBackendUpdate:
 
     def test_update_missing_note_raises_file_not_found(self, tmp_path):
         backend = _backend(tmp_path)
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(FileNotFoundError, match="note not found: 'does-not-exist'"):
             asyncio.run(backend.update("does-not-exist", text="new text"))
 
     def test_update_text_bumps_updated_at_but_not_created_at(self, tmp_path):
