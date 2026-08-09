@@ -11,6 +11,7 @@ from fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import McpError
 
 from prioris_mcp import EnvVars
+from prioris_mcp.errors import InvalidRequestError
 from prioris_mcp.models.arxiv import ArxivCategoriesResult, ArxivCategory
 from prioris_mcp.models.common import ArxivResolvedIdentifierResult, MarkdownPage
 from prioris_mcp.server import PriorisMCP
@@ -151,6 +152,80 @@ class TestMCPServer:
         assert upload_sessions._ttl_seconds == 42.0
         assert upload_sessions._max_chunk_bytes == 4096
         assert upload_sessions._max_concurrent == 3
+
+
+class TestNotesBackendWiring:
+    """Tests for the NotesBackend/NotesSearchIndex wiring in `PriorisMCP.__init__`."""
+
+    def test_notes_backend_and_search_index_are_constructed(self):
+        server = PriorisMCP()
+        assert server._notes_backend is not None
+        assert server._notes_search_index is not None
+
+    def test_resolve_canonical_identifier_arxiv_pinned_id_needs_no_network_call(self):
+        """A version-pinned id short-circuits ArxivProvider.resolve_identifier's own network path.
+
+        The `_is_version_pinned` check means this exercises real resolution without mocking HTTP -
+        mirrors tests/test_providers_arxiv.py::TestArxivProviderResolveIdentifier's own convention
+        of using a genuinely unmocked call for the version-pinned case.
+        """
+        server = PriorisMCP()
+        canonical = asyncio.run(server._resolve_canonical_identifier_for_notes("arxiv", "2106.09685v2", "pdf"))
+        assert canonical == "2106.09685v2"
+
+    def test_resolve_canonical_identifier_europepmc_delegates_to_provider_resolve_identifier(self):
+        """The europepmc branch always makes a network call, unlike arXiv's version-pinned shortcut.
+
+        `EuropePmcProvider.resolve_identifier` always calls `fetch_metadata`, so this stubs the
+        HTTP client the same way `TestEuropePmcTools._server_and_client` does elsewhere in this
+        file, rather than hitting the network.
+        """
+        import json
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=json.dumps(
+                    {
+                        "hitCount": 1,
+                        "resultList": {
+                            "result": [
+                                {
+                                    "id": "26551875",
+                                    "source": "MED",
+                                    "pmid": "26551875",
+                                    "pmcid": "PMC4767193",
+                                    "title": "A Paper",
+                                    "inEPMC": "Y",
+                                }
+                            ]
+                        },
+                    }
+                ).encode("utf-8"),
+            )
+
+        server = PriorisMCP()
+        server._http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        server._europepmc_provider._http_client = server._http_client
+        canonical = asyncio.run(server._resolve_canonical_identifier_for_notes("europepmc", "MED:26551875", "xml"))
+        assert canonical == "PMC:4767193"
+
+    def test_resolve_canonical_identifier_localfile_passes_through_unchanged(self):
+        server = PriorisMCP()
+        canonical = asyncio.run(
+            server._resolve_canonical_identifier_for_notes("localfile", "20260729-1430-a3f2", "pdf")
+        )
+        assert canonical == "20260729-1430-a3f2"
+
+    def test_resolve_canonical_identifier_skips_resolution_when_format_is_none(self):
+        server = PriorisMCP()
+        canonical = asyncio.run(server._resolve_canonical_identifier_for_notes("arxiv", "2106.09685", None))
+        assert canonical == "2106.09685"
+
+    def test_resolve_canonical_identifier_rejects_unknown_provider(self):
+        server = PriorisMCP()
+        with pytest.raises(InvalidRequestError):
+            asyncio.run(server._resolve_canonical_identifier_for_notes("not-a-real-provider", "x", "pdf"))
 
 
 class TestArxivTools:

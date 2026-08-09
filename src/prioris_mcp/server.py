@@ -43,6 +43,9 @@ from prioris_mcp.models.common import (
 )
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
+from prioris_mcp.notes.backend import NotesBackend
+from prioris_mcp.notes.search_index import NotesSearchIndex, SqliteFts5NotesSearchIndex
+from prioris_mcp.notes.sqlite_backend import SqliteNotesBackend
 from prioris_mcp.pagination import paginate_text
 from prioris_mcp.parsers.html_to_markdown_backend import HtmlToMarkdownBackend
 from prioris_mcp.parsers.jats_xslt import JatsXsltMarkdownBackend
@@ -193,6 +196,12 @@ class PriorisMCP(MCPMixin):
                 max_total_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES,
                 max_concurrent=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS,
             ),
+        )
+        self._notes_search_index: NotesSearchIndex = SqliteFts5NotesSearchIndex(
+            EnvVars.PRIORIS_MCP_NOTES_DIR / "notes-search.sqlite3"
+        )
+        self._notes_backend: NotesBackend = SqliteNotesBackend(
+            EnvVars.PRIORIS_MCP_NOTES_DIR / "notes.sqlite", self._notes_search_index
         )
 
     async def research_arxiv_search(
@@ -470,6 +479,31 @@ class PriorisMCP(MCPMixin):
         if canonical is None:
             raise FileNotFoundError(identifier)
         return canonical
+
+    async def _resolve_canonical_identifier_for_notes(self, provider: str, identifier: str, format: str | None) -> str:
+        """Pin `identifier` to its canonical form for a new/updated note.
+
+        When `format` is given, delegates to the owning provider's own `resolve_identifier`
+        (arXiv/Europe PMC) and takes its `.identifier`, mirroring `StorageBackend`'s own
+        canonicalisation - this keeps a note pointed at the same storage-key identifier a fetched
+        artefact would end up under. `localfile` notes use the given identifier as-is: it's
+        already a stable, server-assigned caller-facing ID, not something `LocalFileProvider` can
+        re-resolve (it doesn't implement `resolve_identifier` at all). When `format` is `None` -
+        a note that predates any fetch - resolution is skipped entirely and the given identifier
+        is stored as-is, since there is no fetched artefact whose storage-key stability this needs
+        to protect yet.
+        """
+        if format is None:
+            return identifier
+        if provider == "arxiv":
+            resolved = await self._arxiv_provider.resolve_identifier(identifier, format)
+            return resolved.identifier
+        if provider == "europepmc":
+            resolved = await self._europepmc_provider.resolve_identifier(identifier, format)
+            return resolved.identifier
+        if provider == "localfile":
+            return identifier
+        raise InvalidRequestError(f"unrecognised provider: {provider!r}")
 
     async def read_fulltext_resource(self, provider: str, identifier: str, format: str) -> bytes:
         """Read persisted full text for (provider, identifier, format); a plain not-found if absent."""
