@@ -135,6 +135,7 @@ class PriorisMCP(MCPMixin):
         {"fn": "research_search_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
         {"fn": "research_notes_create", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
         {"fn": "research_notes_read", "tags": ["research", "notes"], "annotations": {"readOnlyHint": True}},
+        {"fn": "research_notes_update", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -490,6 +491,21 @@ class PriorisMCP(MCPMixin):
         """Read a single note by id."""
         try:
             return await self._notes_backend.read(note_id)
+        except FileNotFoundError as exc:
+            raise NotFoundError(str(exc)) from exc
+
+    async def research_notes_update(
+        self,
+        ctx: Context,
+        note_id: Annotated[str, Field(description="A note id returned by research_notes_create")],
+        text: Annotated[str | None, Field(default=None)] = None,
+        anchors: Annotated[list[Anchor] | None, Field(default=None)] = None,
+        tags: Annotated[list[str] | None, Field(default=None)] = None,
+        metadata: Annotated[dict[str, str] | None, Field(default=None)] = None,
+    ) -> Note:
+        """Partially edit an existing note; fields left as None are unchanged."""
+        try:
+            return await self._notes_backend.update(note_id, text=text, anchors=anchors, tags=tags, metadata=metadata)
         except FileNotFoundError as exc:
             raise NotFoundError(str(exc)) from exc
 
