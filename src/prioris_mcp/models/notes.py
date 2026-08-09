@@ -1,6 +1,6 @@
 """Pydantic models for NotesBackend and its MCP tool surface.
 
-See docs/requirement-specification/08-notes-storage.md#data-model.
+See docs/requirement-specification/storage/02-notes-storage.md#data-model.
 """
 
 from enum import StrEnum
@@ -40,7 +40,7 @@ class AnchorSelectors(BaseModel):
 class Anchor(BaseModel):
     """One unresolved, unenforced positional hint on a note.
 
-    See docs/requirement-specification/08-notes-storage.md#anchors-unresolved-positional-hints-not-pointers.
+    See docs/requirement-specification/storage/02-notes-storage.md#anchors-unresolved-positional-hints-not-pointers.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -60,7 +60,7 @@ class Anchor(BaseModel):
 class AuthorFilter(StrEnum):
     """Tri-state author filter for `NotesBackend.search` - a nullable string can't express this.
 
-    See docs/requirement-specification/08-notes-storage.md#search-is-structured-filtering-plus-optional-keyword-matching.
+    See docs/requirement-specification/storage/02-notes-storage.md#search-is-structured-filtering-plus-optional-keyword-matching.
     """
 
     ANY = "any"

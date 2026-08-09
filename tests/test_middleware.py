@@ -1,15 +1,19 @@
 import asyncio
 import base64
+import json
 import logging
+from pathlib import Path
 
 import httpx
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.server.middleware.caching import ReadResourceSettings, ResponseCachingMiddleware
 
+from prioris_mcp import EnvVars
 from prioris_mcp.middleware import (
     DecodeBinaryResourceContentMiddleware,
     EncodeBinaryResourceContentMiddleware,
+    NotesCacheBypassMiddleware,
     ResponseMetadataMiddleware,
     StripUnknownArgumentsMiddleware,
 )
@@ -297,6 +301,86 @@ startxref
         first_read, second_read = asyncio.run(scenario())
         assert "Hello World" in first_read[0].text
         assert first_read[0].text == second_read[0].text
+
+
+class TestNotesCacheBypassMiddleware:
+    """Dedicated test class for NotesCacheBypassMiddleware.
+
+    Needs an isolated notes/storage directory (unlike `_stubbed_mcp_obj()`'s bare `PriorisMCP()`,
+    which would hit the real default `~/.local/share/prioris-mcp/`), so this mirrors
+    `TestResearchNotesCreate._server_and_client` in test_server.py, additionally wiring up the
+    middleware chain under test: NotesCacheBypassMiddleware before a real (enabled)
+    ResponseCachingMiddleware, matching server.py's app() ordering.
+    """
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        server_with_features.add_middleware(NotesCacheBypassMiddleware())
+        server_with_features.add_middleware(
+            ResponseCachingMiddleware(read_resource_settings=ReadResourceSettings(ttl=3600, enabled=True))
+        )
+        return Client(transport=server_with_features, timeout=60)
+
+    def test_notes_export_resource_is_never_served_from_cache(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """Create -> read export -> update -> read export again must reflect the update.
+
+        Without the bypass, ResponseCachingMiddleware would serve the second read from its cache,
+        returning the pre-update `markdown_body` instead of the current one.
+        """
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "localfile",
+                        "identifier": "id-1",
+                        "format": "pdf",
+                        "text": "original text",
+                    },
+                )
+                note_id = created.structured_content["id"]
+                uri = f"notes://{note_id}/export"
+                first_read = await client.read_resource(uri)
+                await client.call_tool("research_notes_update", arguments={"note_id": note_id, "text": "updated text"})
+                second_read = await client.read_resource(uri)
+                return first_read, second_read
+
+        first_read, second_read = asyncio.run(scenario())
+        first_payload = json.loads(first_read[0].text)
+        second_payload = json.loads(second_read[0].text)
+        assert first_payload["markdown_body"] == "original text"
+        assert second_payload["markdown_body"] == "updated text"
+
+    def test_on_read_resource_passes_non_notes_uris_through_to_call_next(self):
+        """The bypass is scoped to notes:// - every other URI must still reach call_next unchanged.
+
+        Inspects the middleware's on_read_resource logic directly, rather than round-tripping
+        through a second live resource type, since a non-notes resource isn't available in this
+        minimal, notes-only harness without overcomplicating the setup.
+        """
+        middleware = NotesCacheBypassMiddleware()
+        calls: list[object] = []
+
+        class _StubMessage:
+            uri = "research://arxiv/categories"
+
+        class _StubContext:
+            message = _StubMessage()
+            fastmcp_context = None
+
+        async def call_next(context):
+            calls.append(context)
+            return "sentinel"
+
+        result = asyncio.run(middleware.on_read_resource(_StubContext(), call_next))
+        assert result == "sentinel"
+        assert len(calls) == 1
 
 
 class TestResponseMetadataMiddleware:

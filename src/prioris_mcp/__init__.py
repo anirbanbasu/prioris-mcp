@@ -93,7 +93,7 @@ class EnvVars:
         "PRIORIS_MCP_NOTES_DIR",
         # Sibling of PRIORIS_MCP_STORAGE_DIR's `downloads`, not inside it - notes are
         # user-authored, not fetched content. See
-        # docs/requirement-specification/08-notes-storage.md#storage-layout.
+        # docs/requirement-specification/storage/02-notes-storage.md#storage-layout.
         default=_default_data_home / "prioris-mcp" / "notes",
     )
 

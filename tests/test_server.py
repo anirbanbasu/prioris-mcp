@@ -1851,6 +1851,26 @@ class TestResearchNotesSearch:
         with pytest.raises(ToolError):
             asyncio.run(scenario())
 
+    def test_malformed_fts5_keyword_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"keyword": "AND"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_invalid_date_from_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"date_from": "not-a-date"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
 
 class TestNotesExportResource:
     """End-to-end MCP resource tests for notes://{note_id}/export."""

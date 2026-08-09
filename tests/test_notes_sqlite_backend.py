@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import yaml
@@ -232,6 +233,40 @@ class TestSqliteNotesBackendSearchStructuredFilters:
         far_past = "1970-01-01T00:00:00+00:00"
         result = asyncio.run(backend.search(date_to=far_past))
         assert result.notes == []
+
+    def test_date_from_invalid_string_raises(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        with pytest.raises(ValueError, match="date_from"):
+            asyncio.run(backend.search(date_from="not-a-date"))
+
+    def test_date_to_invalid_string_raises(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        with pytest.raises(ValueError, match="date_to"):
+            asyncio.run(backend.search(date_to="not-a-date"))
+
+    def test_date_from_naive_datetime_is_assumed_utc(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        far_future_naive = "2999-01-01T00:00:00"  # no offset - exercises the tzinfo-is-None branch
+        result = asyncio.run(backend.search(date_from=far_future_naive))
+        assert result.notes == []
+
+    def test_date_from_non_utc_offset_is_normalised_before_comparison(self, tmp_path):
+        backend = _backend(tmp_path)
+        note = asyncio.run(backend.create("arxiv", "A", "pdf", "note A"))
+        created = datetime.fromisoformat(note.created_at)
+        # Express the exact same instant as `created_at` using a +05:30 offset. Its wall-clock
+        # hour is later than the UTC-rendered `created_at` string, so a naive lexicographic TEXT
+        # comparison (the pre-fix behaviour) would place it "after" `created_at` and wrongly
+        # exclude the note from `created_at >= date_from`, even though the instants are equal.
+        # Normalising both to UTC before comparing fixes this: the note is correctly included.
+        shifted = created.astimezone(timezone(timedelta(hours=5, minutes=30)))
+        date_from = shifted.isoformat()
+        assert date_from > note.created_at  # demonstrates the raw-string-comparison bug
+        result = asyncio.run(backend.search(date_from=date_from))
+        assert {n.canonical_identifier for n in result.notes} == {"A"}
 
 
 class TestSqliteNotesBackendSearchKeyword:

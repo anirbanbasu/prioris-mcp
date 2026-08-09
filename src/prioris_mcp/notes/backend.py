@@ -1,6 +1,6 @@
 """Interface for persisting user-authored, document-level notes.
 
-See docs/requirement-specification/08-notes-storage.md#notesbackend and 01-architecture.md#notesbackend. `canonical_identifier`
+See docs/requirement-specification/storage/02-notes-storage.md#notesbackend and 01-architecture.md#notesbackend. `canonical_identifier`
 must already be resolved/pinned by the time it reaches this class - resolution is the calling
 tool's job (see server.py), not NotesBackend's, the same split StorageBackend already has with
 resolve_identifier.

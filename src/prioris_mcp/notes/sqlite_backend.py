@@ -1,6 +1,6 @@
 """SQLite-backed NotesBackend at `<notes-root>/notes.sqlite`.
 
-See docs/requirement-specification/08-notes-storage.md#storage-layout.
+See docs/requirement-specification/storage/02-notes-storage.md#storage-layout.
 """
 
 import json
@@ -52,6 +52,27 @@ def _row_to_note(row: sqlite3.Row) -> Note:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _normalise_date_boundary(value: str | None, field_name: str) -> str | None:
+    """Parse an ISO 8601 date/datetime string and normalise it to a UTC isoformat string.
+
+    `created_at` is always stored as `datetime.now(UTC).isoformat()`; a lexicographic TEXT
+    comparison against it is only chronologically correct if the compared value is also UTC and
+    rendered the same way - a naive datetime, a `Z` suffix, or a non-UTC offset would compare
+    wrong without this normalisation.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} is not a valid ISO 8601 date/datetime: {value!r}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    else:
+        parsed = parsed.astimezone(UTC)
+    return parsed.isoformat()
 
 
 class SqliteNotesBackend(NotesBackend):
@@ -257,6 +278,8 @@ class SqliteNotesBackend(NotesBackend):
             raise ValueError(
                 "canonical_identifier requires provider — canonical identifiers are only unique within a provider's own scheme"
             )
+        date_from = _normalise_date_boundary(date_from, "date_from")
+        date_to = _normalise_date_boundary(date_to, "date_to")
         where, params = self._build_search_where_and_params(
             provider,
             canonical_identifier,

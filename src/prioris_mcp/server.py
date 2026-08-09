@@ -25,6 +25,7 @@ from prioris_mcp.errors import InvalidRequestError, NotFoundError
 from prioris_mcp.middleware import (
     DecodeBinaryResourceContentMiddleware,
     EncodeBinaryResourceContentMiddleware,
+    NotesCacheBypassMiddleware,
     ResponseMetadataMiddleware,
     StripUnknownArgumentsMiddleware,
 )
@@ -561,6 +562,8 @@ class PriorisMCP(MCPMixin):
             )
         except ValueError as exc:
             raise InvalidRequestError(str(exc)) from exc
+        except sqlite3.OperationalError as exc:
+            raise InvalidRequestError(f"invalid search query: {exc}") from exc
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []
@@ -700,6 +703,10 @@ def app() -> FastMCP:  # pragma: no cover
     mcp_obj = PriorisMCP()
     app_with_features = mcp_obj.register_features(app)
     app_with_features.add_middleware(StripUnknownArgumentsMiddleware())
+    # NotesCacheBypassMiddleware runs before the Encode/Decode sandwich below and fully bypasses
+    # it for notes:// URIs, dispatching straight to the resource handler with run_middleware=False
+    # so mutable note content is never read from - or written to - the response cache.
+    app_with_features.add_middleware(NotesCacheBypassMiddleware())
     # Encode/DecodeBinaryResourceContentMiddleware sandwich ResponseCachingMiddleware: fastmcp's
     # cache wrapper JSON-serialises via Pydantic, whose default bytes encoding is a UTF-8 decode -
     # it crashes on non-UTF-8-safe resource content (e.g. a fetched PDF's fulltext resource).

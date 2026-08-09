@@ -1,6 +1,6 @@
 """Full-text keyword search over note text, separate from NotesBackend.
 
-See docs/requirement-specification/08-notes-storage.md#notes-searchsqlite3-is-deliberately-minimal--a-departure-from-searchsqlite3s-precedent.
+See docs/requirement-specification/storage/02-notes-storage.md#notes-searchsqlite3-is-deliberately-minimal--a-departure-from-searchsqlite3s-precedent.
 v1 ships one implementation: SQLite + FTS5, at `<notes-root>/notes-search.sqlite3`.
 """
 
