@@ -17,7 +17,7 @@ from pathlib import Path
 import sqlite_vec
 from anyio import to_thread
 
-from prioris_mcp.vector.backend import DocumentVectorSearchBackend, IndexStatus
+from prioris_mcp.vector.backend import DocumentVectorSearchBackend, IndexStatus, NoteVectorSearchBackend
 from prioris_mcp.vector.chunk_splitting import split_oversized_chunk
 from prioris_mcp.vector.embedding import EmbeddingBackend
 
@@ -193,6 +193,104 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
                 row = conn.execute(
                     "SELECT embedded_model FROM document_vectors WHERE provider = ? AND identifier = ? AND format = ? LIMIT 1",
                     (provider, identifier, format),
+                ).fetchone()
+            if row is None:
+                return "not_built"
+            return "ready" if row["embedded_model"] == self._embedding_backend.model_name else "stale"
+
+        return await to_thread.run_sync(_status)
+
+
+class SqliteVecNoteBackend(NoteVectorSearchBackend):
+    """Corpus-wide note vector index at `<vector-root>/notes-vectors.sqlite3`."""
+
+    def __init__(self, path: Path, embedding_backend: EmbeddingBackend) -> None:
+        """Initialise the backend.
+
+        Args:
+            path: Path to the sqlite-vec-backed database file. Its parent directory is created if
+                missing.
+            embedding_backend: The injected EmbeddingBackend used to embed indexed text and search
+                queries, and whose `model_name`/`dimension` fix the vec0 table's shape and
+                staleness comparison.
+        """
+        self._path = path
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._embedding_backend = embedding_backend
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = _connect_with_vec(self._path)
+        conn.execute(
+            f"""
+            CREATE VIRTUAL TABLE IF NOT EXISTS note_vectors USING vec0(
+                embedding FLOAT[{self._embedding_backend.dimension}] distance_metric=cosine,
+                note_id TEXT,
+                +text TEXT,
+                +embedded_model TEXT
+            )
+            """
+        )
+        return conn
+
+    async def index_note(self, note_id: str, text: str) -> None:
+        """Replace this note's indexed vector (insert or reindex). Embeds `text` internally."""
+        embedding = await self._embedding_backend.embed(text)
+
+        def _write() -> None:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM note_vectors WHERE note_id = ?", (note_id,))
+                conn.execute(
+                    "INSERT INTO note_vectors (embedding, note_id, text, embedded_model) VALUES (?, ?, ?, ?)",
+                    (json.dumps(embedding), note_id, text, self._embedding_backend.model_name),
+                )
+
+        await to_thread.run_sync(_write)
+
+    async def remove_note(self, note_id: str) -> None:
+        """Remove a note's indexed vector. A no-op if it isn't present."""
+
+        def _remove() -> None:
+            with self._connect() as conn:
+                conn.execute("DELETE FROM note_vectors WHERE note_id = ?", (note_id,))
+
+        await to_thread.run_sync(_remove)
+
+    async def search(
+        self, query_embedding: list[float], *, note_ids: list[str] | None = None, limit: int = 10
+    ) -> list[dict]:
+        """Cosine-similarity KNN search over notes, ranked most-similar first.
+
+        `note_ids`, when given, scopes the search to that id set (e.g. notes on one document).
+        """
+
+        def _search() -> list[dict]:
+            sql = "SELECT note_id, text, distance FROM note_vectors WHERE embedding MATCH ? AND k = ?"
+            params: list[object] = [json.dumps(query_embedding), limit]
+            if note_ids is not None:
+                placeholders = ", ".join("?" for _ in note_ids)
+                sql += f" AND note_id IN ({placeholders})"
+                params.extend(note_ids)
+            sql += " ORDER BY distance"
+            with self._connect() as conn:
+                rows = conn.execute(sql, params).fetchall()
+            return [
+                {
+                    "note_id": row["note_id"],
+                    "score": row["distance"],
+                    "text_preview": row["text"][:200] + ("..." if len(row["text"]) > 200 else ""),
+                }
+                for row in rows
+            ]
+
+        return await to_thread.run_sync(_search)
+
+    async def status(self, note_id: str) -> IndexStatus:
+        """Compare this note's recorded embedded_model against the currently configured one."""
+
+        def _status() -> IndexStatus:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT embedded_model FROM note_vectors WHERE note_id = ? LIMIT 1", (note_id,)
                 ).fetchone()
             if row is None:
                 return "not_built"
