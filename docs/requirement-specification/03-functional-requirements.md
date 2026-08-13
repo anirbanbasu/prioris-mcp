@@ -10,10 +10,7 @@ This page states **behavioural requirements** — what each tool must accept con
 
 ## Tool surface: per-provider, domain-prefixed
 
-`search`, `fetch_metadata`, `fetch_full_text`, and `parse_full_text` are each exposed as **per-provider** tools, not one generic tool parameterised by provider: `research_arxiv_*` and `research_europepmc_*`. (`list_top_n` follows the same per-provider naming convention but is arXiv-only in v1 — see below.) Two reasons, both about keeping an MCP client's (an LLM's) job easier and its mistakes fewer:
-
-- **Schema tightness.** Identifier patterns (an arXiv ID vs. a Europe PMC identifier) and valid `format` values (which formats a given provider/item actually offers) genuinely differ per provider. A generic tool would need either a loose, unvalidated identifier field, or a `format` enum whose valid values secretly depend on whatever provider value was also passed — neither is expressible cleanly as a JSON schema, and both push validation into runtime code instead of the tool's own contract.
-- **Grouping without collision.** The `research_` prefix isn't there to disambiguate — `arxiv_fetch_metadata` is already unambiguous on its own — it's a scanability convention for a flat MCP tool list, so all research-publication tools sort and group together regardless of source, and won't collide with a future `patent_*` domain's tools of the same shape (e.g. `patent_uspto_fetch_metadata`).
+`search`, `fetch_metadata`, `fetch_full_text`, and `parse_full_text` are each exposed as **per-provider** tools, not one generic tool parameterised by provider: `research_arxiv_*` and `research_europepmc_*`. (`list_top_n` follows the same per-provider naming convention but is arXiv-only in v1 — see below.) See [ADR-00036](ADR/00036-per-provider-domain-prefixed-tools.md) for why: schema tightness (identifier/format validation genuinely differs per provider) and the `research_` prefix's scanability/collision-avoidance role in a flat tool list.
 
 `resolve_identifier` is the one capability that does **not** follow this pattern — see below.
 

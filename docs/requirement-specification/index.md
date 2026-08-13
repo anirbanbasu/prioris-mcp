@@ -52,7 +52,13 @@ Two open-access, unauthenticated **network** providers are deliberately chosen f
 The first capability built on top of v1's storage redesign rather than a v1 amendment — tracked as [issue #13](https://github.com/anirbanbasu/prioris-mcp/issues/13):
 
 - **`NotesBackend`.** Server-side, single-user, document-level user-authored notes storage — a new abstraction, sibling to `StorageBackend`/`SearchIndex` rather than an extension of either. See [Architecture → `NotesBackend`](01-architecture.md#notesbackend) and [Notes storage](storage/02-notes-storage.md). Five new tools (`research_notes_create`/`read`/`update`/`delete`/`search`) and one resource (`notes://{note_id}/export`) — see [Functional requirements → Notes tools](03-functional-requirements.md#notes-tools).
-- **Out of scope for v2, tracked as future work beyond it:** `VectorSearchBackend` and `GraphBackend` — separate, derived-index abstractions layered on top of `NotesBackend` (semantic search and cross-paper concept linking, respectively) — remain undesigned; multi-user/hosted deployment of `NotesBackend` (a `user_id` dimension, a client-server backend implementation); migration of the `prioris` client plugin's existing `.prioris/discussions/` local files (tracked in `anirbanbasu/prioris#1`, a separate repository); span-level note anchoring, rejected in favour of document-level identity — see [Architecture → Anchoring](01-architecture.md#anchoring-document-level-not-span-level) for why; filtering/searching by `metadata` keys, or a general boolean query language over `tags` beyond must-have-all/must-have-any/must-have-none — see [Notes storage → Data model](storage/02-notes-storage.md#data-model); manual cross-document note relations — a note declaring a relationship to documents beyond its own primary one, distinct from `GraphBackend`'s automatic discovery above — see [Notes storage → Future: cross-document notes and relations](storage/02-notes-storage.md#future-cross-document-notes-and-relations).
+- **Out of scope for v2, tracked as future work beyond it:** multi-user/hosted deployment of `NotesBackend` (a `user_id` dimension, a client-server backend implementation); migration of the `prioris` client plugin's existing `.prioris/discussions/` local files (tracked in `anirbanbasu/prioris#1`, a separate repository); span-level note anchoring, rejected in favour of document-level identity — see [Architecture → Anchoring](01-architecture.md#anchoring-document-level-not-span-level) for why; filtering/searching by `metadata` keys, or a general boolean query language over `tags` beyond must-have-all/must-have-any/must-have-none — see [Notes storage → Data model](storage/02-notes-storage.md#data-model); manual cross-document note relations — a note declaring a relationship to documents beyond its own primary one, distinct from `GraphSearchBackend`'s automatic discovery (see [v3](#v3) below) — see [Notes storage → Future: cross-document notes and relations](storage/02-notes-storage.md#future-cross-document-notes-and-relations).
+
+### v3
+
+- **Discovery.** `research_discovery` — embedding-based candidate discovery over external, not-yet-fetched research-publication metadata (OpenAlex `search.semantic`), plus a fetch ladder for routing/surfacing full text once a candidate is chosen. See [Discovery](02-discovery.md).
+- **`VectorSearchBackend`.** Embedding-based semantic search, layered on top of `SearchIndex`/`NotesBackend` — see [Search → Vector search](search/02-vector-search.md).
+- **`GraphSearchBackend`.** Cross-paper concept/citation linking, the third retrieval mechanism alongside full-text and vector search, on a `graphqlite`-backed SQLite engine — see [Search → Graph search](search/03-graph-search.md).
 
 ## Assumptions and dependencies
 
@@ -80,8 +86,14 @@ The first capability built on top of v1's storage redesign rather than a v1 amen
 - [Storage](storage/index.md) — `StorageBackend`/`NotesBackend`, the two persistence abstractions, split into:
     - [Document storage](storage/01-document-storage.md) — the `StorageBackend` abstraction and its local-filesystem and (future) S3 implementations.
     - [Notes storage](storage/02-notes-storage.md) — the `NotesBackend` abstraction, its data model, and its storage layout (v2).
+- [Discovery](02-discovery.md) — embedding-based candidate discovery beyond arXiv/Europe PMC keyword search, and the fetch ladder for results that land outside them (v3).
+- [Search](search/index.md) — the retrieval mechanisms over content already fetched into storage, split into:
+    - [Full-text search](search/01-full-text-search.md) — `SearchIndex`, literal/lexical keyword matching (v1).
+    - [Vector search](search/02-vector-search.md) — `VectorSearchBackend`, embedding-based semantic search (v3).
+    - [Graph search](search/03-graph-search.md) — `GraphSearchBackend`, cross-paper concept/citation linking, `graphqlite`-backed (v3).
 - [Functional requirements](03-functional-requirements.md) — the concrete tools/resources exposed for arXiv and Europe PMC in v1, and notes tools/the export resource in v2, in behavioural terms.
 - [Non-functional requirements](04-non-functional-requirements.md) — cross-cutting qualities, currently concurrency.
 - [Security](05-security.md) — untrusted-identifier and untrusted-content requirements.
 - [Interface specification](06-interface-specification.md) — exact MCP wire-level input/output schemas for every v1 and v2 tool/resource, grounded in the arXiv and Europe PMC APIs where applicable.
 - [Test specification](07-test-specification.md) — verification/acceptance criteria per capability, grounded in the interface specification's schemas.
+- [Architecture Decision Records](ADR/index.md) — settled decisions with named rejected alternatives, extracted out of the chapters above so they stay lean; linked from wherever the underlying decision is used.
