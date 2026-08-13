@@ -1,5 +1,6 @@
 import importlib
 import os
+from importlib import reload
 from pathlib import Path
 
 import pytest
@@ -214,3 +215,32 @@ class TestPdfOcrConfigDefaults:
         monkeypatch.setenv("PRIORIS_MCP_PDF_OCR_SERVER_HEADERS", '{"X-Retries": 3}')
         with pytest.raises(EnvValidationError):
             importlib.reload(prioris_mcp)
+
+
+def test_embedding_model_defaults_to_bge_small(monkeypatch: "pytest.MonkeyPatch"):
+    """EnvVars.PRIORIS_MCP_EMBEDDING_MODEL defaults to BAAI/bge-small-en-v1.5."""
+    monkeypatch.delenv("PRIORIS_MCP_EMBEDDING_MODEL", raising=False)
+    reload(prioris_mcp)
+    assert prioris_mcp.EnvVars.PRIORIS_MCP_EMBEDDING_MODEL == "BAAI/bge-small-en-v1.5"
+
+
+def test_embedding_model_reads_from_env(monkeypatch: "pytest.MonkeyPatch"):
+    """EnvVars.PRIORIS_MCP_EMBEDDING_MODEL reads from env."""
+    monkeypatch.setenv("PRIORIS_MCP_EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+    reload(prioris_mcp)
+    assert prioris_mcp.EnvVars.PRIORIS_MCP_EMBEDDING_MODEL == "intfloat/multilingual-e5-large"
+
+
+def test_vector_search_default_limit_defaults_to_10(monkeypatch: "pytest.MonkeyPatch"):
+    """EnvVars.PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT defaults to 10."""
+    monkeypatch.delenv("PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT", raising=False)
+    reload(prioris_mcp)
+    assert prioris_mcp.EnvVars.PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT == 10
+
+
+def test_vector_dir_defaults_next_to_storage_dir(monkeypatch: "pytest.MonkeyPatch"):
+    """EnvVars.PRIORIS_MCP_VECTOR_DIR defaults to vectors directory under XDG_DATA_HOME."""
+    monkeypatch.delenv("PRIORIS_MCP_VECTOR_DIR", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    reload(prioris_mcp)
+    assert prioris_mcp.EnvVars.PRIORIS_MCP_VECTOR_DIR.name == "vectors"

@@ -97,6 +97,29 @@ class EnvVars:
         default=_default_data_home / "prioris-mcp" / "notes",
     )
 
+    PRIORIS_MCP_EMBEDDING_MODEL = env.str(
+        "PRIORIS_MCP_EMBEDDING_MODEL",
+        # fastembed's own default model - see ADR-00023. Left as an open string, not
+        # OneOf-validated: fastembed already errors on an unrecognised model name, so this
+        # project doesn't duplicate that validation. Changing this changes the vector table's
+        # dimension, which is why index_status compares each stored row's own recorded model
+        # against this value rather than assuming it never changes.
+        default="BAAI/bge-small-en-v1.5",
+    )
+
+    PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT = env.int(
+        "PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT",
+        default=10,
+        validate=Range(min=1, max=200),
+    )
+
+    PRIORIS_MCP_VECTOR_DIR = env.path(
+        "PRIORIS_MCP_VECTOR_DIR",
+        # Sibling of PRIORIS_MCP_STORAGE_DIR, its own root - see
+        # docs/requirement-specification/search/02-vector-search.md#storage-layout-one-file-per-corpus-separate-from-every-other-backends-files.
+        default=_default_data_home / "prioris-mcp" / "vectors",
+    )
+
     PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS = env.float(
         "PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS",
         # Total time a single tool call's rate-limit backoff may spend retrying before giving up
