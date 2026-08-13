@@ -54,6 +54,7 @@ from prioris_mcp.parsers.jats_xslt import JatsXsltMarkdownBackend
 from prioris_mcp.parsers.pdf_liteparse import LiteParsePdfBackend
 from prioris_mcp.providers.arxiv import ARXIV_BASE_SPACING_SECONDS, ArxivProvider
 from prioris_mcp.providers.europepmc import EUROPEPMC_BASE_SPACING_SECONDS, EuropePmcProvider
+from prioris_mcp.providers.grouping import DEFAULT_GROUPING, grouping_dir
 from prioris_mcp.providers.identifier_routing import resolve_research_identifier
 from prioris_mcp.providers.localfile import LocalFileProvider, UploadSessionManager
 from prioris_mcp.rate_limit import ProviderRequestQueue
@@ -156,8 +157,9 @@ class PriorisMCP(MCPMixin):
     ]
 
     def __init__(self) -> None:
-        self._storage = FilesystemStorageBackend()
-        self._search_index = SqliteFts5SearchIndex(EnvVars.PRIORIS_MCP_STORAGE_DIR / "search.sqlite3")
+        storage_dir = grouping_dir(EnvVars.PRIORIS_MCP_STORAGE_DIR, DEFAULT_GROUPING)
+        self._storage = FilesystemStorageBackend(storage_dir)
+        self._search_index = SqliteFts5SearchIndex(storage_dir / "search.sqlite3")
         if EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS:
             logger.warning(
                 "HTTPS certificate verification is DISABLED (PRIORIS_MCP_UNVERIFIED_HTTPS=True) - "
@@ -209,12 +211,9 @@ class PriorisMCP(MCPMixin):
                 max_concurrent=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS,
             ),
         )
-        self._notes_search_index: NotesSearchIndex = SqliteFts5NotesSearchIndex(
-            EnvVars.PRIORIS_MCP_NOTES_DIR / "notes-search.sqlite3"
-        )
-        self._notes_backend: NotesBackend = SqliteNotesBackend(
-            EnvVars.PRIORIS_MCP_NOTES_DIR / "notes.sqlite", self._notes_search_index
-        )
+        notes_dir = grouping_dir(EnvVars.PRIORIS_MCP_NOTES_DIR, DEFAULT_GROUPING)
+        self._notes_search_index: NotesSearchIndex = SqliteFts5NotesSearchIndex(notes_dir / "notes-search.sqlite3")
+        self._notes_backend: NotesBackend = SqliteNotesBackend(notes_dir / "notes.sqlite", self._notes_search_index)
 
     async def research_arxiv_search(
         self,
