@@ -433,3 +433,93 @@ class TestPersistParsedMarkdownPageAwareGuard:
             assert result["page_range"] is None
 
         asyncio.run(scenario())
+
+
+class TestPersistParsedMarkdownVectorTrigger:
+    """Test that a fresh parse schedules background vector indexing, but a cache hit does not."""
+
+    def test_fresh_parse_schedules_vector_indexing(self, tmp_path):
+        from prioris_mcp.vector.scheduler import EmbeddingScheduler
+
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"%PDF-1.4 raw")
+            backend = _CountingParserBackend(["# Intro\n\nHello world."])
+            scheduled: list[tuple] = []
+
+            class _StubVectorBackend:
+                async def index_entries(self, provider, identifier, format, entries):
+                    scheduled.append((provider, identifier, format, entries))
+
+            scheduler = EmbeddingScheduler()
+            await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=True,
+                vector_backend=_StubVectorBackend(),
+                embedding_scheduler=scheduler,
+            )
+            await scheduler.wait_all()
+
+            assert len(scheduled) == 1
+            assert scheduled[0][0] == "arxiv"
+            assert scheduled[0][1] == "2106.09685v2"
+
+        asyncio.run(scenario())
+
+    def test_cache_hit_parse_does_not_reschedule_vector_indexing(self, tmp_path):
+        """A second call for the same, already-parsed document must not schedule a second pass.
+
+        Mirrors TestPersistParsedMarkdownFreshParse.test_second_call_is_served_from_cache_not_reparsed's
+        served_from_storage=True, no-manifest-rebuild pattern: the second call's markdown is served
+        from storage and its manifest already has rows, so the `if not served_from_storage or
+        needs_manifest_rebuild:` branch - where scheduling happens - is skipped entirely.
+        """
+        from prioris_mcp.vector.scheduler import EmbeddingScheduler
+
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"%PDF-1.4 raw")
+            backend = _CountingParserBackend(["# Intro\n\nHello world."])
+            scheduled: list[tuple] = []
+
+            class _StubVectorBackend:
+                async def index_entries(self, provider, identifier, format, entries):
+                    scheduled.append((provider, identifier, format, entries))
+
+            scheduler = EmbeddingScheduler()
+
+            async def call():
+                await persist_parsed_markdown(
+                    storage=storage,
+                    search_index=search_index,
+                    provider="arxiv",
+                    canonical_identifier="2106.09685v2",
+                    external_identifier="2106.09685v2",
+                    source_format="pdf",
+                    backend=backend,
+                    offset=0,
+                    limit=1000,
+                    page=None,
+                    page_aware=True,
+                    vector_backend=_StubVectorBackend(),
+                    embedding_scheduler=scheduler,
+                )
+
+            await call()
+            await scheduler.wait_all()
+            await call()
+            await scheduler.wait_all()
+
+            assert backend.call_count == 1
+            assert len(scheduled) == 1
+
+        asyncio.run(scenario())

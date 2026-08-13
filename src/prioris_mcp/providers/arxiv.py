@@ -5,6 +5,7 @@ docs/requirement-specification/06-interface-specification.md#arxiv.
 """
 
 import logging
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 import httpx
@@ -24,6 +25,10 @@ from prioris_mcp.providers.base import ResearchPublicationProvider, persist_pars
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import StorageBackend
 from prioris_mcp.storage.search_index import SearchIndex
+
+if TYPE_CHECKING:
+    from prioris_mcp.vector.backend import DocumentVectorSearchBackend
+    from prioris_mcp.vector.scheduler import EmbeddingScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +144,8 @@ class ArxivProvider(ResearchPublicationProvider):
         html_backend: ParserBackend,
         search_index: SearchIndex,
         default_inline_char_limit: int = 20000,
+        vector_backend: "DocumentVectorSearchBackend | None" = None,
+        embedding_scheduler: "EmbeddingScheduler | None" = None,
     ) -> None:
         self._storage = storage
         self._queue = queue
@@ -147,6 +154,8 @@ class ArxivProvider(ResearchPublicationProvider):
         self._html_backend = html_backend
         self._search_index = search_index
         self._default_inline_char_limit = default_inline_char_limit
+        self._vector_backend = vector_backend
+        self._embedding_scheduler = embedding_scheduler
 
     async def _get(self, params: dict) -> bytes:
         async def op() -> httpx.Response:
@@ -328,6 +337,8 @@ class ArxivProvider(ResearchPublicationProvider):
             limit=limit if limit is not None else self._default_inline_char_limit,
             page=page,
             page_aware=(format == "pdf"),
+            vector_backend=self._vector_backend,
+            embedding_scheduler=self._embedding_scheduler,
         )
         return ParsedFullText(
             **result, resource_uri=f"research://arxiv/{quote(canonical_id, safe='')}/{format}/markdown"
