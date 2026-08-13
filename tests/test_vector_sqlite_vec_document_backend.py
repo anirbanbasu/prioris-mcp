@@ -68,6 +68,21 @@ class TestIndexAndSearch:
         results = asyncio.run(backend.search(query, format="pdf"))
         assert all(r["format"] == "pdf" for r in results)
 
+    def test_unscoped_search_does_not_collapse_same_chunk_id_across_different_documents(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(
+            backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 4, "text": "cats"}])
+        )
+        asyncio.run(
+            backend.index_entries(
+                "europepmc", "MED:1", "xml", [{"chunk_id": "c1", "start": 0, "length": 4, "text": "cats"}]
+            )
+        )
+        query = asyncio.run(backend._embedding_backend.embed("cats"))
+        results = asyncio.run(backend.search(query))
+        document_keys = {(r["provider"], r["identifier"], r["format"]) for r in results}
+        assert document_keys == {("arxiv", "A", "pdf"), ("europepmc", "MED:1", "xml")}
+
     def test_oversized_chunk_sub_splits_collapse_to_one_result_per_chunk_id(self, tmp_path):
         backend = _backend(tmp_path)
         long_text = "the transformer architecture uses self attention. " * 100

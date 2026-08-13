@@ -135,8 +135,11 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
         """Cosine-similarity KNN search, ranked most-similar first.
 
         Embeds nothing itself - the caller already has `query_embedding`. Hits sharing the same
-        `chunk_id` (sub-splits of one oversized chunk) collapse to their single max-scoring row
-        before `limit` is applied, so a caller never sees more than one result per `chunk_id`.
+        (provider, identifier, format, chunk_id) - sub-splits of one oversized chunk - collapse to
+        their single max-scoring row before `limit` is applied, so a caller never sees more than
+        one result per chunk. `chunk_id` alone is document-local, not globally unique, so the
+        collapse key includes document identity too - otherwise two different documents that
+        happen to share a `chunk_id` value could incorrectly collapse into one result.
         """
 
         def _search() -> list[dict]:
@@ -160,11 +163,12 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
             sql += " ORDER BY distance"
             with self._connect() as conn:
                 rows = conn.execute(sql, params).fetchall()
-            best_per_chunk: dict[str, sqlite3.Row] = {}
+            best_per_chunk: dict[tuple[str, str, str, str], sqlite3.Row] = {}
             for row in rows:
-                existing = best_per_chunk.get(row["chunk_id"])
+                key = (row["provider"], row["identifier"], row["format"], row["chunk_id"])
+                existing = best_per_chunk.get(key)
                 if existing is None or row["distance"] < existing["distance"]:
-                    best_per_chunk[row["chunk_id"]] = row
+                    best_per_chunk[key] = row
             ordered = sorted(best_per_chunk.values(), key=lambda r: r["distance"])[:limit]
             return [
                 {
