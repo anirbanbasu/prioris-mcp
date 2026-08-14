@@ -17,28 +17,46 @@ class EmbeddingScheduler:
 
     def __init__(self) -> None:
         self._tasks: dict[tuple, asyncio.Task] = {}
+        self._pending: dict[tuple, Callable[[], Awaitable[None]]] = {}
 
     def is_building(self, key: tuple) -> bool:
         """Whether a live background embedding task currently exists for `key`."""
         return key in self._tasks
 
     def schedule(self, key: tuple, coro_factory: Callable[[], Awaitable[None]]) -> None:
-        """Schedule `coro_factory()` to run in the background, unless `key` is already in flight."""
+        """Schedule `coro_factory()` to run in the background.
+
+        If `key` is already in flight, the previous run is left alone but `coro_factory` is
+        remembered as the latest pending factory for `key` - once the in-flight run finishes, it
+        re-triggers with this (possibly newer) factory instead of the update being dropped.
+        """
         if key in self._tasks:
+            self._pending[key] = coro_factory
             return
         task = asyncio.ensure_future(self._run(key, coro_factory))
         self._tasks[key] = task
 
+    def cancel(self, key: tuple) -> None:
+        """Cancel any in-flight (or pending-rerun) task for `key`. A no-op if none exists."""
+        task = self._tasks.pop(key, None)
+        if task is not None:
+            task.cancel()
+        self._pending.pop(key, None)
+
     async def _run(self, key: tuple, coro_factory: Callable[[], Awaitable[None]]) -> None:
         try:
             await coro_factory()
+        except asyncio.CancelledError:
+            raise
         except Exception:
             logger.exception("Background embedding task failed for key=%r", key)
         finally:
             self._tasks.pop(key, None)
+        pending = self._pending.pop(key, None)
+        if pending is not None:
+            self.schedule(key, pending)
 
     async def wait_all(self) -> None:
-        """Wait for every currently-tracked task to finish. Test support, not used in production."""
-        pending = list(self._tasks.values())
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        """Wait for every tracked task, including any dirty re-runs it triggers. Test support only."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks.values()), return_exceptions=True)

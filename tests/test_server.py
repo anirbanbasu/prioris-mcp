@@ -1872,6 +1872,42 @@ class TestResearchNotesDelete:
 
         assert asyncio.run(scenario()) == "not_built"
 
+    def test_delete_racing_in_flight_schedule_does_not_resurrect_vector_row(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        client = Client(transport=server_with_features, timeout=60)
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        real_index_note = mcp_obj._note_vector_backend.index_note
+
+        async def slow_index_note(note_id: str, text: str) -> None:
+            started.set()
+            await release.wait()
+            await real_index_note(note_id, text)
+
+        async def scenario():
+            async with client:
+                monkeypatch.setattr(mcp_obj._note_vector_backend, "index_note", slow_index_note)
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "2106.09685v2", "text": "a note"},
+                )
+                note_id = created.structured_content["id"]  # ty: ignore[not-subscriptable]
+                await started.wait()  # embed is in flight, blocked on release
+                await client.call_tool("research_notes_delete", arguments={"note_id": note_id})
+                release.set()  # let the (now-cancelled) embed task try to proceed, if it still can
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await mcp_obj._note_vector_backend.status(note_id)
+
+        assert asyncio.run(scenario()) == "not_built"
+
 
 class TestResearchNotesSearch:
     """End-to-end MCP tool tests for research_notes_search."""

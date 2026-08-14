@@ -592,6 +592,7 @@ class PriorisMCP(MCPMixin):
         """Delete a note by id. Returns False, not an error, if it's already absent."""
         removed = await self._notes_backend.delete(note_id)
         if removed:
+            self._embedding_scheduler.cancel(("note", note_id))
             await self._note_vector_backend.remove_note(note_id)
         return removed
 
@@ -664,6 +665,7 @@ class PriorisMCP(MCPMixin):
             removed = await self._storage.delete(entry.provider, entry.identifier, entry.format_, entry.artefact)
             if removed and entry.artefact in ("markdown", "all"):
                 await self._search_index.remove_document(entry.provider, entry.identifier, entry.format_)
+                self._embedding_scheduler.cancel((entry.provider, entry.identifier, entry.format_))
                 await self._document_vector_backend.remove_document(entry.provider, entry.identifier, entry.format_)
             (deleted if removed else not_found).append(entry)
         return DeleteFetchedResult(deleted=deleted, not_found=not_found)
