@@ -20,7 +20,7 @@ Within this chapter's scope, OpenAlex stays discovery-only, sitting in front of 
 
 ## Surfacing shape: a new tool, `research_discovery`, not a `mode` on `research_search_fetched`
 
-[Vector search](search/02-vector-search.md) settles `research_search_fetched` exposing `fts`/`vector`/`graph`/`hybrid` via a single `mode` parameter — one tool, several retrieval mechanisms, all sharing one domain: local corpus content already fetched into storage, returning a consistent chunk/doc-shaped result.
+[Vector search](search/02-vector-search.md) settles `research_search_fetched` exposing `fts`/`vector`/`hybrid` via a single `mode` parameter — one tool, several retrieval mechanisms, all sharing one domain: local corpus content already fetched into storage, returning a consistent chunk/doc-shaped result.
 
 Discovery gets its own tool instead, `research_discovery`, mirroring `research_arxiv_search`/`research_europepmc_search` in naming — but unlike those two, it isn't provider-backed. Discovery is a capability layer sitting in front of providers, not a provider itself, so `research_discovery` has no `ResearchPublicationProvider` behind it unless/until [#33](https://github.com/anirbanbasu/prioris-mcp/issues/33) changes that. See [ADR-00016: `research_discovery` is a new tool, not a `mode` on `research_search_fetched`](ADR/00016-research-discovery-new-tool-not-mode.md) for why.
 
@@ -42,7 +42,7 @@ PriorisMCP does not fetch OA PDF URLs server-side — a hit with no known-provid
 
 ## Semantic Scholar's similarity capability: split by corpus scope, not retrieval shape
 
-Semantic Scholar's `/paper/search` (and bulk search) is keyword search against an Elasticsearch index with a custom relevance re-ranker — not free-text embedding search over arbitrary input, so it isn't a `search.semantic` peer. It does compute SPECTER2 embeddings per paper, but the only retrieval mode built on them is the Recommendations API, which takes a **seed paper ID** (or a small set of them) and returns similar papers — a citation/embedding-graph-flavored mechanism that raises the question of whether it belongs with [Graph search](search/03-graph-search.md)'s `GraphSearchBackend` instead of Discovery. See [ADR-00019: Semantic Scholar's similarity capability — placement, not adoption](ADR/00019-semantic-scholar-placement-not-adoption.md) for why it would belong alongside `research_discovery` instead, if ever adopted.
+Semantic Scholar's `/paper/search` (and bulk search) is keyword search against an Elasticsearch index with a custom relevance re-ranker — not free-text embedding search over arbitrary input, so it isn't a `search.semantic` peer. It does compute SPECTER2 embeddings per paper, but the only retrieval mode built on them is the Recommendations API, which takes a **seed paper ID** (or a small set of them) and returns similar papers — a citation/embedding-graph-flavored mechanism that raises a corpus-scope placement question: Discovery, or a locally-scoped citation/concept-linking mechanism instead. See [ADR-00019: Semantic Scholar's similarity capability — placement, not adoption](ADR/00019-semantic-scholar-placement-not-adoption.md) for why it would belong alongside `research_discovery` instead, if ever adopted.
 
 ## CORE flagged as a future fetch-ladder candidate, not adopted now
 

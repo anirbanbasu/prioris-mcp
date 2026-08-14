@@ -52,13 +52,12 @@ Two open-access, unauthenticated **network** providers are deliberately chosen f
 The first capability built on top of v1's storage redesign rather than a v1 amendment — tracked as [issue #13](https://github.com/anirbanbasu/prioris-mcp/issues/13):
 
 - **`NotesBackend`.** Server-side, single-user, document-level user-authored notes storage — a new abstraction, sibling to `StorageBackend`/`SearchIndex` rather than an extension of either. See [Architecture → `NotesBackend`](01-architecture.md#notesbackend) and [Notes storage](storage/02-notes-storage.md). Five new tools (`research_notes_create`/`read`/`update`/`delete`/`search`) and one resource (`notes://{note_id}/export`) — see [Functional requirements → Notes tools](03-functional-requirements.md#notes-tools).
-- **Out of scope for v2, tracked as future work beyond it:** multi-user/hosted deployment of `NotesBackend` (a `user_id` dimension, a client-server backend implementation); migration of the `prioris` client plugin's existing `.prioris/discussions/` local files (tracked in `anirbanbasu/prioris#1`, a separate repository); span-level note anchoring, rejected in favour of document-level identity — see [Architecture → Anchoring](01-architecture.md#anchoring-document-level-not-span-level) for why; filtering/searching by `metadata` keys, or a general boolean query language over `tags` beyond must-have-all/must-have-any/must-have-none — see [Notes storage → Data model](storage/02-notes-storage.md#data-model); manual cross-document note relations — a note declaring a relationship to documents beyond its own primary one, distinct from `GraphSearchBackend`'s automatic discovery (see [v3](#v3) below) — see [Notes storage → Future: cross-document notes and relations](storage/02-notes-storage.md#future-cross-document-notes-and-relations).
+- **Out of scope for v2, tracked as future work beyond it:** multi-user/hosted deployment of `NotesBackend` (a `user_id` dimension, a client-server backend implementation); migration of the `prioris` client plugin's existing `.prioris/discussions/` local files (tracked in `anirbanbasu/prioris#1`, a separate repository); span-level note anchoring, rejected in favour of document-level identity — see [Architecture → Anchoring](01-architecture.md#anchoring-document-level-not-span-level) for why; filtering/searching by `metadata` keys, or a general boolean query language over `tags` beyond must-have-all/must-have-any/must-have-none — see [Notes storage → Data model](storage/02-notes-storage.md#data-model); manual cross-document note relations — a note declaring a relationship to documents beyond its own primary one — see [Notes storage → Future: cross-document notes and relations](storage/02-notes-storage.md#future-cross-document-notes-and-relations).
 
 ### v3
 
 - **Discovery.** `research_discovery` — embedding-based candidate discovery over external, not-yet-fetched research-publication metadata (OpenAlex `search.semantic`), plus a fetch ladder for routing/surfacing full text once a candidate is chosen. See [Discovery](02-discovery.md).
 - **`VectorSearchBackend`.** Embedding-based semantic search, layered on top of `SearchIndex`/`NotesBackend` — see [Search → Vector search](search/02-vector-search.md).
-- **`GraphSearchBackend`.** Cross-paper concept/citation linking, the third retrieval mechanism alongside full-text and vector search, on a `graphqlite`-backed SQLite engine — see [Search → Graph search](search/03-graph-search.md).
 
 ## Assumptions and dependencies
 
@@ -90,7 +89,6 @@ The first capability built on top of v1's storage redesign rather than a v1 amen
 - [Search](search/index.md) — the retrieval mechanisms over content already fetched into storage, split into:
     - [Full-text search](search/01-full-text-search.md) — `SearchIndex`, literal/lexical keyword matching (v1).
     - [Vector search](search/02-vector-search.md) — `VectorSearchBackend`, embedding-based semantic search (v3).
-    - [Graph search](search/03-graph-search.md) — `GraphSearchBackend`, cross-paper concept/citation linking, `graphqlite`-backed (v3).
 - [Functional requirements](03-functional-requirements.md) — the concrete tools/resources exposed for arXiv and Europe PMC in v1, and notes tools/the export resource in v2, in behavioural terms.
 - [Non-functional requirements](04-non-functional-requirements.md) — cross-cutting qualities, currently concurrency.
 - [Security](05-security.md) — untrusted-identifier and untrusted-content requirements.

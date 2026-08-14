@@ -19,7 +19,7 @@ Full-text search needs to live somewhere in the architecture: either as an opera
 
 ## Consequences
 
-`StorageBackend` and `SearchIndex` can be swapped independently — a future S3-backed `StorageBackend` needs no search-specific changes, and vice versa. This is the same seam later reused to justify `VectorSearchBackend` and `GraphSearchBackend` as their own interfaces too, rather than folding search variants into `StorageBackend` or into each other — see [Vector search → Interfaces stay separate](../search/02-vector-search.md#interfaces-stay-separate-even-if-a-future-engine-could-serve-more-than-one).
+`StorageBackend` and `SearchIndex` can be swapped independently — a future S3-backed `StorageBackend` needs no search-specific changes, and vice versa. This is the same seam later reused to justify `VectorSearchBackend` as its own interface too, rather than folding search variants into `StorageBackend` or into each other — see [Vector search → Interfaces stay separate](../search/02-vector-search.md#interfaces-stay-separate-even-if-a-future-engine-could-serve-more-than-one).
 
 ## Referenced from
 

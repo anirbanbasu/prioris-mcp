@@ -10,7 +10,7 @@ This page states **behavioural requirements** — what each tool must accept con
 
 ## Tool surface: per-provider, domain-prefixed
 
-`search`, `fetch_metadata`, `fetch_full_text`, and `parse_full_text` are each exposed as **per-provider** tools, not one generic tool parameterised by provider: `research_arxiv_*` and `research_europepmc_*`. (`list_top_n` follows the same per-provider naming convention but is arXiv-only in v1 — see below.) See [ADR-00036](ADR/00036-per-provider-domain-prefixed-tools.md) for why: schema tightness (identifier/format validation genuinely differs per provider) and the `research_` prefix's scanability/collision-avoidance role in a flat tool list.
+`search`, `fetch_metadata`, `fetch_full_text`, and `parse_full_text` are each exposed as **per-provider** tools, not one generic tool parameterised by provider: `research_arxiv_*` and `research_europepmc_*`. (`list_top_n` follows the same per-provider naming convention but is arXiv-only in v1 — see below.) See [ADR-00027](ADR/00027-per-provider-domain-prefixed-tools.md) for why: schema tightness (identifier/format validation genuinely differs per provider) and the `research_` prefix's scanability/collision-avoidance role in a flat tool list.
 
 `resolve_identifier` is the one capability that does **not** follow this pattern — see below.
 

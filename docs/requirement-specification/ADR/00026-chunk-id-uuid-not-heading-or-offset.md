@@ -20,7 +20,7 @@ Each detected chunk needs an identity (`chunk_id`) for `VectorSearchBackend` to 
 
 ## Consequences
 
-`chunk_id` doesn't need to be human-readable or stable *across* parse passes over time — only *within* one: `SearchIndex.index_entries`'s existing implementation already deletes every prior entry for a document **by document identity** before inserting the new set, never by matching individual entry keys across passes, and `VectorSearchBackend`'s and the future `GraphSearchBackend`'s document-replace operations must follow the identical pattern. Freshly-minted `chunk_id`s on every parse pass are therefore safe by construction — old entries are always fully cleared before new ones are written, so there's no reconciliation step that could fail.
+`chunk_id` doesn't need to be human-readable or stable *across* parse passes over time — only *within* one: `SearchIndex.index_entries`'s existing implementation already deletes every prior entry for a document **by document identity** before inserting the new set, never by matching individual entry keys across passes, and `VectorSearchBackend`'s document-replace operations must follow the identical pattern. Freshly-minted `chunk_id`s on every parse pass are therefore safe by construction — old entries are always fully cleared before new ones are written, so there's no reconciliation step that could fail.
 
 ## Referenced from
 

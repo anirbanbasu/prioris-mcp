@@ -3,15 +3,15 @@ status: accepted
 date: 2026-08-12
 ---
 
-# ADR-00022: `SearchIndex`, `VectorSearchBackend`, and `GraphSearchBackend` stay separate interfaces even if a future engine could serve more than one
+# ADR-00022: `SearchIndex` and `VectorSearchBackend` stay separate interfaces even if a future engine could serve both
 
 ## Context
 
-`SearchIndex` (FTS5), `VectorSearchBackend`, and `GraphSearchBackend` (see [Graph search](../search/03-graph-search.md)) are three distinct Python interfaces. A single engine bundling more than one of these capabilities natively exists in principle (LadybugDB was raised as a candidate: native full-text search, a vector index, and graph queries all in one).
+`SearchIndex` (FTS5) and `VectorSearchBackend` are two distinct Python interfaces. An engine bundling both capabilities natively exists in principle (LadybugDB was raised as a candidate: native full-text search and a vector index in one).
 
 ## Decision
 
-The three interfaces remain separate regardless of which concrete engine(s) back them. A single engine may still end up implementing more than one of these interfaces later — interface separation and implementation consolidation are different axes — but only if it earns that through the same diligence `sqlite-vec` received (verifying its FTS engine's fidelity, its vector index type and persistence guarantees, not just its license and star count).
+The two interfaces remain separate regardless of which concrete engine(s) back them. A single engine may still end up implementing both later — interface separation and implementation consolidation are different axes — but only if it earns that through the same diligence `sqlite-vec` received (verifying its FTS engine's fidelity, its vector index type and persistence guarantees, not just its license and star count).
 
 ## Alternatives considered
 
@@ -19,7 +19,7 @@ The three interfaces remain separate regardless of which concrete engine(s) back
 
 ## Consequences
 
-That diligence has since happened in [Graph search](../search/03-graph-search.md)'s own investigation, which surfaced real governance risk in the LadybugDB/Kuzu-fork landscape and settled the matter by elimination: `graphqlite` turned out to be Cypher-only, with no FTS/vector capability to share.
+None beyond the Decision above — no engine has yet earned bundled adoption through the diligence bar this ADR sets.
 
 ## Referenced from
 

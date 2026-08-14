@@ -7,7 +7,7 @@ date: 2026-08-12
 
 ## Context
 
-[Vector search](../search/02-vector-search.md) already settles `research_search_fetched` exposing `fts`/`vector`/`graph`/`hybrid` via a single `mode` parameter — one tool, several retrieval mechanisms, all sharing one domain: local corpus content already fetched into storage, returning a consistent chunk/doc-shaped result. `search.semantic` candidates need somewhere to surface too.
+[Vector search](../search/02-vector-search.md) already settles `research_search_fetched` exposing `fts`/`vector`/`hybrid` via a single `mode` parameter — one tool, several retrieval mechanisms, all sharing one domain: local corpus content already fetched into storage, returning a consistent chunk/doc-shaped result. `search.semantic` candidates need somewhere to surface too.
 
 ## Decision
 

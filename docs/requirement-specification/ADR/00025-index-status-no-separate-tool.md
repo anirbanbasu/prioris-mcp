@@ -7,11 +7,11 @@ date: 2026-08-12
 
 ## Context
 
-`fts`/`vector`/`graph` mechanisms become ready at different times (FTS is synchronous and near-immediate; vector needs an embedding pass; graph indexing will likely be slower still), so a caller needs some way to know a mechanism isn't ready yet rather than mistaking a `not_built`/`stale` mechanism's empty results for "no matches."
+`fts`/`vector` mechanisms become ready at different times (FTS is synchronous and near-immediate; vector needs an embedding pass), so a caller needs some way to know a mechanism isn't ready yet rather than mistaking a `not_built`/`stale` mechanism's empty results for "no matches."
 
 ## Decision
 
-Every search response carries an `index_status` field per mechanism (e.g. `{"fts": "ready", "vector": "stale", "graph": "not_built"}`) unconditionally — not only when results are empty, and not gated behind a separate status-check call.
+Every search response carries an `index_status` field per mechanism (e.g. `{"fts": "ready", "vector": "stale"}`) unconditionally — not only when results are empty, and not gated behind a separate status-check call.
 
 ## Alternatives considered
 
