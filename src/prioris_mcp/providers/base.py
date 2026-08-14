@@ -4,6 +4,7 @@ See docs/requirement-specification/01-architecture.md#researchpublicationprovide
 source means implementing this interface, not changing it.
 """
 
+import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
@@ -169,6 +170,7 @@ async def persist_parsed_markdown(
         entries = [
             {
                 "key": row["key"],
+                "chunk_id": str(uuid.uuid4()),
                 "start": row["start"],
                 "length": row["length"],
                 "text": markdown[row["start"] : row["start"] + row["length"]],

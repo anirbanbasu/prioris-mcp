@@ -523,3 +523,100 @@ class TestPersistParsedMarkdownVectorTrigger:
             assert len(scheduled) == 1
 
         asyncio.run(scenario())
+
+    def test_fresh_parse_with_heading_is_actually_searchable_end_to_end(self, tmp_path):
+        """Real vector backend/scheduler: a heading-chunked parse must be findable by search.
+
+        Before the C1 fix, entries carried a "key" field but no "chunk_id", so
+        SqliteVecDocumentBackend.index_entries raised KeyError inside the scheduled background
+        task - silently swallowed by EmbeddingScheduler._run's `except Exception:
+        logger.exception(...)`. That left the vector index permanently empty. This test exercises
+        the real SqliteVecDocumentBackend + FastEmbedBackend + EmbeddingScheduler stack (mirroring
+        tests/test_vector_sqlite_vec_document_backend.py's convention) end to end, so it would have
+        failed (empty search results) against the pre-fix code.
+        """
+        from prioris_mcp.vector.embedding import FastEmbedBackend
+        from prioris_mcp.vector.scheduler import EmbeddingScheduler
+        from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend
+
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"%PDF-1.4 raw")
+            backend = _CountingParserBackend(["# Intro\n\nTransformer attention mechanisms for sequence modeling."])
+            embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+            vector_backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
+            scheduler = EmbeddingScheduler()
+
+            await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=True,
+                vector_backend=vector_backend,
+                embedding_scheduler=scheduler,
+            )
+            await scheduler.wait_all()
+
+            query = await embedding.embed("attention-based neural network for sequences")
+            results = await vector_backend.search(query)
+
+            assert len(results) == 1
+            assert results[0]["provider"] == "arxiv"
+            assert results[0]["identifier"] == "2106.09685v2"
+            assert results[0]["format"] == "pdf"
+
+        asyncio.run(scenario())
+
+    def test_fresh_parse_with_no_heading_falls_back_to_leaf_rows_and_is_searchable(self, tmp_path):
+        """No headings -> detect_chunks() returns [] -> rows_for_search falls back to leaf rows.
+
+        This fallback path builds `entries` from a different manifest query than the heading-chunk
+        path, but through the same list comprehension in persist_parsed_markdown - it was equally
+        broken pre-fix (no "chunk_id" key) and is easy to miss if only the heading-chunk case is
+        tested.
+        """
+        from prioris_mcp.vector.embedding import FastEmbedBackend
+        from prioris_mcp.vector.scheduler import EmbeddingScheduler
+        from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend
+
+        async def scenario():
+            storage, search_index = _env(tmp_path)
+            await storage.write("arxiv", "2106.09685v2", "pdf", b"%PDF-1.4 raw")
+            backend = _CountingParserBackend(["Transformer attention mechanisms for sequence modeling."])
+            embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+            vector_backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
+            scheduler = EmbeddingScheduler()
+
+            await persist_parsed_markdown(
+                storage=storage,
+                search_index=search_index,
+                provider="arxiv",
+                canonical_identifier="2106.09685v2",
+                external_identifier="2106.09685v2",
+                source_format="pdf",
+                backend=backend,
+                offset=0,
+                limit=1000,
+                page=None,
+                page_aware=True,
+                vector_backend=vector_backend,
+                embedding_scheduler=scheduler,
+            )
+            await scheduler.wait_all()
+
+            query = await embedding.embed("attention-based neural network for sequences")
+            results = await vector_backend.search(query)
+
+            assert len(results) == 1
+            assert results[0]["provider"] == "arxiv"
+            assert results[0]["identifier"] == "2106.09685v2"
+            assert results[0]["format"] == "pdf"
+
+        asyncio.run(scenario())
