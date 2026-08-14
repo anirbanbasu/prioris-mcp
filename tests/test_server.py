@@ -1572,6 +1572,55 @@ class TestResearchSearchFetched:
         with pytest.raises(ToolError):
             asyncio.run(scenario())
 
+    def test_mode_vector_returns_vector_results(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention"}]
+                )
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector"},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["fts"] is None
+        assert len(result.structured_content["vector"]) == 1
+
+    def test_mode_hybrid_returns_both_mechanisms(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_search_fetched", arguments={"query": "anything", "mode": "hybrid"}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["fts"] == []
+        assert result.structured_content["vector"] == []
+
+    def test_unrecognised_mode_raises_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_search_fetched", arguments={"query": "x", "mode": "graph"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
 
 class TestResearchNotesCreate:
     """End-to-end MCP tool tests for research_notes_create."""

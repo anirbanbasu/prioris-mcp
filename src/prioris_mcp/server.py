@@ -45,6 +45,7 @@ from prioris_mcp.models.common import (
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, PagedNotes
+from prioris_mcp.models.vector import VectorSearchMatch
 from prioris_mcp.notes.backend import NotesBackend
 from prioris_mcp.notes.search_index import NotesSearchIndex, SqliteFts5NotesSearchIndex
 from prioris_mcp.notes.sqlite_backend import SqliteNotesBackend
@@ -61,6 +62,7 @@ from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
 from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 from prioris_mcp.vector.embedding import FastEmbedBackend
+from prioris_mcp.vector.mechanism import FtsMechanism, SearchMechanism, VectorMechanism
 from prioris_mcp.vector.scheduler import EmbeddingScheduler
 from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
@@ -166,12 +168,18 @@ class PriorisMCP(MCPMixin):
         # Minimal/temporary construction - Task 14 reconciles this into a fuller wiring pass that
         # also covers search-mechanism registries. Kept here (rather than left unwired) so Task 8's
         # background-indexing trigger in the providers below, and this task's note-vector
-        # scheduling/cascade, aren't dead code in the meantime.
+        # scheduling/cascade, aren't dead code in the meantime. `_search_mechanisms` (Task 12) is
+        # also part of this temporary block: it reuses the local `embedding_backend` below rather
+        # than the not-yet-promoted `self._embedding_backend` that Task 14 will introduce.
         vector_dir = grouping_dir(EnvVars.PRIORIS_MCP_VECTOR_DIR, DEFAULT_GROUPING)
         embedding_backend = FastEmbedBackend(EnvVars.PRIORIS_MCP_EMBEDDING_MODEL)
         self._document_vector_backend = SqliteVecDocumentBackend(vector_dir / "vectors.sqlite3", embedding_backend)
         self._note_vector_backend = SqliteVecNoteBackend(vector_dir / "notes-vectors.sqlite3", embedding_backend)
         self._embedding_scheduler = EmbeddingScheduler()
+        self._search_mechanisms: dict[str, SearchMechanism] = {
+            "fts": FtsMechanism(self._search_index),
+            "vector": VectorMechanism(self._document_vector_backend, embedding_backend),
+        }
         if EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS:
             logger.warning(
                 "HTTPS certificate verification is DISABLED (PRIORIS_MCP_UNVERIFIED_HTTPS=True) - "
@@ -468,21 +476,45 @@ class PriorisMCP(MCPMixin):
     async def research_search_fetched(
         self,
         ctx: Context,
-        query: Annotated[str, Field(description="FTS5 query syntax")],
+        query: Annotated[str, Field(description="FTS5 query syntax, or free text for vector/hybrid mode")],
         provider: Annotated[Literal["arxiv", "europepmc", "localfile"] | None, Field(default=None)] = None,
         identifier: Annotated[
             str | None, Field(default=None, description="Scopes to one document; requires provider")
         ] = None,
         format: Annotated[str | None, Field(default=None)] = None,
+        mode: Annotated[
+            str, Field(default="fts", description="A registered mechanism name (e.g. 'fts', 'vector'), or 'hybrid'")
+        ] = "fts",
     ) -> SearchFetchedResult:
-        """Full-text search over previously-persisted chunks (or leaves); never fetches or parses."""
+        """Search previously-persisted chunks; never fetches or parses. See mode for mechanism choice."""
         if identifier is not None and provider is None:
             raise InvalidRequestError("identifier requires provider")
-        try:
-            matches = await self._search_index.search(query, provider=provider, identifier=identifier, format=format)
-        except sqlite3.OperationalError as exc:
-            raise InvalidRequestError(f"invalid search query: {exc}") from exc
-        return SearchFetchedResult(fts=[SearchMatch(**match) for match in matches])
+        if mode == "hybrid":
+            selected = list(self._search_mechanisms.values())
+        else:
+            mechanism = self._search_mechanisms.get(mode)
+            if mechanism is None:
+                raise InvalidRequestError(f"unknown or unavailable mode: {mode!r}")
+            selected = [mechanism]
+
+        results: dict[str, list] = {}
+        for mechanism in selected:
+            try:
+                raw = await mechanism.search(query, provider=provider, identifier=identifier, format=format, limit=10)
+            except sqlite3.OperationalError as exc:
+                raise InvalidRequestError(f"invalid search query: {exc}") from exc
+            results[mechanism.name] = raw
+
+        index_status: dict[str, str] = {}
+        if identifier is not None and provider is not None:
+            for mechanism in self._search_mechanisms.values():
+                index_status[mechanism.name] = await mechanism.status(provider, identifier, format or "")
+
+        return SearchFetchedResult(
+            fts=[SearchMatch(**m) for m in results["fts"]] if "fts" in results else None,
+            vector=[VectorSearchMatch(**m) for m in results["vector"]] if "vector" in results else None,
+            index_status=index_status,
+        )
 
     async def research_notes_create(
         self,
