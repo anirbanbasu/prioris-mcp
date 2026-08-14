@@ -60,6 +60,9 @@ from prioris_mcp.providers.localfile import LocalFileProvider, UploadSessionMana
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
 from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
+from prioris_mcp.vector.embedding import FastEmbedBackend
+from prioris_mcp.vector.scheduler import EmbeddingScheduler
+from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
 package_version = version(PACKAGE_NAME)
 logger = logging.getLogger(__name__)
@@ -160,6 +163,15 @@ class PriorisMCP(MCPMixin):
         storage_dir = grouping_dir(EnvVars.PRIORIS_MCP_STORAGE_DIR, DEFAULT_GROUPING)
         self._storage = FilesystemStorageBackend(storage_dir)
         self._search_index = SqliteFts5SearchIndex(storage_dir / "search.sqlite3")
+        # Minimal/temporary construction - Task 14 reconciles this into a fuller wiring pass that
+        # also covers search-mechanism registries. Kept here (rather than left unwired) so Task 8's
+        # background-indexing trigger in the providers below, and this task's note-vector
+        # scheduling/cascade, aren't dead code in the meantime.
+        vector_dir = grouping_dir(EnvVars.PRIORIS_MCP_VECTOR_DIR, DEFAULT_GROUPING)
+        embedding_backend = FastEmbedBackend(EnvVars.PRIORIS_MCP_EMBEDDING_MODEL)
+        self._document_vector_backend = SqliteVecDocumentBackend(vector_dir / "vectors.sqlite3", embedding_backend)
+        self._note_vector_backend = SqliteVecNoteBackend(vector_dir / "notes-vectors.sqlite3", embedding_backend)
+        self._embedding_scheduler = EmbeddingScheduler()
         if EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS:
             logger.warning(
                 "HTTPS certificate verification is DISABLED (PRIORIS_MCP_UNVERIFIED_HTTPS=True) - "
@@ -184,6 +196,8 @@ class PriorisMCP(MCPMixin):
             html_backend=html_backend,
             search_index=self._search_index,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
+            vector_backend=self._document_vector_backend,
+            embedding_scheduler=self._embedding_scheduler,
         )
         europepmc_queue = ProviderRequestQueue(
             base_spacing_seconds=EUROPEPMC_BASE_SPACING_SECONDS,
@@ -197,6 +211,8 @@ class PriorisMCP(MCPMixin):
             xml_backend=jats_backend,
             search_index=self._search_index,
             default_inline_char_limit=EnvVars.PRIORIS_MCP_MAX_INLINE_CHARS,
+            vector_backend=self._document_vector_backend,
+            embedding_scheduler=self._embedding_scheduler,
         )
         self._localfile_provider = LocalFileProvider(
             storage=self._storage,
@@ -210,6 +226,8 @@ class PriorisMCP(MCPMixin):
                 max_total_bytes=EnvVars.PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES,
                 max_concurrent=EnvVars.PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CONCURRENT_SESSIONS,
             ),
+            vector_backend=self._document_vector_backend,
+            embedding_scheduler=self._embedding_scheduler,
         )
         notes_dir = grouping_dir(EnvVars.PRIORIS_MCP_NOTES_DIR, DEFAULT_GROUPING)
         self._notes_search_index: NotesSearchIndex = SqliteFts5NotesSearchIndex(notes_dir / "notes-search.sqlite3")
@@ -481,7 +499,7 @@ class PriorisMCP(MCPMixin):
     ) -> Note:
         """Create a new user-authored note against a document, or against a bare identifier."""
         canonical_identifier = await self._resolve_canonical_identifier_for_notes(provider, identifier, format)
-        return await self._notes_backend.create(
+        note = await self._notes_backend.create(
             provider,
             canonical_identifier,
             format,
@@ -491,6 +509,10 @@ class PriorisMCP(MCPMixin):
             tags=tags,
             metadata=metadata,
         )
+        self._embedding_scheduler.schedule(
+            ("note", note.id), lambda: self._note_vector_backend.index_note(note.id, note.text)
+        )
+        return note
 
     async def research_notes_read(
         self, ctx: Context, note_id: Annotated[str, Field(description="A note id returned by research_notes_create")]
@@ -512,15 +534,25 @@ class PriorisMCP(MCPMixin):
     ) -> Note:
         """Partially edit an existing note; fields left as None are unchanged."""
         try:
-            return await self._notes_backend.update(note_id, text=text, anchors=anchors, tags=tags, metadata=metadata)
+            updated = await self._notes_backend.update(
+                note_id, text=text, anchors=anchors, tags=tags, metadata=metadata
+            )
         except FileNotFoundError as exc:
             raise NotFoundError(str(exc)) from exc
+        if text is not None:
+            self._embedding_scheduler.schedule(
+                ("note", note_id), lambda: self._note_vector_backend.index_note(note_id, updated.text)
+            )
+        return updated
 
     async def research_notes_delete(
         self, ctx: Context, note_id: Annotated[str, Field(description="A note id returned by research_notes_create")]
     ) -> bool:
         """Delete a note by id. Returns False, not an error, if it's already absent."""
-        return await self._notes_backend.delete(note_id)
+        removed = await self._notes_backend.delete(note_id)
+        if removed:
+            await self._note_vector_backend.remove_note(note_id)
+        return removed
 
     async def research_notes_search(
         self,
@@ -571,6 +603,7 @@ class PriorisMCP(MCPMixin):
             removed = await self._storage.delete(entry.provider, entry.identifier, entry.format_, entry.artefact)
             if removed and entry.artefact in ("markdown", "all"):
                 await self._search_index.remove_document(entry.provider, entry.identifier, entry.format_)
+                await self._document_vector_backend.remove_document(entry.provider, entry.identifier, entry.format_)
             (deleted if removed else not_found).append(entry)
         return DeleteFetchedResult(deleted=deleted, not_found=not_found)
 

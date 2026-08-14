@@ -1625,6 +1625,25 @@ class TestResearchNotesCreate:
         with pytest.raises(ToolError, match="location or selectors"):
             asyncio.run(scenario())
 
+    def test_notes_create_schedules_vector_indexing(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        client = Client(transport=server_with_features, timeout=60)
+
+        async def scenario():
+            async with client:
+                result = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "2106.09685v2", "text": "a note"},
+                )
+                note_id = result.structured_content["id"]  # ty: ignore[not-subscriptable]
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await mcp_obj._note_vector_backend.status(note_id)
+
+        assert asyncio.run(scenario()) == "ready"
+
 
 class TestResearchNotesRead:
     """End-to-end MCP tool tests for research_notes_read."""
@@ -1765,6 +1784,26 @@ class TestResearchNotesDelete:
 
         result = asyncio.run(scenario())
         assert result.structured_content["result"] is False
+
+    def test_notes_delete_removes_vector_entry(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        client = Client(transport=server_with_features, timeout=60)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "2106.09685v2", "text": "a note"},
+                )
+                note_id = created.structured_content["id"]  # ty: ignore[not-subscriptable]
+                await mcp_obj._embedding_scheduler.wait_all()
+                await client.call_tool("research_notes_delete", arguments={"note_id": note_id})
+                return await mcp_obj._note_vector_backend.status(note_id)
+
+        assert asyncio.run(scenario()) == "not_built"
 
 
 class TestResearchNotesSearch:
