@@ -103,6 +103,55 @@ class TestCancel:
         scheduler = EmbeddingScheduler()
         scheduler.cancel(("never-scheduled",))  # must not raise
 
+    def test_cancel_racing_a_fresh_schedule_does_not_let_stale_cleanup_evict_the_new_task(self):
+        scheduler = EmbeddingScheduler()
+        first_started = asyncio.Event()
+        first_release = asyncio.Event()
+        second_started = asyncio.Event()
+        second_release = asyncio.Event()
+        effects: list[str] = []
+
+        async def first_factory():
+            first_started.set()
+            await first_release.wait()
+            effects.append("first")  # must never run - cancelled before reaching here
+
+        async def second_factory():
+            second_started.set()
+            await second_release.wait()
+            effects.append("second")
+
+        async def scenario():
+            scheduler.schedule(("k",), first_factory)
+            await first_started.wait()
+            old_task = scheduler._tasks[("k",)]
+
+            # cancel() and the very next schedule() for the same key run back-to-back with no
+            # await in between - the old task's cancellation hasn't been delivered yet (that needs
+            # an event-loop turn), so a second caller can install a fresh task for the same key
+            # before the old one's `finally` clause has run.
+            scheduler.cancel(("k",))
+            scheduler.schedule(("k",), second_factory)
+            new_task = scheduler._tasks[("k",)]
+
+            # Give the loop enough turns to both deliver the old task's cancellation (running its
+            # finally clause) and let the new task make real progress.
+            with contextlib.suppress(asyncio.CancelledError):
+                await old_task
+            await second_started.wait()
+
+            still_building = scheduler.is_building(("k",))
+            same_task_on_record = scheduler._tasks.get(("k",)) is new_task
+
+            second_release.set()
+            await scheduler.wait_all()
+            return still_building, same_task_on_record
+
+        still_building, same_task_on_record = asyncio.run(scenario())
+        assert still_building is True
+        assert same_task_on_record is True
+        assert effects == ["second"]
+
 
 class TestDirtyRerun:
     """Tests for the schedule-while-in-flight rerun mechanism (I2)."""

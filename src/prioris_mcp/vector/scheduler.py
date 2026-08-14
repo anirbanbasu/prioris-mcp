@@ -51,7 +51,12 @@ class EmbeddingScheduler:
         except Exception:
             logger.exception("Background embedding task failed for key=%r", key)
         finally:
-            self._tasks.pop(key, None)
+            # A cancel() may have already evicted (and replaced) this key's entry with a newer
+            # task before this finally clause runs (cancellation delivery is not instantaneous) -
+            # only pop if we're still the task on record, so a superseded run's cleanup can't
+            # evict a newer task's bookkeeping entry.
+            if self._tasks.get(key) is asyncio.current_task():
+                self._tasks.pop(key, None)
         pending = self._pending.pop(key, None)
         if pending is not None:
             self.schedule(key, pending)
