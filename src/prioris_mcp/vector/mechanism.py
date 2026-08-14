@@ -9,8 +9,9 @@ hardcodes which mechanisms exist.
 
 from abc import ABC, abstractmethod
 
+from prioris_mcp.notes.search_index import NotesSearchIndex
 from prioris_mcp.storage.search_index import SearchIndex
-from prioris_mcp.vector.backend import DocumentVectorSearchBackend, IndexStatus
+from prioris_mcp.vector.backend import DocumentVectorSearchBackend, IndexStatus, NoteVectorSearchBackend
 from prioris_mcp.vector.embedding import EmbeddingBackend
 
 
@@ -70,3 +71,35 @@ class VectorMechanism(SearchMechanism):
 
     async def status(self, provider: str, identifier: str, format: str) -> IndexStatus:
         return await self._vector_backend.status(provider, identifier, format)
+
+
+class NotesFtsMechanism:
+    """Adapts `NotesSearchIndex` to a notes-scoped search shape.
+
+    Not a `SearchMechanism` subclass: notes-search's structural filters (provider, date range,
+    tags, author, ...) live on `NotesBackend.search` itself, applied by the caller before this
+    mechanism ever runs - so `search` here takes only `query`/`limit`, no provider/identifier/
+    format scoping and no `status` method.
+    """
+
+    name = "fts"
+
+    def __init__(self, notes_search_index: NotesSearchIndex) -> None:
+        self._notes_search_index = notes_search_index
+
+    async def search(self, query: str, *, limit: int) -> list[str]:
+        return (await self._notes_search_index.search(query))[:limit]
+
+
+class NotesVectorMechanism:
+    """Adapts `NoteVectorSearchBackend` + `EmbeddingBackend` to a notes-scoped search shape."""
+
+    name = "vector"
+
+    def __init__(self, note_vector_backend: NoteVectorSearchBackend, embedding_backend: EmbeddingBackend) -> None:
+        self._note_vector_backend = note_vector_backend
+        self._embedding_backend = embedding_backend
+
+    async def search(self, query: str, *, note_ids: list[str] | None = None, limit: int = 10) -> list[dict]:
+        query_embedding = await self._embedding_backend.embed(query)
+        return await self._note_vector_backend.search(query_embedding, note_ids=note_ids, limit=limit)

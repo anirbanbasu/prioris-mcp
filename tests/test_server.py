@@ -1894,7 +1894,7 @@ class TestResearchNotesSearch:
                 return await client.call_tool("research_notes_search", arguments={})
 
         result = asyncio.run(scenario())
-        assert result.structured_content["total"] == 2
+        assert result.structured_content["fts"]["total"] == 2
 
     def test_keyword_filters_by_text(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         client = self._server_and_client(tmp_path, monkeypatch)
@@ -1913,7 +1913,7 @@ class TestResearchNotesSearch:
                 return await client.call_tool("research_notes_search", arguments={"keyword": "latency"})
 
         result = asyncio.run(scenario())
-        assert result.structured_content["total"] >= 1
+        assert result.structured_content["fts"]["total"] >= 1
 
     def test_author_filter_named_without_author_name_is_a_tool_error(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -1955,6 +1955,49 @@ class TestResearchNotesSearch:
         async def scenario():
             async with client:
                 return await client.call_tool("research_notes_search", arguments={"date_from": "not-a-date"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_mode_vector_returns_note_vector_results(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                ), created
+
+        result, created = asyncio.run(scenario())
+        assert result.structured_content["fts"] is None
+        assert len(result.structured_content["vector"]) == 1
+        assert result.structured_content["vector"][0]["note_id"] == created.structured_content["id"]
+
+    def test_mode_vector_without_keyword_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"mode": "vector"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_unrecognised_mode_raises_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"mode": "graph"})
 
         with pytest.raises(ToolError):
             asyncio.run(scenario())

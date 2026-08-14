@@ -8,6 +8,8 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from prioris_mcp.models.vector import NoteVectorSearchMatch
+
 
 class AnchorLocation(BaseModel):
     """Coarse, unvalidated positional hint - never resolved against manifest.sqlite."""
@@ -116,3 +118,17 @@ class PagedNotes(BaseModel):
     limit: Annotated[int, Field(..., strict=True)]
     total: Annotated[int, Field(..., strict=True)]
     has_more: Annotated[bool, Field(..., strict=True)]
+
+
+class NotesSearchResult(BaseModel):
+    """Output of `research_notes_search`.
+
+    See docs/requirement-specification/search/02-vector-search.md#composition-a-mode-parameter-not-a-new-opaque-smart-search.
+    `fts`/`vector` are each populated only when that mechanism was requested (mode == that name,
+    or mode == "hybrid" with a keyword given to embed).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fts: Annotated[PagedNotes | None, Field(default=None)] = None
+    vector: Annotated[list[NoteVectorSearchMatch] | None, Field(default=None)] = None

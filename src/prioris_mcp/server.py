@@ -2,7 +2,7 @@ import logging
 import sqlite3
 import sys
 from importlib.metadata import version
-from typing import Annotated, ClassVar, Literal
+from typing import Annotated, ClassVar, Literal, cast
 
 import httpx
 import uvicorn
@@ -44,8 +44,8 @@ from prioris_mcp.models.common import (
 )
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
-from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, PagedNotes
-from prioris_mcp.models.vector import VectorSearchMatch
+from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, NotesSearchResult, PagedNotes
+from prioris_mcp.models.vector import NoteVectorSearchMatch, VectorSearchMatch
 from prioris_mcp.notes.backend import NotesBackend
 from prioris_mcp.notes.search_index import NotesSearchIndex, SqliteFts5NotesSearchIndex
 from prioris_mcp.notes.sqlite_backend import SqliteNotesBackend
@@ -62,7 +62,13 @@ from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
 from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 from prioris_mcp.vector.embedding import FastEmbedBackend
-from prioris_mcp.vector.mechanism import FtsMechanism, SearchMechanism, VectorMechanism
+from prioris_mcp.vector.mechanism import (
+    FtsMechanism,
+    NotesFtsMechanism,
+    NotesVectorMechanism,
+    SearchMechanism,
+    VectorMechanism,
+)
 from prioris_mcp.vector.scheduler import EmbeddingScheduler
 from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
@@ -168,9 +174,10 @@ class PriorisMCP(MCPMixin):
         # Minimal/temporary construction - Task 14 reconciles this into a fuller wiring pass that
         # also covers search-mechanism registries. Kept here (rather than left unwired) so Task 8's
         # background-indexing trigger in the providers below, and this task's note-vector
-        # scheduling/cascade, aren't dead code in the meantime. `_search_mechanisms` (Task 12) is
-        # also part of this temporary block: it reuses the local `embedding_backend` below rather
-        # than the not-yet-promoted `self._embedding_backend` that Task 14 will introduce.
+        # scheduling/cascade, aren't dead code in the meantime. `_search_mechanisms` (Task 12) and
+        # `_notes_search_mechanisms` (Task 13) are also part of this temporary block: both reuse
+        # the local `embedding_backend` below rather than the not-yet-promoted
+        # `self._embedding_backend` that Task 14 will introduce.
         vector_dir = grouping_dir(EnvVars.PRIORIS_MCP_VECTOR_DIR, DEFAULT_GROUPING)
         embedding_backend = FastEmbedBackend(EnvVars.PRIORIS_MCP_EMBEDDING_MODEL)
         self._document_vector_backend = SqliteVecDocumentBackend(vector_dir / "vectors.sqlite3", embedding_backend)
@@ -240,6 +247,10 @@ class PriorisMCP(MCPMixin):
         notes_dir = grouping_dir(EnvVars.PRIORIS_MCP_NOTES_DIR, DEFAULT_GROUPING)
         self._notes_search_index: NotesSearchIndex = SqliteFts5NotesSearchIndex(notes_dir / "notes-search.sqlite3")
         self._notes_backend: NotesBackend = SqliteNotesBackend(notes_dir / "notes.sqlite", self._notes_search_index)
+        self._notes_search_mechanisms = {
+            "fts": NotesFtsMechanism(self._notes_search_index),
+            "vector": NotesVectorMechanism(self._note_vector_backend, embedding_backend),
+        }
 
     async def research_arxiv_search(
         self,
@@ -605,28 +616,46 @@ class PriorisMCP(MCPMixin):
         tags_exclude: Annotated[list[str], Field(default_factory=list)],
         offset: Annotated[int, Field(default=0)] = 0,
         limit: Annotated[int, Field(default=50)] = 50,
-    ) -> PagedNotes:
-        """Search/list notes; no filters at all returns everything, paged, newest first."""
-        try:
-            return await self._notes_backend.search(
-                provider=provider,
-                canonical_identifier=canonical_identifier,
-                format=format,
-                date_from=date_from,
-                date_to=date_to,
-                keyword=keyword,
-                author_filter=author_filter,
-                author_name=author_name,
-                tags_all=tags_all,
-                tags_any=tags_any,
-                tags_exclude=tags_exclude,
-                offset=offset,
-                limit=limit,
-            )
-        except ValueError as exc:
-            raise InvalidRequestError(str(exc)) from exc
-        except sqlite3.OperationalError as exc:
-            raise InvalidRequestError(f"invalid search query: {exc}") from exc
+        mode: Annotated[
+            str, Field(default="fts", description="A registered mechanism name (e.g. 'fts', 'vector'), or 'hybrid'")
+        ] = "fts",
+    ) -> NotesSearchResult:
+        """Search/list notes; no filters at all returns everything, paged, newest first. See mode for mechanism choice."""
+        if mode not in ("fts", "vector", "hybrid"):
+            raise InvalidRequestError(f"unknown or unavailable mode: {mode!r}")
+        if mode == "vector" and keyword is None:
+            raise InvalidRequestError("mode='vector' requires keyword: nothing to embed")
+
+        fts_result: PagedNotes | None = None
+        if mode in ("fts", "hybrid"):
+            try:
+                fts_result = await self._notes_backend.search(
+                    provider=provider,
+                    canonical_identifier=canonical_identifier,
+                    format=format,
+                    date_from=date_from,
+                    date_to=date_to,
+                    keyword=keyword,
+                    author_filter=author_filter,
+                    author_name=author_name,
+                    tags_all=tags_all,
+                    tags_any=tags_any,
+                    tags_exclude=tags_exclude,
+                    offset=offset,
+                    limit=limit,
+                )
+            except ValueError as exc:
+                raise InvalidRequestError(str(exc)) from exc
+            except sqlite3.OperationalError as exc:
+                raise InvalidRequestError(f"invalid search query: {exc}") from exc
+
+        vector_result: list[NoteVectorSearchMatch] | None = None
+        if mode in ("vector", "hybrid") and keyword is not None:
+            mechanism = cast(NotesVectorMechanism, self._notes_search_mechanisms["vector"])
+            raw = await mechanism.search(keyword, note_ids=None, limit=limit)
+            vector_result = [NoteVectorSearchMatch(**m) for m in raw]
+
+        return NotesSearchResult(fts=fts_result, vector=vector_result)
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []
