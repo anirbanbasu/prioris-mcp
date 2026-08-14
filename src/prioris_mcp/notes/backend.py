@@ -95,3 +95,28 @@ class NotesBackend(ABC):
         Raises:
             FileNotFoundError: no note with this id exists.
         """
+
+    @abstractmethod
+    async def matching_ids(
+        self,
+        *,
+        provider: str | None = None,
+        canonical_identifier: str | None = None,
+        format: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        author_filter: AuthorFilter = AuthorFilter.ANY,
+        author_name: str | None = None,
+        tags_all: list[str] | None = None,
+        tags_any: list[str] | None = None,
+        tags_exclude: list[str] | None = None,
+    ) -> list[str]:
+        """Every note id matching these structural filters alone, unpaginated.
+
+        Used to scope a vector/hybrid search by the same filters `search()`'s fts/hybrid path
+        already applies. Takes no `keyword` and no pagination.
+
+        Raises:
+            ValueError: `author_filter == NAMED` without `author_name`, or vice versa;
+                or `canonical_identifier` given without `provider`.
+        """

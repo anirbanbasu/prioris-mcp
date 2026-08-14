@@ -269,6 +269,106 @@ class TestSqliteNotesBackendSearchStructuredFilters:
         assert {n.canonical_identifier for n in result.notes} == {"A"}
 
 
+class TestMatchingIds:
+    """Test SqliteNotesBackend.matching_ids: structural filters only, unpaginated id list."""
+
+    def _seed(self, backend):
+        asyncio.run(backend.create("arxiv", "A", "pdf", "note A", author_name=None, tags=["x", "y"]))
+        asyncio.run(backend.create("arxiv", "B", "pdf", "note B", author_name="Dr. Advisor", tags=["x"]))
+        asyncio.run(backend.create("europepmc", "C", "pdf", "note C", author_name=None, tags=["y", "z"]))
+
+    def test_no_filters_returns_every_id(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        ids = asyncio.run(backend.matching_ids())
+        assert len(ids) == 3
+
+    def test_provider_filter(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        result = asyncio.run(backend.search(provider="europepmc"))
+        expected_id = result.notes[0].id
+        ids = asyncio.run(backend.matching_ids(provider="europepmc"))
+        assert ids == [expected_id]
+
+    def test_provider_and_canonical_identifier_filter(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        result = asyncio.run(backend.search(provider="arxiv", canonical_identifier="B"))
+        expected_id = result.notes[0].id
+        ids = asyncio.run(backend.matching_ids(provider="arxiv", canonical_identifier="B"))
+        assert ids == [expected_id]
+
+    def test_canonical_identifier_without_provider_raises(self, tmp_path):
+        backend = _backend(tmp_path)
+        with pytest.raises(ValueError, match="provider"):
+            asyncio.run(backend.matching_ids(canonical_identifier="B"))
+
+    def test_author_filter_mine_returns_only_null_author(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        result = asyncio.run(backend.search(author_filter=AuthorFilter.MINE))
+        expected_ids = {n.id for n in result.notes}
+        ids = asyncio.run(backend.matching_ids(author_filter=AuthorFilter.MINE))
+        assert set(ids) == expected_ids
+
+    def test_author_filter_named_returns_only_that_author(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        result = asyncio.run(backend.search(author_filter=AuthorFilter.NAMED, author_name="Dr. Advisor"))
+        expected_ids = {n.id for n in result.notes}
+        ids = asyncio.run(backend.matching_ids(author_filter=AuthorFilter.NAMED, author_name="Dr. Advisor"))
+        assert set(ids) == expected_ids
+
+    def test_author_filter_named_without_author_name_raises(self, tmp_path):
+        backend = _backend(tmp_path)
+        with pytest.raises(ValueError, match="author_name"):
+            asyncio.run(backend.matching_ids(author_filter=AuthorFilter.NAMED))
+
+    def test_author_name_without_named_filter_raises(self, tmp_path):
+        backend = _backend(tmp_path)
+        with pytest.raises(ValueError, match="author_name"):
+            asyncio.run(backend.matching_ids(author_filter=AuthorFilter.ANY, author_name="Dr. Advisor"))
+
+    def test_tags_all_requires_every_tag(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        result = asyncio.run(backend.search(tags_all=["x", "y"]))
+        expected_ids = {n.id for n in result.notes}
+        ids = asyncio.run(backend.matching_ids(tags_all=["x", "y"]))
+        assert set(ids) == expected_ids
+
+    def test_tags_any_requires_at_least_one_tag(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        result = asyncio.run(backend.search(tags_any=["z"]))
+        expected_ids = {n.id for n in result.notes}
+        ids = asyncio.run(backend.matching_ids(tags_any=["z"]))
+        assert set(ids) == expected_ids
+
+    def test_tags_exclude_removes_matching_notes(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        result = asyncio.run(backend.search(tags_exclude=["x"]))
+        expected_ids = {n.id for n in result.notes}
+        ids = asyncio.run(backend.matching_ids(tags_exclude=["x"]))
+        assert set(ids) == expected_ids
+
+    def test_date_range_filters_by_created_at(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        far_future = "2999-01-01T00:00:00+00:00"
+        ids = asyncio.run(backend.matching_ids(date_from=far_future))
+        assert ids == []
+
+    def test_date_to_filter(self, tmp_path):
+        backend = _backend(tmp_path)
+        self._seed(backend)
+        far_past = "1970-01-01T00:00:00+00:00"
+        ids = asyncio.run(backend.matching_ids(date_to=far_past))
+        assert ids == []
+
+
 class TestSqliteNotesBackendSearchKeyword:
     """Test SqliteNotesBackend.search method with the keyword filter."""
 

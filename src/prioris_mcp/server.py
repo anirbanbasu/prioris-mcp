@@ -662,9 +662,36 @@ class PriorisMCP(MCPMixin):
 
         vector_result: list[NoteVectorSearchMatch] | None = None
         if mode in ("vector", "hybrid") and keyword is not None:
+            structural_filters_given = any(
+                [
+                    provider is not None,
+                    canonical_identifier is not None,
+                    format is not None,
+                    date_from is not None,
+                    date_to is not None,
+                    author_filter != AuthorFilter.ANY,
+                    tags_all,
+                    tags_any,
+                    tags_exclude,
+                ]
+            )
+            note_ids = None
+            if structural_filters_given:
+                note_ids = await self._notes_backend.matching_ids(
+                    provider=provider,
+                    canonical_identifier=canonical_identifier,
+                    format=format,
+                    date_from=date_from,
+                    date_to=date_to,
+                    author_filter=author_filter,
+                    author_name=author_name,
+                    tags_all=tags_all,
+                    tags_any=tags_any,
+                    tags_exclude=tags_exclude,
+                )
             mechanism = cast(NotesVectorMechanism, self._notes_search_mechanisms["vector"])
-            raw = await mechanism.search(keyword, note_ids=None, limit=limit)
-            vector_result = [NoteVectorSearchMatch(**m) for m in raw]
+            raw = await mechanism.search(keyword, note_ids=note_ids, limit=offset + limit)
+            vector_result = [NoteVectorSearchMatch(**m) for m in raw[offset:]]
 
         return NotesSearchResult(fts=fts_result, vector=vector_result)
 

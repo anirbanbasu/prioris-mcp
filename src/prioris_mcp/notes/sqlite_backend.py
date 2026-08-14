@@ -333,6 +333,50 @@ class SqliteNotesBackend(NotesBackend):
 
         return await to_thread.run_sync(_search_by_ids)
 
+    async def matching_ids(
+        self,
+        *,
+        provider: str | None = None,
+        canonical_identifier: str | None = None,
+        format: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        author_filter: AuthorFilter = AuthorFilter.ANY,
+        author_name: str | None = None,
+        tags_all: list[str] | None = None,
+        tags_any: list[str] | None = None,
+        tags_exclude: list[str] | None = None,
+    ) -> list[str]:
+        if author_filter == AuthorFilter.NAMED and author_name is None:
+            raise ValueError("author_filter=NAMED requires author_name")
+        if author_filter != AuthorFilter.NAMED and author_name is not None:
+            raise ValueError("author_name is only used when author_filter=NAMED")
+        if canonical_identifier is not None and provider is None:
+            raise ValueError(
+                "canonical_identifier requires provider — canonical identifiers are only unique within a provider's own scheme"
+            )
+        date_from = _normalise_date_boundary(date_from, "date_from")
+        date_to = _normalise_date_boundary(date_to, "date_to")
+        where, params = self._build_search_where_and_params(
+            provider,
+            canonical_identifier,
+            format,
+            date_from,
+            date_to,
+            author_filter,
+            author_name,
+            tags_all,
+            tags_any,
+            tags_exclude,
+        )
+
+        def _query() -> list[str]:
+            with self._connect() as conn:
+                rows = conn.execute(f"SELECT id FROM notes {where}", params).fetchall()
+                return [row["id"] for row in rows]
+
+        return await to_thread.run_sync(_query)
+
     async def export(self, note_id: str) -> NoteExport:
         note = await self.read(note_id)
         frontmatter = note.model_dump(mode="json", by_alias=True, exclude={"text"})

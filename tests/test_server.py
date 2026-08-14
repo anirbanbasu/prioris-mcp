@@ -2133,6 +2133,80 @@ class TestResearchNotesSearch:
         assert len(result.structured_content["vector"]) == 1
         assert result.structured_content["vector"][0]["note_id"] == created.structured_content["id"]
 
+    def test_mode_vector_structural_filter_excludes_other_provider_match(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                created_arxiv = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "notes about feline companions"},
+                )
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "europepmc", "identifier": "B", "text": "notes about feline companions"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                result = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "feline companions", "mode": "vector", "provider": "arxiv"},
+                )
+                return result, created_arxiv
+
+        result, created_arxiv = asyncio.run(scenario())
+        vector_matches = result.structured_content["vector"]
+        assert len(vector_matches) == 1
+        assert vector_matches[0]["note_id"] == created_arxiv.structured_content["id"]
+
+    def test_mode_vector_offset_pages_without_repeat_or_skip(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "arxiv",
+                        "identifier": "A",
+                        "text": "feline companions and their behaviour",
+                    },
+                )
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "arxiv",
+                        "identifier": "B",
+                        "text": "canine companions and their behaviour",
+                    },
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                first = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "pet companion behaviour", "mode": "vector", "offset": 0, "limit": 1},
+                )
+                second = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "pet companion behaviour", "mode": "vector", "offset": 1, "limit": 1},
+                )
+                return first, second
+
+        first, second = asyncio.run(scenario())
+        first_ids = [m["note_id"] for m in first.structured_content["vector"]]
+        second_ids = [m["note_id"] for m in second.structured_content["vector"]]
+        assert len(first_ids) == 1
+        assert len(second_ids) == 1
+        assert first_ids != second_ids
+
     def test_mode_vector_without_keyword_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         client = self._server_and_client(tmp_path, monkeypatch)
 
