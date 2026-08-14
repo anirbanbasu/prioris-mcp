@@ -58,6 +58,18 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
     def _connect(self) -> sqlite3.Connection:
         conn = _connect_with_vec(self._path)
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS document_vectors_status ("
+            "provider TEXT NOT NULL, identifier TEXT NOT NULL, format TEXT NOT NULL, "
+            "embedded_model TEXT NOT NULL, PRIMARY KEY (provider, identifier, format))"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS document_vectors_meta "
+            "(id INTEGER PRIMARY KEY CHECK (id = 1), dimension INTEGER NOT NULL)"
+        )
+        meta_row = conn.execute("SELECT dimension FROM document_vectors_meta WHERE id = 1").fetchone()
+        if meta_row is not None and meta_row["dimension"] != self._embedding_backend.dimension:
+            conn.execute("DROP TABLE IF EXISTS document_vectors")
+        conn.execute(
             f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(
                 embedding FLOAT[{self._embedding_backend.dimension}] distance_metric=cosine,
@@ -70,6 +82,11 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
                 +embedded_model TEXT
             )
             """
+        )
+        conn.execute(
+            "INSERT INTO document_vectors_meta (id, dimension) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET dimension = excluded.dimension",
+            (self._embedding_backend.dimension,),
         )
         return conn
 
@@ -108,6 +125,13 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
                             self._embedding_backend.model_name,
                         ),
                     )
+                if windows:
+                    conn.execute(
+                        "INSERT INTO document_vectors_status (provider, identifier, format, embedded_model) "
+                        "VALUES (?, ?, ?, ?) ON CONFLICT(provider, identifier, format) "
+                        "DO UPDATE SET embedded_model = excluded.embedded_model",
+                        (provider, identifier, format, self._embedding_backend.model_name),
+                    )
 
         await to_thread.run_sync(_write)
 
@@ -118,6 +142,10 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
             with self._connect() as conn:
                 conn.execute(
                     "DELETE FROM document_vectors WHERE provider = ? AND identifier = ? AND format = ?",
+                    (provider, identifier, format),
+                )
+                conn.execute(
+                    "DELETE FROM document_vectors_status WHERE provider = ? AND identifier = ? AND format = ?",
                     (provider, identifier, format),
                 )
 
@@ -191,7 +219,8 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
         def _status() -> IndexStatus:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT embedded_model FROM document_vectors WHERE provider = ? AND identifier = ? AND format = ? LIMIT 1",
+                    "SELECT embedded_model FROM document_vectors_status "
+                    "WHERE provider = ? AND identifier = ? AND format = ?",
                     (provider, identifier, format),
                 ).fetchone()
             if row is None:
@@ -221,6 +250,17 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
     def _connect(self) -> sqlite3.Connection:
         conn = _connect_with_vec(self._path)
         conn.execute(
+            "CREATE TABLE IF NOT EXISTS note_vectors_status "
+            "(note_id TEXT NOT NULL PRIMARY KEY, embedded_model TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS note_vectors_meta "
+            "(id INTEGER PRIMARY KEY CHECK (id = 1), dimension INTEGER NOT NULL)"
+        )
+        meta_row = conn.execute("SELECT dimension FROM note_vectors_meta WHERE id = 1").fetchone()
+        if meta_row is not None and meta_row["dimension"] != self._embedding_backend.dimension:
+            conn.execute("DROP TABLE IF EXISTS note_vectors")
+        conn.execute(
             f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS note_vectors USING vec0(
                 embedding FLOAT[{self._embedding_backend.dimension}] distance_metric=cosine,
@@ -229,6 +269,11 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
                 +embedded_model TEXT
             )
             """
+        )
+        conn.execute(
+            "INSERT INTO note_vectors_meta (id, dimension) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET dimension = excluded.dimension",
+            (self._embedding_backend.dimension,),
         )
         return conn
 
@@ -243,6 +288,11 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
                     "INSERT INTO note_vectors (embedding, note_id, text, embedded_model) VALUES (?, ?, ?, ?)",
                     (json.dumps(embedding), note_id, text, self._embedding_backend.model_name),
                 )
+                conn.execute(
+                    "INSERT INTO note_vectors_status (note_id, embedded_model) VALUES (?, ?) "
+                    "ON CONFLICT(note_id) DO UPDATE SET embedded_model = excluded.embedded_model",
+                    (note_id, self._embedding_backend.model_name),
+                )
 
         await to_thread.run_sync(_write)
 
@@ -252,6 +302,7 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
         def _remove() -> None:
             with self._connect() as conn:
                 conn.execute("DELETE FROM note_vectors WHERE note_id = ?", (note_id,))
+                conn.execute("DELETE FROM note_vectors_status WHERE note_id = ?", (note_id,))
 
         await to_thread.run_sync(_remove)
 
@@ -290,7 +341,7 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
         def _status() -> IndexStatus:
             with self._connect() as conn:
                 row = conn.execute(
-                    "SELECT embedded_model FROM note_vectors WHERE note_id = ? LIMIT 1", (note_id,)
+                    "SELECT embedded_model FROM note_vectors_status WHERE note_id = ?", (note_id,)
                 ).fetchone()
             if row is None:
                 return "not_built"

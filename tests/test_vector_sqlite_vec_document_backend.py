@@ -1,12 +1,35 @@
 import asyncio
 
-from prioris_mcp.vector.embedding import FastEmbedBackend
+from prioris_mcp.vector.embedding import EmbeddingBackend, FastEmbedBackend
 from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend
 
 
 def _backend(tmp_path):
     embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
     return SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
+
+
+class _StubEmbedding(EmbeddingBackend):
+    """Lightweight fake EmbeddingBackend with a caller-controlled fixed dimension.
+
+    Avoids spinning up two real fastembed models (slow/network-dependent) just to exercise a
+    dimension change.
+    """
+
+    def __init__(self, model_name: str, dimension: int) -> None:
+        self._model_name = model_name
+        self._dim = dimension
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    async def embed(self, text: str) -> list[float]:
+        return [0.1] * self._dim
 
 
 class TestIndexAndSearch:
@@ -169,3 +192,24 @@ class TestStatus:
 
         stale_view = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", _RenamedStub())
         assert asyncio.run(stale_view.status("arxiv", "A", "pdf")) == "stale"
+
+    def test_reindexing_under_a_different_dimension_model_self_heals(self, tmp_path):
+        db_path = tmp_path / "vectors.sqlite3"
+        backend_a = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-a", 4))
+        asyncio.run(
+            backend_a.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 5, "text": "old"}])
+        )
+
+        backend_b = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-b", 8))
+        assert asyncio.run(backend_b.status("arxiv", "A", "pdf")) == "stale"
+
+        # Must not raise sqlite3.OperationalError despite the old vec0 table being built at
+        # dimension 4 while backend_b embeds at dimension 8.
+        asyncio.run(
+            backend_b.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c2", "start": 0, "length": 5, "text": "new"}])
+        )
+        assert asyncio.run(backend_b.status("arxiv", "A", "pdf")) == "ready"
+
+        query = asyncio.run(backend_b._embedding_backend.embed("new"))
+        results = asyncio.run(backend_b.search(query, provider="arxiv", identifier="A"))
+        assert [r["chunk_id"] for r in results] == ["c2"]
