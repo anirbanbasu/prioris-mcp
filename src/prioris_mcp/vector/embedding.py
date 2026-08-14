@@ -41,7 +41,7 @@ class FastEmbedBackend(EmbeddingBackend):
     def __init__(self, model_name: str) -> None:
         self._model_name = model_name
         self._dimension = _resolve_dimension(model_name)
-        self._model = TextEmbedding(model_name=model_name)
+        self._model: TextEmbedding | None = None
 
     @property
     def model_name(self) -> str:
@@ -53,6 +53,8 @@ class FastEmbedBackend(EmbeddingBackend):
 
     async def embed(self, text: str) -> list[float]:
         def _embed_sync() -> list[float]:
+            if self._model is None:
+                self._model = TextEmbedding(model_name=self._model_name)
             (embedding,) = self._model.embed([text])
             return embedding.tolist()
 
