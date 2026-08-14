@@ -132,6 +132,11 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
                         "DO UPDATE SET embedded_model = excluded.embedded_model",
                         (provider, identifier, format, self._embedding_backend.model_name),
                     )
+                else:
+                    conn.execute(
+                        "DELETE FROM document_vectors_status WHERE provider = ? AND identifier = ? AND format = ?",
+                        (provider, identifier, format),
+                    )
 
         await to_thread.run_sync(_write)
 

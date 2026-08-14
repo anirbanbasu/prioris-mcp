@@ -213,3 +213,16 @@ class TestStatus:
         query = asyncio.run(backend_b._embedding_backend.embed("new"))
         results = asyncio.run(backend_b.search(query, provider="arxiv", identifier="A"))
         assert [r["chunk_id"] for r in results] == ["c2"]
+
+    def test_reindexing_with_empty_entries_reverts_status_to_not_built(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(
+            backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 5, "text": "x"}])
+        )
+        assert asyncio.run(backend.status("arxiv", "A", "pdf")) == "ready"
+
+        asyncio.run(backend.index_entries("arxiv", "A", "pdf", []))
+        assert asyncio.run(backend.status("arxiv", "A", "pdf")) == "not_built"
+
+        query = asyncio.run(backend._embedding_backend.embed("x"))
+        assert asyncio.run(backend.search(query, provider="arxiv", identifier="A")) == []
