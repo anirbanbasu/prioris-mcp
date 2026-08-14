@@ -171,21 +171,19 @@ class PriorisMCP(MCPMixin):
         storage_dir = grouping_dir(EnvVars.PRIORIS_MCP_STORAGE_DIR, DEFAULT_GROUPING)
         self._storage = FilesystemStorageBackend(storage_dir)
         self._search_index = SqliteFts5SearchIndex(storage_dir / "search.sqlite3")
-        # Minimal/temporary construction - Task 14 reconciles this into a fuller wiring pass that
-        # also covers search-mechanism registries. Kept here (rather than left unwired) so Task 8's
-        # background-indexing trigger in the providers below, and this task's note-vector
-        # scheduling/cascade, aren't dead code in the meantime. `_search_mechanisms` (Task 12) and
-        # `_notes_search_mechanisms` (Task 13) are also part of this temporary block: both reuse
-        # the local `embedding_backend` below rather than the not-yet-promoted
-        # `self._embedding_backend` that Task 14 will introduce.
+        # Embedding backend and both vector-search stores (documents, notes) share one
+        # EmbeddingBackend instance; the scheduler below drives background (re-)indexing
+        # triggered by the providers/notes methods further down.
         vector_dir = grouping_dir(EnvVars.PRIORIS_MCP_VECTOR_DIR, DEFAULT_GROUPING)
-        embedding_backend = FastEmbedBackend(EnvVars.PRIORIS_MCP_EMBEDDING_MODEL)
-        self._document_vector_backend = SqliteVecDocumentBackend(vector_dir / "vectors.sqlite3", embedding_backend)
-        self._note_vector_backend = SqliteVecNoteBackend(vector_dir / "notes-vectors.sqlite3", embedding_backend)
+        self._embedding_backend = FastEmbedBackend(EnvVars.PRIORIS_MCP_EMBEDDING_MODEL)
+        self._document_vector_backend = SqliteVecDocumentBackend(
+            vector_dir / "vectors.sqlite3", self._embedding_backend
+        )
+        self._note_vector_backend = SqliteVecNoteBackend(vector_dir / "notes-vectors.sqlite3", self._embedding_backend)
         self._embedding_scheduler = EmbeddingScheduler()
         self._search_mechanisms: dict[str, SearchMechanism] = {
             "fts": FtsMechanism(self._search_index),
-            "vector": VectorMechanism(self._document_vector_backend, embedding_backend),
+            "vector": VectorMechanism(self._document_vector_backend, self._embedding_backend),
         }
         if EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS:
             logger.warning(
@@ -249,7 +247,7 @@ class PriorisMCP(MCPMixin):
         self._notes_backend: NotesBackend = SqliteNotesBackend(notes_dir / "notes.sqlite", self._notes_search_index)
         self._notes_search_mechanisms = {
             "fts": NotesFtsMechanism(self._notes_search_index),
-            "vector": NotesVectorMechanism(self._note_vector_backend, embedding_backend),
+            "vector": NotesVectorMechanism(self._note_vector_backend, self._embedding_backend),
         }
 
     async def research_arxiv_search(
@@ -605,7 +603,9 @@ class PriorisMCP(MCPMixin):
         format: Annotated[str | None, Field(default=None)] = None,
         date_from: Annotated[str | None, Field(default=None, description="ISO 8601")] = None,
         date_to: Annotated[str | None, Field(default=None, description="ISO 8601")] = None,
-        keyword: Annotated[str | None, Field(default=None, description="FTS5 query syntax over note text")] = None,
+        keyword: Annotated[
+            str | None, Field(default=None, description="FTS5 query syntax, or free text for vector/hybrid mode")
+        ] = None,
         author_filter: Annotated[AuthorFilter, Field(default=AuthorFilter.ANY)] = AuthorFilter.ANY,
         author_name: Annotated[
             str | None, Field(default=None, description="Only used when author_filter=named")
@@ -621,7 +621,7 @@ class PriorisMCP(MCPMixin):
         ] = "fts",
     ) -> NotesSearchResult:
         """Search/list notes; no filters at all returns everything, paged, newest first. See mode for mechanism choice."""
-        if mode not in ("fts", "vector", "hybrid"):
+        if mode != "hybrid" and mode not in self._notes_search_mechanisms:
             raise InvalidRequestError(f"unknown or unavailable mode: {mode!r}")
         if mode == "vector" and keyword is None:
             raise InvalidRequestError("mode='vector' requires keyword: nothing to embed")

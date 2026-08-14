@@ -1621,6 +1621,24 @@ class TestResearchSearchFetched:
         with pytest.raises(ToolError):
             asyncio.run(scenario())
 
+    def test_identifier_and_provider_populates_per_mechanism_index_status(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "quantum", "provider": "arxiv", "identifier": "A", "format": "pdf"},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"] == {"fts": "not_built", "vector": "not_built"}
+
 
 class TestResearchNotesCreate:
     """End-to-end MCP tool tests for research_notes_create."""
@@ -2052,3 +2070,21 @@ class TestNotesExportResource:
 
         with pytest.raises(McpError):
             asyncio.run(scenario())
+
+
+class TestVectorSearchWiring:
+    """Tests for the EmbeddingBackend/VectorSearchBackend/SearchMechanism wiring in `PriorisMCP.__init__`."""
+
+    def test_embedding_backend_uses_configured_model(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+        mcp_obj = PriorisMCP()
+        assert mcp_obj._embedding_backend.model_name == "BAAI/bge-small-en-v1.5"
+
+    def test_search_mechanisms_registered(self):
+        mcp_obj = PriorisMCP()
+        assert set(mcp_obj._search_mechanisms.keys()) == {"fts", "vector"}
+
+    def test_vector_dir_respects_grouping_seam(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        assert mcp_obj._document_vector_backend._path.parent == tmp_path / "vectors"
