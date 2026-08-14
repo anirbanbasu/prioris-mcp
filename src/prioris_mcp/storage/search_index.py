@@ -43,6 +43,15 @@ class SearchIndex(ABC):
         Returns list of {"provider", "identifier", "format", "snippet", "offset", "score"}.
         """
 
+    @abstractmethod
+    async def has_entries(self, provider: str, identifier: str, format: str) -> bool:
+        """Whether any entries are indexed for (provider, identifier, format).
+
+        An existence-only check - no relevance ranking or MATCH query involved - used by
+        callers (e.g. FtsMechanism.status) that only need to know whether indexing has run,
+        not to search the indexed text.
+        """
+
 
 class SqliteFts5SearchIndex(SearchIndex):
     """SQLite FTS5-backed SearchIndex at `<storage-root>/search.sqlite3`."""
@@ -115,3 +124,14 @@ class SqliteFts5SearchIndex(SearchIndex):
                 ]
 
         return await to_thread.run_sync(_search)
+
+    async def has_entries(self, provider: str, identifier: str, format: str) -> bool:
+        def _has_entries() -> bool:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT EXISTS(SELECT 1 FROM search WHERE provider = ? AND identifier = ? AND format = ?)",
+                    (provider, identifier, format),
+                ).fetchone()
+                return bool(row[0])
+
+        return await to_thread.run_sync(_has_entries)

@@ -133,6 +133,21 @@ class TestReplaceOnReindex:
         assert len(asyncio.run(index.search("zebra"))) == 1
 
 
+class TestHasEntries:
+    """Test has_entries existence-only check."""
+
+    def test_has_entries_true_after_indexing(self, tmp_path):
+        index = SqliteFts5SearchIndex(tmp_path / "search.sqlite3")
+        asyncio.run(
+            index.index_entries("arxiv", "2106.09685v2", "pdf", [{"key": "A", "start": 0, "length": 10, "text": "x"}])
+        )
+        assert asyncio.run(index.has_entries("arxiv", "2106.09685v2", "pdf")) is True
+
+    def test_has_entries_false_before_indexing(self, tmp_path):
+        index = SqliteFts5SearchIndex(tmp_path / "search.sqlite3")
+        assert asyncio.run(index.has_entries("arxiv", "2106.09685v2", "pdf")) is False
+
+
 class TestRemoveDocument:
     """Test remove_document functionality."""
 
