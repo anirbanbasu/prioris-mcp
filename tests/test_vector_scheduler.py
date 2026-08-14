@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 
 from prioris_mcp.vector.scheduler import EmbeddingScheduler
 
@@ -88,10 +87,8 @@ class TestCancel:
             scheduler.schedule(("k",), slow_task)
             await started.wait()
             task = scheduler._tasks[("k",)]
-            scheduler.cancel(("k",))
             release.set()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            await scheduler.cancel(("k",))
             return task.cancelled(), scheduler.is_building(("k",))
 
         cancelled, still_building_after = asyncio.run(scenario())
@@ -99,11 +96,48 @@ class TestCancel:
         assert still_building_after is False
         assert ran_past_wait is False
 
+    def test_cancel_waits_for_the_task_to_actually_finish_before_returning(self):
+        """D8: cancel() must not return until the in-flight task has genuinely stopped.
+
+        Regression test for the delete-vs-background-write race: a caller doing `await
+        scheduler.cancel(key)` immediately followed by a delete must be guaranteed the
+        cancelled task can no longer perform its write.
+        """
+        scheduler = EmbeddingScheduler()
+        started = asyncio.Event()
+        completed_write = False
+
+        async def slow_task():
+            nonlocal completed_write
+            started.set()
+            await asyncio.sleep(0)  # cancellable checkpoint
+            completed_write = True  # must never run if cancelled before this point
+
+        async def scenario():
+            scheduler.schedule(("k",), slow_task)
+            await started.wait()
+            task = scheduler._tasks[("k",)]
+            await scheduler.cancel(("k",))
+            return task.done()
+
+        done = asyncio.run(scenario())
+        assert done is True
+        assert completed_write is False
+
     def test_cancel_unknown_key_is_a_no_op(self):
         scheduler = EmbeddingScheduler()
-        scheduler.cancel(("never-scheduled",))  # must not raise
+        asyncio.run(scheduler.cancel(("never-scheduled",)))  # must not raise
 
     def test_cancel_racing_a_fresh_schedule_does_not_let_stale_cleanup_evict_the_new_task(self):
+        """D8: cancel() is now async and itself awaits the old task to finish before returning.
+
+        This reframes the old (pre-D8) synchronous-cancel race: instead of cancel() and the next
+        schedule() running back-to-back with no await between them, the race is now cancel()'s own
+        internal await-for-completion running concurrently with another caller's schedule() for the
+        same key - cancel() pops `self._tasks`/`self._pending` before it starts that await (same
+        ordering as before), so the concurrent schedule()'s fresh task must survive `_run`'s
+        `finally` clause once the old task's cancellation is actually delivered.
+        """
         scheduler = EmbeddingScheduler()
         first_started = asyncio.Event()
         first_release = asyncio.Event()
@@ -124,20 +158,20 @@ class TestCancel:
         async def scenario():
             scheduler.schedule(("k",), first_factory)
             await first_started.wait()
-            old_task = scheduler._tasks[("k",)]
 
-            # cancel() and the very next schedule() for the same key run back-to-back with no
-            # await in between - the old task's cancellation hasn't been delivered yet (that needs
-            # an event-loop turn), so a second caller can install a fresh task for the same key
-            # before the old one's `finally` clause has run.
-            scheduler.cancel(("k",))
+            cancel_task = asyncio.ensure_future(scheduler.cancel(("k",)))
+            # Wait until cancel()'s synchronous prefix (popping self._tasks/self._pending) has run
+            # but before it has finished - i.e. it is now blocked awaiting the old task's actual
+            # cancellation delivery. Polling on state, not a fixed number of loop turns, so this
+            # isn't sensitive to exactly how many ticks that prefix takes.
+            while ("k",) in scheduler._tasks:
+                await asyncio.sleep(0)
+
+            # A fresh schedule() for the same key, concurrent with cancel()'s still-in-flight await.
             scheduler.schedule(("k",), second_factory)
             new_task = scheduler._tasks[("k",)]
 
-            # Give the loop enough turns to both deliver the old task's cancellation (running its
-            # finally clause) and let the new task make real progress.
-            with contextlib.suppress(asyncio.CancelledError):
-                await old_task
+            await cancel_task
             await second_started.wait()
 
             still_building = scheduler.is_building(("k",))

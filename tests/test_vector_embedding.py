@@ -1,6 +1,7 @@
 import asyncio
 from unittest.mock import MagicMock, patch
 
+import anyio
 import pytest
 
 from prioris_mcp.vector.embedding import FastEmbedBackend
@@ -105,3 +106,29 @@ class TestLazyInitialization:
             asyncio.run(backend.embed("second text"))
 
             mock_text_embedding.assert_not_called()
+
+    def test_concurrent_first_calls_construct_text_embedding_exactly_once(self):
+        """D9: several embed() calls racing before any has constructed the model must not double-construct it.
+
+        Without the anyio.Lock double-checked-locking guard, two concurrent first calls can both
+        observe `self._model is None` and both construct a TextEmbedding - wasteful, and
+        non-deterministic about which instance survives.
+        """
+        with patch("prioris_mcp.vector.embedding.TextEmbedding") as mock_text_embedding:
+            mock_text_embedding.list_supported_models = self._mock_list_supported_models
+            mock_instance = MagicMock()
+            mock_array = MagicMock()
+            mock_array.tolist.return_value = [0.1, 0.2, 0.3] * 128
+            mock_instance.embed.return_value = [mock_array]
+            mock_text_embedding.return_value = mock_instance
+
+            backend = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+
+            async def scenario():
+                async with anyio.create_task_group() as tg:
+                    for _ in range(10):
+                        tg.start_soon(backend.embed, "concurrent call")
+
+            asyncio.run(scenario())
+
+            mock_text_embedding.assert_called_once_with(model_name="BAAI/bge-small-en-v1.5")

@@ -6,6 +6,7 @@ reports whatever the record was before (not_built/stale), which is self-healing 
 """
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 
@@ -36,12 +37,21 @@ class EmbeddingScheduler:
         task = asyncio.ensure_future(self._run(key, coro_factory))
         self._tasks[key] = task
 
-    def cancel(self, key: tuple) -> None:
-        """Cancel any in-flight (or pending-rerun) task for `key`. A no-op if none exists."""
+    async def cancel(self, key: tuple) -> None:
+        """Cancel any in-flight (or pending-rerun) task for `key` and wait for it to stop.
+
+        A no-op if none exists. Waiting matters: `task.cancel()` alone only requests cancellation
+        - if the task is mid-write inside `to_thread.run_sync` (not cancellable once started), it
+        can otherwise finish its write after a caller's own subsequent delete completes, leaving a
+        stale row behind. Awaiting here closes that race by not returning until the task has
+        actually stopped.
+        """
         task = self._tasks.pop(key, None)
+        self._pending.pop(key, None)
         if task is not None:
             task.cancel()
-        self._pending.pop(key, None)
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     async def _run(self, key: tuple, coro_factory: Callable[[], Awaitable[None]]) -> None:
         try:

@@ -72,3 +72,12 @@ class NoteVectorSearchBackend(ABC):
     @abstractmethod
     async def status(self, note_id: str) -> IndexStatus:
         """Compare this note's recorded embedded_model against the currently configured one."""
+
+    @abstractmethod
+    async def has_any_indexed(self, model_name: str) -> bool:
+        """Corpus-wide existence check: whether any note is indexed under `model_name`.
+
+        Cheap existence-only check (no ranking/scoring) - lets a caller distinguish "index
+        genuinely empty/never built" from "index built, this particular query just had zero
+        matches" on an empty result page.
+        """

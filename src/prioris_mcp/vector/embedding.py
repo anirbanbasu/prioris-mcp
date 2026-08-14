@@ -6,6 +6,7 @@ v3 ships one implementation: fastembed (ADR-00023).
 
 from abc import ABC, abstractmethod
 
+import anyio
 from anyio import to_thread
 from fastembed import TextEmbedding
 
@@ -42,6 +43,7 @@ class FastEmbedBackend(EmbeddingBackend):
         self._model_name = model_name
         self._dimension = _resolve_dimension(model_name)
         self._model: TextEmbedding | None = None
+        self._model_lock = anyio.Lock()
 
     @property
     def model_name(self) -> str:
@@ -52,10 +54,18 @@ class FastEmbedBackend(EmbeddingBackend):
         return self._dimension
 
     async def embed(self, text: str) -> list[float]:
+        # Double-checked locking: the lock is only ever contended on the (rare) first call that
+        # races another concurrent first call - every later call sees self._model already set and
+        # skips the lock entirely.
+        if self._model is None:
+            async with self._model_lock:
+                if self._model is None:
+                    self._model = await to_thread.run_sync(lambda: TextEmbedding(model_name=self._model_name))
+        model = self._model
+        assert model is not None  # narrows TextEmbedding | None for the type checker; always true here
+
         def _embed_sync() -> list[float]:
-            if self._model is None:
-                self._model = TextEmbedding(model_name=self._model_name)
-            (embedding,) = self._model.embed([text])
+            (embedding,) = model.embed([text])
             return embedding.tolist()
 
         return await to_thread.run_sync(_embed_sync)

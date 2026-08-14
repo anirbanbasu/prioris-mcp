@@ -602,9 +602,34 @@ class PriorisMCP(MCPMixin):
         """Delete a note by id. Returns False, not an error, if it's already absent."""
         removed = await self._notes_backend.delete(note_id)
         if removed:
-            self._embedding_scheduler.cancel(("note", note_id))
+            await self._embedding_scheduler.cancel(("note", note_id))
             await self._note_vector_backend.remove_note(note_id)
         return removed
+
+    @staticmethod
+    def _validate_notes_search_params(
+        author_filter: AuthorFilter, author_name: str | None, offset: int, limit: int
+    ) -> None:
+        """Validate research_notes_search's own params, ahead of any mode branching or backend call.
+
+        Split out of research_notes_search itself to keep that method's cyclomatic complexity down
+        - these checks are unconditional (independent of `mode`), so mode='vector' (which never
+        calls self._notes_backend.search/matching_ids, where the author_filter/author_name pairing
+        check also lives) doesn't silently drop a misused author_name instead of erroring like
+        fts/hybrid do, and a negative offset/non-positive limit is rejected before it can flow into
+        slicing or the underlying KNN query's limit.
+
+        Raises:
+            InvalidRequestError: author_filter/author_name misuse, or offset/limit out of range.
+        """
+        if author_filter == AuthorFilter.NAMED and author_name is None:
+            raise InvalidRequestError("author_filter=NAMED requires author_name")
+        if author_filter != AuthorFilter.NAMED and author_name is not None:
+            raise InvalidRequestError("author_name is only used when author_filter=NAMED")
+        if offset < 0:
+            raise InvalidRequestError(f"offset must be >= 0, got {offset}")
+        if limit <= 0:
+            raise InvalidRequestError(f"limit must be > 0, got {limit}")
 
     async def research_notes_search(
         self,
@@ -636,6 +661,7 @@ class PriorisMCP(MCPMixin):
             raise InvalidRequestError(f"unknown or unavailable mode: {mode!r}")
         if mode == "vector" and keyword is None:
             raise InvalidRequestError("mode='vector' requires keyword: nothing to embed")
+        self._validate_notes_search_params(author_filter, author_name, offset, limit)
 
         fts_result: PagedNotes | None = None
         if mode in ("fts", "hybrid"):
@@ -696,7 +722,13 @@ class PriorisMCP(MCPMixin):
         index_status: dict[str, str] | None = None
         if vector_result is not None:
             statuses = [await self._note_vector_backend.status(match.note_id) for match in vector_result]
-            if not statuses or "not_built" in statuses:
+            if not statuses:
+                # Zero matches alone doesn't distinguish "index genuinely empty/never built" from
+                # "index built, nothing matched this particular query/filters" - fall back to a
+                # corpus-wide existence check under the currently configured model.
+                has_any = await self._note_vector_backend.has_any_indexed(self._embedding_backend.model_name)
+                index_status = {"vector": "ready" if has_any else "not_built"}
+            elif "not_built" in statuses:
                 index_status = {"vector": "not_built"}
             elif "stale" in statuses:
                 index_status = {"vector": "stale"}
@@ -712,7 +744,7 @@ class PriorisMCP(MCPMixin):
             removed = await self._storage.delete(entry.provider, entry.identifier, entry.format_, entry.artefact)
             if removed and entry.artefact in ("markdown", "all"):
                 await self._search_index.remove_document(entry.provider, entry.identifier, entry.format_)
-                self._embedding_scheduler.cancel((entry.provider, entry.identifier, entry.format_))
+                await self._embedding_scheduler.cancel((entry.provider, entry.identifier, entry.format_))
                 await self._document_vector_backend.remove_document(entry.provider, entry.identifier, entry.format_)
             (deleted if removed else not_found).append(entry)
         return DeleteFetchedResult(deleted=deleted, not_found=not_found)

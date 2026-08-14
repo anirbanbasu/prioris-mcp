@@ -353,3 +353,15 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
             return "ready" if row["embedded_model"] == self._embedding_backend.model_name else "stale"
 
         return await to_thread.run_sync(_status)
+
+    async def has_any_indexed(self, model_name: str) -> bool:
+        """Cheap corpus-wide existence check: whether any note is indexed under `model_name`."""
+
+        def _check() -> bool:
+            with self._connect() as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM note_vectors_status WHERE embedded_model = ? LIMIT 1", (model_name,)
+                ).fetchone()
+            return row is not None
+
+        return await to_thread.run_sync(_check)

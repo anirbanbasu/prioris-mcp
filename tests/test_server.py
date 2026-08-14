@@ -2080,6 +2080,28 @@ class TestResearchNotesSearch:
         with pytest.raises(ToolError):
             asyncio.run(scenario())
 
+    def test_mode_vector_author_name_without_named_filter_is_a_tool_error(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """D4: author_name misuse must raise consistently in mode='vector' too, not be silently dropped.
+
+        author_filter is left at its default (ANY) while author_name is given - the fts/hybrid
+        path already raises for this (see test_author_filter_named_without_author_name_is_a_tool_error
+        for the mirror-image misuse), but mode='vector' never called self._notes_backend.search
+        (where that validation used to live), so it silently dropped author_name instead.
+        """
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "attention", "mode": "vector", "author_name": "Smith"},
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
     def test_canonical_identifier_without_provider_is_a_tool_error(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
     ):
@@ -2241,6 +2263,42 @@ class TestResearchNotesSearch:
         assert len(result.structured_content["vector"]) == 1
         assert result.structured_content["index_status"] == {"vector": "ready"}
 
+    def test_mode_vector_reports_not_built_when_a_matched_note_has_no_status_row(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Covers the non-empty-statuses "not_built" branch (distinct from the D6 empty-page one).
+
+        A match's own per-note status(), not the corpus-wide has_any_indexed() check, drives this
+        - simulated here (rather than via a real dangling row, since index_note always writes both
+        tables together) by stubbing status() directly, same technique the existing "stale" test
+        above uses to simulate a status mismatch without hand-rolling raw SQL against the backend.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                async def _always_not_built(note_id: str) -> str:
+                    return "not_built"
+
+                monkeypatch.setattr(mcp_obj._note_vector_backend, "status", _always_not_built)
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
+
     def test_mode_vector_reports_stale_index_status(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
@@ -2296,6 +2354,72 @@ class TestResearchNotesSearch:
         result = asyncio.run(scenario())
         assert result.structured_content["vector"] == []
         assert result.structured_content["index_status"] == {"vector": "not_built"}
+
+    def test_mode_vector_empty_page_with_indexed_corpus_reports_ready(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """D6: zero matches on this particular page must report "ready", not "not_built".
+
+        The corpus-wide index does have content under the current model - "not_built" is reserved
+        for a genuinely empty/never-built index (see test_mode_vector_with_no_matches_reports_not_built).
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                # A structural filter matching no notes (the only note is under "arxiv") narrows
+                # note_ids to [] before the vector search runs, giving a genuine zero-match page
+                # against an index that does have content indexed under the current model.
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "attention-based models", "mode": "vector", "provider": "europepmc"},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["vector"] == []
+        assert result.structured_content["index_status"] == {"vector": "ready"}
+
+    def test_negative_offset_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """D7: a negative offset must raise, not silently fall into Python's from-the-end slicing."""
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"offset": -1})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_zero_limit_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """D7: limit=0 must raise, not silently produce a zero-width page."""
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"limit": 0})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_negative_limit_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """D7: a negative limit must raise, not flow into a negative KNN limit downstream."""
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"limit": -5})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
     def test_mode_vector_without_keyword_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         client = self._server_and_client(tmp_path, monkeypatch)

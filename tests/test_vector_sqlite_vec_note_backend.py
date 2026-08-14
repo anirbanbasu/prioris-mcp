@@ -126,3 +126,21 @@ class TestStatus:
         query = asyncio.run(backend_b._embedding_backend.embed("new"))
         results = asyncio.run(backend_b.search(query, note_ids=["note-1"]))
         assert [r["note_id"] for r in results] == ["note-1"]
+
+
+class TestHasAnyIndexed:
+    """Test the corpus-wide has_any_indexed existence check (D6)."""
+
+    def test_false_on_a_never_indexed_corpus(self, tmp_path):
+        backend = _backend(tmp_path)
+        assert asyncio.run(backend.has_any_indexed(backend._embedding_backend.model_name)) is False
+
+    def test_true_once_at_least_one_note_is_indexed_under_that_model(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(backend.index_note("note-1", "x"))
+        assert asyncio.run(backend.has_any_indexed(backend._embedding_backend.model_name)) is True
+
+    def test_false_for_a_different_model_name_than_what_was_indexed(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(backend.index_note("note-1", "x"))
+        assert asyncio.run(backend.has_any_indexed("some-other-model")) is False
