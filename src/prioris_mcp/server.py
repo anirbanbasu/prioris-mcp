@@ -494,6 +494,13 @@ class PriorisMCP(MCPMixin):
         mode: Annotated[
             str, Field(default="fts", description="A registered mechanism name (e.g. 'fts', 'vector'), or 'hybrid'")
         ] = "fts",
+        limit: Annotated[
+            int | None,
+            Field(
+                default=None,
+                description="Max results per mechanism; defaults to PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT",
+            ),
+        ] = None,
     ) -> SearchFetchedResult:
         """Search previously-persisted chunks; never fetches or parses. See mode for mechanism choice."""
         if identifier is not None and provider is None:
@@ -506,18 +513,21 @@ class PriorisMCP(MCPMixin):
                 raise InvalidRequestError(f"unknown or unavailable mode: {mode!r}")
             selected = [mechanism]
 
+        effective_limit = limit if limit is not None else EnvVars.PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT
         results: dict[str, list] = {}
         for mechanism in selected:
             try:
-                raw = await mechanism.search(query, provider=provider, identifier=identifier, format=format, limit=10)
+                raw = await mechanism.search(
+                    query, provider=provider, identifier=identifier, format=format, limit=effective_limit
+                )
             except sqlite3.OperationalError as exc:
                 raise InvalidRequestError(f"invalid search query: {exc}") from exc
             results[mechanism.name] = raw
 
         index_status: dict[str, str] = {}
-        if identifier is not None and provider is not None:
+        if identifier is not None and provider is not None and format is not None:
             for mechanism in self._search_mechanisms.values():
-                index_status[mechanism.name] = await mechanism.status(provider, identifier, format or "")
+                index_status[mechanism.name] = await mechanism.status(provider, identifier, format)
 
         return SearchFetchedResult(
             fts=[SearchMatch(**m) for m in results["fts"]] if "fts" in results else None,

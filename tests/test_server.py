@@ -1639,6 +1639,103 @@ class TestResearchSearchFetched:
         result = asyncio.run(scenario())
         assert result.structured_content["index_status"] == {"fts": "not_built", "vector": "not_built"}
 
+    def test_index_status_is_empty_when_format_is_omitted(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "Hello", "provider": "localfile", "identifier": caller_facing_id},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"] == {}
+
+    def test_index_status_reports_ready_when_format_is_given(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={
+                        "query": "Hello",
+                        "provider": "localfile",
+                        "identifier": caller_facing_id,
+                        "format": "pdf",
+                    },
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"]["fts"] == "ready"
+
+    def test_limit_defaults_from_env_var(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT", 1)
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv",
+                    "A",
+                    "pdf",
+                    [
+                        {"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention mechanism"},
+                        {"chunk_id": "c2", "start": 5, "length": 5, "text": "attention mechanism transformer"},
+                    ],
+                )
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector"},
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]) == 1
+
+    def test_limit_param_overrides_the_default(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT", 1)
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv",
+                    "A",
+                    "pdf",
+                    [
+                        {"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention mechanism"},
+                        {"chunk_id": "c2", "start": 5, "length": 5, "text": "attention mechanism transformer"},
+                    ],
+                )
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 2},
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]) == 2
+
 
 class TestResearchNotesCreate:
     """End-to-end MCP tool tests for research_notes_create."""
