@@ -15,6 +15,8 @@ from prioris_mcp.errors import InvalidRequestError
 from prioris_mcp.models.arxiv import ArxivCategoriesResult, ArxivCategory
 from prioris_mcp.models.common import ArxivResolvedIdentifierResult, MarkdownPage
 from prioris_mcp.server import PriorisMCP
+from prioris_mcp.vector.embedding import EmbeddingBackend
+from prioris_mcp.vector.sqlite_vec_backend import SqliteVecNoteBackend
 
 logger = logging.getLogger(__name__)
 
@@ -2206,6 +2208,94 @@ class TestResearchNotesSearch:
         assert len(first_ids) == 1
         assert len(second_ids) == 1
         assert first_ids != second_ids
+
+    def test_mode_fts_leaves_index_status_none(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"mode": "fts"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"] is None
+
+    def test_mode_vector_reports_ready_index_status(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "ready"}
+
+    def test_mode_vector_reports_stale_index_status(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                # Simulate a model-name change: the mechanism keeps its own reference to the
+                # original backend (so search still finds the already-indexed vector), but
+                # research_notes_search's own status check goes through mcp_obj._note_vector_backend,
+                # which we swap for a same-file, same-dimension, differently-named view.
+                real_embedding = mcp_obj._embedding_backend
+
+                class _RenamedStub(EmbeddingBackend):
+                    model_name = "a-different-model"
+                    dimension = real_embedding.dimension
+
+                    async def embed(self, text):
+                        return await real_embedding.embed(text)
+
+                mcp_obj._note_vector_backend = SqliteVecNoteBackend(
+                    tmp_path / "vectors" / "notes-vectors.sqlite3", _RenamedStub()
+                )
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "stale"}
+
+    def test_mode_vector_with_no_matches_reports_not_built(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "nothing indexed yet", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["vector"] == []
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
 
     def test_mode_vector_without_keyword_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         client = self._server_and_client(tmp_path, monkeypatch)

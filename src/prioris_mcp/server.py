@@ -693,7 +693,17 @@ class PriorisMCP(MCPMixin):
             raw = await mechanism.search(keyword, note_ids=note_ids, limit=offset + limit)
             vector_result = [NoteVectorSearchMatch(**m) for m in raw[offset:]]
 
-        return NotesSearchResult(fts=fts_result, vector=vector_result)
+        index_status: dict[str, str] | None = None
+        if vector_result is not None:
+            statuses = [await self._note_vector_backend.status(match.note_id) for match in vector_result]
+            if not statuses or "not_built" in statuses:
+                index_status = {"vector": "not_built"}
+            elif "stale" in statuses:
+                index_status = {"vector": "stale"}
+            else:
+                index_status = {"vector": "ready"}
+
+        return NotesSearchResult(fts=fts_result, vector=vector_result, index_status=index_status)
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []

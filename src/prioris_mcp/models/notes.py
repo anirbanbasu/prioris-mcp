@@ -126,9 +126,17 @@ class NotesSearchResult(BaseModel):
     See docs/requirement-specification/search/02-vector-search.md#composition-a-mode-parameter-not-a-new-opaque-smart-search.
     `fts`/`vector` are each populated only when that mechanism was requested (mode == that name,
     or mode == "hybrid" with a keyword given to embed).
+
+    Unlike documents (naturally scoped by provider+identifier+format), a notes-search request has
+    no single-object scope a corpus-wide `index_status` could describe - a structural-filter query
+    can span many documents' notes at once. `index_status` is therefore populated only when a
+    vector search actually ran this call (mode in ("vector", "hybrid") with a keyword given), as
+    the worst-case status across every note actually returned in `vector` this call. There is no
+    `fts` key - notes-FTS has no per-request scope to check existence against, unlike documents'.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     fts: Annotated[PagedNotes | None, Field(default=None)] = None
     vector: Annotated[list[NoteVectorSearchMatch] | None, Field(default=None)] = None
+    index_status: Annotated[dict[str, str] | None, Field(default=None)] = None
