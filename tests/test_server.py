@@ -1523,7 +1523,7 @@ class TestResearchSearchFetched:
                 return await client.call_tool("research_search_fetched", arguments={"query": "quantum"})
 
         result = asyncio.run(scenario())
-        assert result.structured_content["matches"] == []
+        assert result.structured_content["fts"] == []
 
     def test_identifier_without_provider_raises_invalid_request(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -1556,7 +1556,7 @@ class TestResearchSearchFetched:
                 return caller_facing_id, search_result
 
         caller_facing_id, search_result = asyncio.run(scenario())
-        matches = search_result.structured_content["matches"]
+        matches = search_result.structured_content["fts"]
         assert len(matches) >= 1
         assert matches[0]["provider"] == "localfile"
         assert matches[0]["identifier"] == caller_facing_id

@@ -8,6 +8,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from prioris_mcp.models.vector import VectorSearchMatch
+
 
 class FullTextFetchResult(BaseModel):
     """Output of `fetch_full_text`, identical across both v1 providers.
@@ -173,8 +175,16 @@ class SearchMatch(BaseModel):
 
 
 class SearchFetchedResult(BaseModel):
-    """Output of `research_search_fetched`."""
+    """Output of `research_search_fetched`.
+
+    See docs/requirement-specification/search/02-vector-search.md#composition-a-mode-parameter-not-a-new-opaque-smart-search.
+    `fts`/`vector` are each populated only when that mechanism was requested (mode == that name,
+    or mode == "hybrid"); `index_status` reports every mechanism that's a capability of the
+    running server, regardless of which single mode was requested.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    matches: Annotated[list[SearchMatch], Field(..., strict=True)]
+    fts: Annotated[list[SearchMatch] | None, Field(default=None)] = None
+    vector: Annotated[list[VectorSearchMatch] | None, Field(default=None)] = None
+    index_status: Annotated[dict[str, str], Field(default_factory=dict)]

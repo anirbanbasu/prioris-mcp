@@ -482,7 +482,7 @@ class PriorisMCP(MCPMixin):
             matches = await self._search_index.search(query, provider=provider, identifier=identifier, format=format)
         except sqlite3.OperationalError as exc:
             raise InvalidRequestError(f"invalid search query: {exc}") from exc
-        return SearchFetchedResult(matches=[SearchMatch(**match) for match in matches])
+        return SearchFetchedResult(fts=[SearchMatch(**match) for match in matches])
 
     async def research_notes_create(
         self,
