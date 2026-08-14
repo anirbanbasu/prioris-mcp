@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-13
 ---
 
-# ADR-00038: JATS transform concurrency is bounded by a dedicated gate, not `anyio`'s `to_thread.run_sync(limiter=...)`
+# ADR-00029: JATS transform concurrency is bounded by a dedicated gate, not `anyio`'s `to_thread.run_sync(limiter=...)`
 
 ## Context
 

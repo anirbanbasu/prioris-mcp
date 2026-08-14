@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-13
 ---
 
-# ADR-00037: Local-filesystem access is via caller-sent content, not a server-side path
+# ADR-00028: Local-filesystem access is via caller-sent content, not a server-side path
 
 ## Context
 

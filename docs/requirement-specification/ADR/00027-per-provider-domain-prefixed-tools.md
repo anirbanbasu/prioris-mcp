@@ -3,7 +3,7 @@ status: accepted
 date: 2026-08-13
 ---
 
-# ADR-00036: Per-provider, domain-prefixed tools, not one generic tool parameterised by provider
+# ADR-00027: Per-provider, domain-prefixed tools, not one generic tool parameterised by provider
 
 ## Context
 
