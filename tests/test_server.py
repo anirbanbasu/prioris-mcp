@@ -2323,6 +2323,7 @@ class TestResearchNotesSearch:
                 class _RenamedStub(EmbeddingBackend):
                     model_name = "a-different-model"
                     dimension = real_embedding.dimension
+                    max_chunk_chars = real_embedding.max_chunk_chars
 
                     async def embed(self, text):
                         return await real_embedding.embed(text)

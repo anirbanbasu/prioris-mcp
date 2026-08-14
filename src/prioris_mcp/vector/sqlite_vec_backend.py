@@ -23,6 +23,12 @@ from prioris_mcp.vector.embedding import EmbeddingBackend
 
 _DEFAULT_MAX_CHUNK_CHARS = 2000
 
+# Empirical safety margin: how many raw KNN rows to fetch per requested result, so collapsing
+# same-chunk_id sub-splits (see `search()`) rarely starves `limit` distinct chunks. Not derived
+# from any formal bound on sub-split count per chunk - just a multiplier found adequate in
+# practice.
+_CHUNK_COLLAPSE_OVERFETCH_FACTOR = 4
+
 
 def _connect_with_vec(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
@@ -36,9 +42,7 @@ def _connect_with_vec(path: Path) -> sqlite3.Connection:
 class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
     """Corpus-wide document-chunk vector index at `<vector-root>/vectors.sqlite3`."""
 
-    def __init__(
-        self, path: Path, embedding_backend: EmbeddingBackend, *, max_chunk_chars: int = _DEFAULT_MAX_CHUNK_CHARS
-    ) -> None:
+    def __init__(self, path: Path, embedding_backend: EmbeddingBackend, *, max_chunk_chars: int | None = None) -> None:
         """Initialise the backend.
 
         Args:
@@ -48,12 +52,14 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
                 queries, and whose `model_name`/`dimension` fix the vec0 table's shape and
                 staleness comparison.
             max_chunk_chars: Passed straight through to `split_oversized_chunk` for each indexed
-                entry.
+                entry. Defaults to `embedding_backend.max_chunk_chars` (a per-model budget derived
+                from that model's token-truncation limit) when omitted, rather than one fixed
+                value shared across every model.
         """
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._embedding_backend = embedding_backend
-        self._max_chunk_chars = max_chunk_chars
+        self._max_chunk_chars = max_chunk_chars if max_chunk_chars is not None else embedding_backend.max_chunk_chars
 
     def _connect(self) -> sqlite3.Connection:
         conn = _connect_with_vec(self._path)
@@ -178,7 +184,7 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
         def _search() -> list[dict]:
             # Over-fetch before collapsing same-chunk_id sub-splits, so collapsing never starves
             # `limit` distinct chunks below what a caller asked for.
-            fetch_k = limit * 4
+            fetch_k = limit * _CHUNK_COLLAPSE_OVERFETCH_FACTOR
             sql = (
                 "SELECT provider, identifier, format, chunk_id, span_start, text, distance "
                 "FROM document_vectors WHERE embedding MATCH ? AND k = ?"
@@ -211,6 +217,8 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
                     "chunk_id": row["chunk_id"],
                     "offset": row["span_start"],
                     "snippet": row["text"][:200] + ("..." if len(row["text"]) > 200 else ""),
+                    # cosine distance: 0=identical, lower is better - already ORDER BY distance
+                    # above, so callers see best-first
                     "score": row["distance"],
                 }
                 for row in ordered
@@ -332,6 +340,8 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
             return [
                 {
                     "note_id": row["note_id"],
+                    # cosine distance: 0=identical, lower is better - already ORDER BY distance
+                    # above, so callers see best-first
                     "score": row["distance"],
                     "text_preview": row["text"][:200] + ("..." if len(row["text"]) > 200 else ""),
                 }

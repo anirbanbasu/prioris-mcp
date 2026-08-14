@@ -28,6 +28,10 @@ class _StubEmbedding(EmbeddingBackend):
     def dimension(self) -> int:
         return self._dim
 
+    @property
+    def max_chunk_chars(self) -> int:
+        return 2000
+
     async def embed(self, text: str) -> list[float]:
         return [0.1] * self._dim
 
@@ -186,6 +190,7 @@ class TestStatus:
         class _RenamedStub(EmbeddingBackend):
             model_name = "a-different-model"
             dimension = embedding.dimension
+            max_chunk_chars = embedding.max_chunk_chars
 
             async def embed(self, text):
                 return await embedding.embed(text)

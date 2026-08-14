@@ -3,8 +3,8 @@ import asyncio
 from prioris_mcp.notes.search_index import SqliteFts5NotesSearchIndex
 from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 from prioris_mcp.vector.embedding import FastEmbedBackend
-from prioris_mcp.vector.mechanism import FtsMechanism, NotesFtsMechanism, VectorMechanism
-from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend
+from prioris_mcp.vector.mechanism import FtsMechanism, NotesFtsMechanism, NotesVectorMechanism, VectorMechanism
+from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
 
 class TestFtsMechanism:
@@ -68,3 +68,30 @@ class TestNotesFtsMechanism:
         asyncio.run(index.index_note("note-1", "a note about ablation studies"))
         results = asyncio.run(mechanism.search("ablation", limit=10))
         assert results == ["note-1"]
+
+
+class TestNotesVectorMechanism:
+    """Test NotesVectorMechanism's name and search adaptation over NoteVectorSearchBackend."""
+
+    def test_name_is_vector(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecNoteBackend(tmp_path / "notes-vectors.sqlite3", embedding)
+        mechanism = NotesVectorMechanism(backend, embedding)
+        assert mechanism.name == "vector"
+
+    def test_search_embeds_the_query_text(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecNoteBackend(tmp_path / "notes-vectors.sqlite3", embedding)
+        mechanism = NotesVectorMechanism(backend, embedding)
+        asyncio.run(backend.index_note("note-1", "cats"))
+        results = asyncio.run(mechanism.search("cats", limit=10))
+        assert results[0]["note_id"] == "note-1"
+
+    def test_search_respects_note_ids_scoping(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecNoteBackend(tmp_path / "notes-vectors.sqlite3", embedding)
+        mechanism = NotesVectorMechanism(backend, embedding)
+        asyncio.run(backend.index_note("note-1", "cats"))
+        asyncio.run(backend.index_note("note-2", "cats"))
+        results = asyncio.run(mechanism.search("cats", note_ids=["note-1"], limit=10))
+        assert [r["note_id"] for r in results] == ["note-1"]

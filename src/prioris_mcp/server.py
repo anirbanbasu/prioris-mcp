@@ -492,7 +492,16 @@ class PriorisMCP(MCPMixin):
         ] = None,
         format: Annotated[str | None, Field(default=None)] = None,
         mode: Annotated[
-            str, Field(default="fts", description="A registered mechanism name (e.g. 'fts', 'vector'), or 'hybrid'")
+            str,
+            Field(
+                default="fts",
+                description=(
+                    "A registered mechanism name (e.g. 'fts', 'vector'), or 'hybrid'. Vector/KNN "
+                    "search is unthresholded: it always returns up to limit nearest matches "
+                    "regardless of how dissimilar they are, so treat score as a relevance signal "
+                    "to filter on client-side rather than assuming every match is relevant."
+                ),
+            ),
         ] = "fts",
         limit: Annotated[
             int | None,
@@ -653,7 +662,16 @@ class PriorisMCP(MCPMixin):
         offset: Annotated[int, Field(default=0)] = 0,
         limit: Annotated[int, Field(default=50)] = 50,
         mode: Annotated[
-            str, Field(default="fts", description="A registered mechanism name (e.g. 'fts', 'vector'), or 'hybrid'")
+            str,
+            Field(
+                default="fts",
+                description=(
+                    "A registered mechanism name (e.g. 'fts', 'vector'), or 'hybrid'. Vector/KNN "
+                    "search is unthresholded: it always returns up to limit nearest matches "
+                    "regardless of how dissimilar they are, so treat score as a relevance signal "
+                    "to filter on client-side rather than assuming every match is relevant."
+                ),
+            ),
         ] = "fts",
     ) -> NotesSearchResult:
         """Search/list notes; no filters at all returns everything, paged, newest first. See mode for mechanism choice."""

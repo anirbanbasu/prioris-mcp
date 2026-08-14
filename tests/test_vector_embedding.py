@@ -1,10 +1,12 @@
 import asyncio
+import logging
 from unittest.mock import MagicMock, patch
 
 import anyio
 import pytest
 
-from prioris_mcp.vector.embedding import FastEmbedBackend
+from prioris_mcp.vector.embedding import FastEmbedBackend, _resolve_max_chunk_chars
+from prioris_mcp.vector.sqlite_vec_backend import _DEFAULT_MAX_CHUNK_CHARS, SqliteVecDocumentBackend
 
 
 class TestFastEmbedBackend:
@@ -132,3 +134,55 @@ class TestLazyInitialization:
             asyncio.run(scenario())
 
             mock_text_embedding.assert_called_once_with(model_name="BAAI/bge-small-en-v1.5")
+
+
+class TestResolveMaxChunkChars:
+    """Test suite for _resolve_max_chunk_chars (Minor 2: per-model chunk-char default)."""
+
+    def test_known_model_returns_a_value_under_the_unsafeguarded_token_budget(self):
+        # BAAI/bge-small-en-v1.5's fastembed description states "512 input tokens truncation" -
+        # 512 * 4 chars/token = 2048 unsafeguarded; the safety margin must bring it below that,
+        # while staying a sane, non-trivial size.
+        result = _resolve_max_chunk_chars("BAAI/bge-small-en-v1.5")
+        assert 500 < result < 2048
+
+    def test_unparseable_description_falls_back_and_logs_a_warning(self, caplog: pytest.LogCaptureFixture):
+        fixture_models = [{"model": "fake/no-token-count", "dim": 4, "description": "Text embeddings, no count here."}]
+        with (
+            patch("prioris_mcp.vector.embedding.TextEmbedding.list_supported_models", return_value=fixture_models),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = _resolve_max_chunk_chars("fake/no-token-count")
+        assert result == _DEFAULT_MAX_CHUNK_CHARS
+        assert any("fake/no-token-count" in record.message for record in caplog.records)
+
+    def test_model_not_in_registry_falls_back_and_logs_a_warning(self, caplog: pytest.LogCaptureFixture):
+        with (
+            patch("prioris_mcp.vector.embedding.TextEmbedding.list_supported_models", return_value=[]),
+            caplog.at_level(logging.WARNING),
+        ):
+            result = _resolve_max_chunk_chars("not-a-real-model/does-not-exist")
+        assert result == _DEFAULT_MAX_CHUNK_CHARS
+        assert any("not-a-real-model/does-not-exist" in record.message for record in caplog.records)
+
+    def test_fast_embed_backend_max_chunk_chars_matches_resolve(self):
+        backend = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        assert backend.max_chunk_chars == _resolve_max_chunk_chars("BAAI/bge-small-en-v1.5")
+
+
+class TestSqliteVecDocumentBackendMaxChunkCharsDefault:
+    """Test that SqliteVecDocumentBackend defaults max_chunk_chars from the embedding backend."""
+
+    def test_defaults_from_embedding_backend_not_the_bare_literal(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        # Sanity check this test model's resolved value actually differs from the bare-2000
+        # fallback, so this test would fail if the default reverted to the literal.
+        assert embedding.max_chunk_chars != _DEFAULT_MAX_CHUNK_CHARS
+
+        backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
+        assert backend._max_chunk_chars == embedding.max_chunk_chars
+
+    def test_explicit_override_still_wins(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding, max_chunk_chars=123)
+        assert backend._max_chunk_chars == 123
