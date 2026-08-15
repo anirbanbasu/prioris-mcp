@@ -2372,8 +2372,8 @@ class TestResearchNotesSearch:
 
         result, created = asyncio.run(scenario())
         assert result.structured_content["fts"] is None
-        assert len(result.structured_content["vector"]) == 1
-        assert result.structured_content["vector"][0]["note_id"] == created.structured_content["id"]
+        assert len(result.structured_content["vector"]["matches"]) == 1
+        assert result.structured_content["vector"]["matches"][0]["note_id"] == created.structured_content["id"]
 
     def test_mode_vector_structural_filter_excludes_other_provider_match(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -2402,7 +2402,7 @@ class TestResearchNotesSearch:
                 return result, created_arxiv
 
         result, created_arxiv = asyncio.run(scenario())
-        vector_matches = result.structured_content["vector"]
+        vector_matches = result.structured_content["vector"]["matches"]
         assert len(vector_matches) == 1
         assert vector_matches[0]["note_id"] == created_arxiv.structured_content["id"]
 
@@ -2443,11 +2443,67 @@ class TestResearchNotesSearch:
                 return first, second
 
         first, second = asyncio.run(scenario())
-        first_ids = [m["note_id"] for m in first.structured_content["vector"]]
-        second_ids = [m["note_id"] for m in second.structured_content["vector"]]
+        first_ids = [m["note_id"] for m in first.structured_content["vector"]["matches"]]
+        second_ids = [m["note_id"] for m in second.structured_content["vector"]["matches"]]
         assert len(first_ids) == 1
         assert len(second_ids) == 1
         assert first_ids != second_ids
+
+    def test_mode_vector_reports_total_and_has_more_across_pages(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """`total`/`has_more` must reflect the corpus-wide match count, not just this page's size.
+
+        Mirrors test_mode_vector_offset_pages_without_repeat_or_skip's two-note setup, but asserts
+        the paging metadata itself (introduced by PagedNoteVectorMatches) rather than which note IDs
+        land on which page.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "arxiv",
+                        "identifier": "A",
+                        "text": "feline companions and their behaviour",
+                    },
+                )
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "arxiv",
+                        "identifier": "B",
+                        "text": "canine companions and their behaviour",
+                    },
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                first = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "pet companion behaviour", "mode": "vector", "offset": 0, "limit": 1},
+                )
+                second = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "pet companion behaviour", "mode": "vector", "offset": 1, "limit": 1},
+                )
+                return first, second
+
+        first, second = asyncio.run(scenario())
+        first_vector = first.structured_content["vector"]
+        second_vector = second.structured_content["vector"]
+        assert first_vector["offset"] == 0
+        assert first_vector["limit"] == 1
+        assert first_vector["total"] == 2
+        assert first_vector["has_more"] is True
+        assert second_vector["offset"] == 1
+        assert second_vector["limit"] == 1
+        assert second_vector["total"] == 2
+        assert second_vector["has_more"] is False
 
     def test_mode_fts_leaves_index_status_none(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         client = self._server_and_client(tmp_path, monkeypatch)
@@ -2478,7 +2534,7 @@ class TestResearchNotesSearch:
                 )
 
         result = asyncio.run(scenario())
-        assert len(result.structured_content["vector"]) == 1
+        assert len(result.structured_content["vector"]["matches"]) == 1
         assert result.structured_content["index_status"] == {"vector": "ready"}
 
     def test_mode_vector_reports_not_built_when_a_matched_note_has_no_status_row(
@@ -2514,7 +2570,7 @@ class TestResearchNotesSearch:
                 )
 
         result = asyncio.run(scenario())
-        assert len(result.structured_content["vector"]) == 1
+        assert len(result.structured_content["vector"]["matches"]) == 1
         assert result.structured_content["index_status"] == {"vector": "not_built"}
 
     def test_mode_vector_reports_stale_index_status(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
@@ -2554,7 +2610,7 @@ class TestResearchNotesSearch:
                 )
 
         result = asyncio.run(scenario())
-        assert len(result.structured_content["vector"]) == 1
+        assert len(result.structured_content["vector"]["matches"]) == 1
         assert result.structured_content["index_status"] == {"vector": "stale"}
 
     def test_mode_vector_with_no_matches_reports_not_built(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
@@ -2571,7 +2627,7 @@ class TestResearchNotesSearch:
                 )
 
         result = asyncio.run(scenario())
-        assert result.structured_content["vector"] == []
+        assert result.structured_content["vector"]["matches"] == []
         assert result.structured_content["index_status"] == {"vector": "not_built"}
 
     def test_mode_vector_empty_page_with_indexed_corpus_reports_ready(
@@ -2604,7 +2660,7 @@ class TestResearchNotesSearch:
                 )
 
         result = asyncio.run(scenario())
-        assert result.structured_content["vector"] == []
+        assert result.structured_content["vector"]["matches"] == []
         assert result.structured_content["index_status"] == {"vector": "ready"}
 
     def test_negative_offset_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):

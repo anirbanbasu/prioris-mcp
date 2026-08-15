@@ -46,7 +46,12 @@ from prioris_mcp.models.common import (
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, NotesSearchResult, PagedNotes
-from prioris_mcp.models.vector import NoteVectorSearchMatch, PagedVectorSearchMatches, VectorSearchMatch
+from prioris_mcp.models.vector import (
+    NoteVectorSearchMatch,
+    PagedNoteVectorMatches,
+    PagedVectorSearchMatches,
+    VectorSearchMatch,
+)
 from prioris_mcp.notes.backend import NotesBackend
 from prioris_mcp.notes.search_index import NotesSearchIndex, SqliteFts5NotesSearchIndex
 from prioris_mcp.notes.sqlite_backend import SqliteNotesBackend
@@ -743,7 +748,7 @@ class PriorisMCP(MCPMixin):
             except sqlite3.OperationalError as exc:
                 raise InvalidRequestError(f"invalid search query: {exc}") from exc
 
-        vector_result: list[NoteVectorSearchMatch] | None = None
+        vector_result: PagedNoteVectorMatches | None = None
         if mode in ("vector", "hybrid") and keyword is not None:
             structural_filters_given = any(
                 [
@@ -773,12 +778,16 @@ class PriorisMCP(MCPMixin):
                     tags_exclude=tags_exclude,
                 )
             mechanism = cast(NotesVectorMechanism, self._notes_search_mechanisms["vector"])
-            raw = await mechanism.search(keyword, note_ids=note_ids, limit=offset + limit)
-            vector_result = [NoteVectorSearchMatch(**m) for m in raw[offset:]]
+            raw = await mechanism.search(keyword, note_ids=note_ids, offset=offset, limit=limit)
+            total = await mechanism.count(note_ids=note_ids)
+            matches = [NoteVectorSearchMatch(**m) for m in raw]
+            vector_result = PagedNoteVectorMatches(
+                matches=matches, offset=offset, limit=limit, total=total, has_more=offset + len(matches) < total
+            )
 
         index_status: dict[str, str] | None = None
         if vector_result is not None:
-            statuses = [await self._note_vector_backend.status(match.note_id) for match in vector_result]
+            statuses = [await self._note_vector_backend.status(match.note_id) for match in vector_result.matches]
             if not statuses:
                 # Zero matches alone doesn't distinguish "index genuinely empty/never built" from
                 # "index built, nothing matched this particular query/filters" - fall back to a
