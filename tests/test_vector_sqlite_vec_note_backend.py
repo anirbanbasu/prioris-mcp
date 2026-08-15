@@ -132,6 +132,21 @@ class TestStatus:
         results = asyncio.run(backend_b.search(query, note_ids=["note-1"]))
         assert [r["note_id"] for r in results] == ["note-1"]
 
+    def test_status_stale_for_a_same_dimension_differently_named_model(self, tmp_path):
+        """The Low finding this task fixes: same dimension, different model name, must still be stale."""
+        db_path = tmp_path / "notes-vectors.sqlite3"
+        backend_a = SqliteVecNoteBackend(db_path, _StubEmbedding("model-a", 4))
+        asyncio.run(backend_a.index_note("note-1", "old"))
+
+        backend_b = SqliteVecNoteBackend(db_path, _StubEmbedding("model-b", 4))  # same dimension
+        assert asyncio.run(backend_b.status("note-1")) == "stale"
+
+        asyncio.run(backend_b.index_note("note-1", "new"))
+        assert asyncio.run(backend_b.status("note-1")) == "ready"
+        query = asyncio.run(backend_b._embedding_backend.embed("new"))
+        results = asyncio.run(backend_b.search(query, note_ids=["note-1"]))
+        assert [r["note_id"] for r in results] == ["note-1"]
+
 
 class TestHasAnyIndexed:
     """Test the corpus-wide has_any_indexed existence check (D6)."""
@@ -245,3 +260,25 @@ class TestCount:
         asyncio.run(backend.index_note("note-1", "x"))
         # Count with note_ids that don't match anything.
         assert asyncio.run(backend.count(note_ids=["note-999", "note-1000"])) == 0
+
+
+class TestIndexedUnder:
+    """Test indexed_under() - the corpus-diffing primitive reconciliation uses (Task 2)."""
+
+    def test_empty_index_returns_empty_set(self, tmp_path):
+        backend = _backend(tmp_path)
+        assert asyncio.run(backend.indexed_under(backend._embedding_backend.model_name)) == set()
+
+    def test_returns_every_note_indexed_under_that_model(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(backend.index_note("note-1", "cat"))
+        asyncio.run(backend.index_note("note-2", "dog"))
+        result = asyncio.run(backend.indexed_under(backend._embedding_backend.model_name))
+        assert result == {"note-1", "note-2"}
+
+    def test_excludes_notes_indexed_under_a_different_model(self, tmp_path):
+        db_path = tmp_path / "notes-vectors.sqlite3"
+        backend_a = SqliteVecNoteBackend(db_path, _StubEmbedding("model-a", 4))
+        asyncio.run(backend_a.index_note("note-1", "cat"))
+        assert asyncio.run(backend_a.indexed_under("model-b")) == set()
+        assert asyncio.run(backend_a.indexed_under("model-a")) == {"note-1"}

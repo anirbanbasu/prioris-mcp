@@ -45,6 +45,9 @@ class _StubNoteBackend(NoteVectorSearchBackend):
     async def has_any_indexed(self, model_name):
         return False
 
+    async def indexed_under(self, model_name: str) -> set[str]:
+        return set()
+
 
 class TestDocumentVectorSearchBackendContract:
     """Verify DocumentVectorSearchBackend ABC contract is usable via concrete stub."""

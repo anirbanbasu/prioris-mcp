@@ -104,3 +104,11 @@ class NoteVectorSearchBackend(ABC):
         genuinely empty/never built" from "index built, this particular query just had zero
         matches" on an empty result page.
         """
+
+    @abstractmethod
+    async def indexed_under(self, model_name: str) -> set[str]:
+        """Every note_id currently recorded as embedded under `model_name`.
+
+        Used by corpus-wide reconciliation to diff the full persisted corpus against what's
+        already ready, without polling `status()` once per note.
+        """

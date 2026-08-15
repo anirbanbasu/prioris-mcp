@@ -331,12 +331,12 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
             "CREATE TABLE IF NOT EXISTS note_vectors_status "
             "(note_id TEXT NOT NULL PRIMARY KEY, embedded_model TEXT NOT NULL)"
         )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS note_vectors_meta "
-            "(id INTEGER PRIMARY KEY CHECK (id = 1), dimension INTEGER NOT NULL)"
-        )
-        meta_row = conn.execute("SELECT dimension FROM note_vectors_meta WHERE id = 1").fetchone()
-        if meta_row is not None and meta_row["dimension"] != self._embedding_backend.dimension:
+        conn.execute("CREATE TABLE IF NOT EXISTS note_vectors_meta (id INTEGER PRIMARY KEY CHECK (id = 1))")
+        existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(note_vectors_meta)")}
+        if "model_name" not in existing_columns:
+            conn.execute("ALTER TABLE note_vectors_meta ADD COLUMN model_name TEXT")
+        meta_row = conn.execute("SELECT model_name FROM note_vectors_meta WHERE id = 1").fetchone()
+        if meta_row is not None and meta_row["model_name"] != self._embedding_backend.model_name:
             conn.execute("DROP TABLE IF EXISTS note_vectors")
         conn.execute(
             f"""
@@ -349,9 +349,9 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
             """
         )
         conn.execute(
-            "INSERT INTO note_vectors_meta (id, dimension) VALUES (1, ?) "
-            "ON CONFLICT(id) DO UPDATE SET dimension = excluded.dimension",
-            (self._embedding_backend.dimension,),
+            "INSERT INTO note_vectors_meta (id, model_name) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET model_name = excluded.model_name",
+            (self._embedding_backend.model_name,),
         )
         return conn
 
@@ -457,3 +457,15 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
             return row is not None
 
         return await to_thread.run_sync(_check)
+
+    async def indexed_under(self, model_name: str) -> set[str]:
+        """Every note_id currently recorded as embedded under `model_name`."""
+
+        def _query() -> set[str]:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT note_id FROM note_vectors_status WHERE embedded_model = ?", (model_name,)
+                ).fetchall()
+            return {row["note_id"] for row in rows}
+
+        return await to_thread.run_sync(_query)
