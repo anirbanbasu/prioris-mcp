@@ -454,3 +454,43 @@ class TestIndexedUnder:
         )
         assert asyncio.run(backend_a.indexed_under("model-b")) == set()
         assert asyncio.run(backend_a.indexed_under("model-a")) == {("arxiv", "A", "pdf")}
+
+
+class TestConcurrentConnectionRace:
+    """Regression test for race condition in _connect() ALTER TABLE migration.
+
+    Multiple concurrent connections to the same fresh db path could both read PRAGMA
+    before either commits ALTER TABLE, causing the second to raise
+    sqlite3.OperationalError("duplicate column name"). This test ensures the fix
+    (try/except around ALTER TABLE) prevents the race.
+    """
+
+    def test_concurrent_connects_to_fresh_db_do_not_race_on_column_migration(self, tmp_path):
+        """Fire several concurrent first-connects at the same fresh db path."""
+        db_path = tmp_path / "vectors.sqlite3"
+
+        async def fire_concurrent_queries() -> list[set[tuple[str, str, str]]]:
+            async def create_and_query(provider: str) -> set[tuple[str, str, str]]:
+                backend = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-x", 4))
+                # indexed_under() calls _connect() and reads the metadata table
+                return await backend.indexed_under(backend._embedding_backend.model_name)
+
+            # Fire 10 concurrent connections to the same fresh db path - one would reliably
+            # fail with duplicate column error in the unfixed code, due to ALTER TABLE race.
+            return await asyncio.gather(
+                create_and_query("arxiv-1"),
+                create_and_query("arxiv-2"),
+                create_and_query("arxiv-3"),
+                create_and_query("arxiv-4"),
+                create_and_query("arxiv-5"),
+                create_and_query("arxiv-6"),
+                create_and_query("arxiv-7"),
+                create_and_query("arxiv-8"),
+                create_and_query("arxiv-9"),
+                create_and_query("arxiv-10"),
+            )
+
+        results = asyncio.run(fire_concurrent_queries())
+
+        # All should succeed and return empty set (no documents indexed yet on fresh db)
+        assert all(r == set() for r in results)
