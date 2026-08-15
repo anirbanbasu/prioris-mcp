@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from prioris_mcp.models.vector import PagedVectorSearchMatches
+from prioris_mcp.vector.backend import IndexStatus
 
 
 class FullTextFetchResult(BaseModel):
@@ -203,4 +204,4 @@ class SearchFetchedResult(BaseModel):
 
     fts: Annotated[PagedSearchMatches | None, Field(default=None)] = None
     vector: Annotated[PagedVectorSearchMatches | None, Field(default=None)] = None
-    index_status: Annotated[dict[str, str], Field(default_factory=dict)]
+    index_status: Annotated[dict[str, IndexStatus], Field(default_factory=dict)]

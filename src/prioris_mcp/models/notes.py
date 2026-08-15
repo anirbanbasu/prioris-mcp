@@ -9,6 +9,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from prioris_mcp.models.vector import PagedNoteVectorMatches
+from prioris_mcp.vector.backend import IndexStatus
 
 
 class AnchorLocation(BaseModel):
@@ -139,4 +140,4 @@ class NotesSearchResult(BaseModel):
 
     fts: Annotated[PagedNotes | None, Field(default=None)] = None
     vector: Annotated[PagedNoteVectorMatches | None, Field(default=None)] = None
-    index_status: Annotated[dict[str, str] | None, Field(default=None)] = None
+    index_status: Annotated[dict[str, IndexStatus] | None, Field(default=None)] = None

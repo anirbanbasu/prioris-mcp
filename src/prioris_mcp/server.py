@@ -657,7 +657,7 @@ class PriorisMCP(MCPMixin):
                 raise InvalidRequestError(f"invalid search query: {exc}") from exc
             results[mechanism.name] = (raw, total)
 
-        index_status: dict[str, str] = {}
+        index_status: dict[str, IndexStatus] = {}
         if identifier is not None and provider is not None and format is not None:
             for mechanism in self._search_mechanisms.values():
                 index_status[mechanism.name] = await mechanism.status(provider, identifier, format)
