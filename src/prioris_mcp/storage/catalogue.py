@@ -106,7 +106,9 @@ class Catalogue:
             with self._connect() as conn:
                 total = conn.execute(f"SELECT COUNT(*) AS n FROM entries {where}", params).fetchone()["n"]
                 rows = conn.execute(
-                    f"SELECT * FROM entries {where} ORDER BY recorded_at DESC LIMIT ? OFFSET ?",
+                    f"SELECT * FROM entries {where} "
+                    "ORDER BY recorded_at DESC, provider, canonical_identifier, format, artefact "
+                    "LIMIT ? OFFSET ?",
                     (*params, limit, offset),
                 ).fetchall()
                 return [self._row_to_entry(row) for row in rows], total

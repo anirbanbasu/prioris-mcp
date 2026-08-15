@@ -128,7 +128,7 @@ class SqliteFts5SearchIndex(SearchIndex):
             if format is not None:
                 sql += " AND format = ?"
                 params.append(format)
-            sql += " ORDER BY bm25(search) LIMIT ? OFFSET ?"
+            sql += " ORDER BY bm25(search), rowid LIMIT ? OFFSET ?"
             params.append(limit)
             params.append(offset)
             with self._connect() as conn:
