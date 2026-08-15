@@ -75,16 +75,6 @@ Every arXiv tool that returns article data (`search`, `list_top_n`, `fetch_metad
 
 **Caching:** covered by the standard `ResponseCachingMiddleware` `read_resource` path (`PRIORIS_MCP_RESPONSE_CACHE_TTL`), same as any other resource — no separate persistent cache.
 
-### OpenAlex work-types resource
-
-**Resource URI:** `research://openalex/work-types` (static, no path parameters).
-
-**Underlying call:** `GET https://api.openalex.org/work-types?per-page=100`, plus `api_key=<PRIORIS_MCP_OPENALEX_API_KEY>` when configured (see [Discovery → Authentication](02-discovery.md#authentication-an-api-key-not-mailto)). `per-page=100` comfortably covers OpenAlex's 25 defined types (as of writing) without relying on the endpoint's own default page size.
-
-**Output:** `{"types": [{"code": <string>, "name": <string>, "description": <string>}, ...]}`, sorted by `code`. `code` is the type slug taken from the last path segment of OpenAlex's own `id` (e.g. `https://openalex.org/types/article` → `article`); `name`/`description` are `display_name`/`description` verbatim from the response.
-
-**Caching:** covered by the standard `ResponseCachingMiddleware` `read_resource` path (`PRIORIS_MCP_RESPONSE_CACHE_TTL`), same as `research://arxiv/categories` above.
-
 ### `research_arxiv_fetch_metadata`
 
 **Input:** `arxiv_ids` (list of strings, required, one or more — version suffix optional per ID).
@@ -174,6 +164,51 @@ Taken from a `resultType=core` search/lookup response:
 ### Rate limiting
 
 Europe PMC publishes no numeric rate limit; per [Functional requirements → Europe PMC tools](03-functional-requirements.md#europe-pmc-tools), it self-imposes arXiv's same 1-request-per-3-seconds policy through the same serialised queue described in [Non-functional requirements](04-non-functional-requirements.md), including the same adaptive-backoff-then-`rate_limited` behaviour on a 429, and the same immediate, un-retried `provider_unavailable` on a timeout, connection failure, or 5xx.
+
+## Discovery
+
+**v3** — see [Discovery](02-discovery.md). Unlike arXiv/Europe PMC above, this isn't a per-provider tool set: `research_discovery` is one tool sitting in front of OpenAlex's `/works` `search.semantic` parameter, plus one reference resource for OpenAlex's work-type vocabulary.
+
+### `research_discovery`
+
+**Input:** `query` (string, required — free text, up to 2000 characters), `max_results` (integer, optional, 1-50, default `PRIORIS_MCP_DISCOVERY_MAX_RESULTS`), `page` (integer, optional, default 1, 1-indexed), `from_year`/`to_year` (integer, optional — inclusive `publication_year` bounds), `open_access_only` (boolean, optional, default `false`).
+
+**Underlying call:** `GET api.openalex.org/works?search.semantic={query}&per-page={max_results}&page={page}&filter={filter}&api_key={key}`. `filter` is a comma-joined clause list, present only when at least one of `from_year`/`to_year`/`open_access_only` is given: `from_year` → `publication_year:>={from_year}`, `to_year` → `publication_year:<={to_year}`, `open_access_only` → `is_oa:true`. `api_key` is present only when `PRIORIS_MCP_OPENALEX_API_KEY` is configured (see [Discovery → Authentication](02-discovery.md#authentication-an-api-key-not-mailto)). The URL is built by hand rather than via a query-parameter dict, specifically to keep `filter`'s `:`/`,`/`=` characters unescaped — OpenAlex's own servers have been observed to hang (repeated HTTP 504) on a percent-encoded `:` in `filter`, even though both forms are RFC 3986-legal.
+
+**Behaviour:** validates `query`'s length, `max_results`'s 1-50 range, `page >= 1`, and `from_year <= to_year` (when both given), failing `invalid_request` before any outbound call. After OpenAlex responds, any hit whose `fetch_route.kind == "known_provider"` and whose provider-native identifier already appears in local storage (the same catalogue `research_list_fetched` reads) is dropped from `hits`. `page`/`per_page`/`total`/`has_more` still reflect OpenAlex's own pre-exclusion counts for the query — see [Discovery → Paging, filters, and the work-type reference resource](02-discovery.md#paging-filters-and-the-work-type-reference-resource) — so a returned page can carry fewer than `per_page` hits even though more remain to page through.
+
+**Output:** `{"hits": [<discovery hit>, ...], "page": <int>, "per_page": <int>, "total": <int>, "has_more": <bool>}` (`DiscoveryResult`). `total` never exceeds 50 — `search.semantic`'s own hard per-query ceiling, not a PriorisMCP-imposed limit; `has_more` is `page * per_page < total`.
+
+One discovery-hit shape (`DiscoveryHit`), one per OpenAlex work:
+
+| Field | Source | Notes |
+|---|---|---|
+| `openalex_id` | `id` | The trailing path segment of OpenAlex's own Work ID URL, e.g. `https://openalex.org/W2741809807` → `W2741809807`. |
+| `title` | `title` | Optional. |
+| `abstract` | `abstract_inverted_index` | Optional — reconstructed to plain text from OpenAlex's word-position inverted index; OpenAlex never returns a plain abstract string directly. |
+| `authors` | `authorships` | List of `{"name": <string>}` — only authorships with a populated `display_name` are included. |
+| `publication_year` | `publication_year` | Optional. |
+| `doi` | `doi` | Optional. |
+| `score` | `relevance_score` | OpenAlex's own embedding-similarity score for this query. |
+| `fetch_route` | derived, not read directly off one OpenAlex field | See below. |
+
+`fetch_route` (`DiscoveryFetchRoute`) is `{"kind": "known_provider"|"oa_link"|"manual_upload", "provider": "arxiv"|"europepmc"|null, "identifier": <string|null>, "pdf_url": <string|null>}`, resolved in this order per hit (see [Discovery → Fetch ladder](02-discovery.md#fetch-ladder-for-results-that-land-outside-arxiveurope-pmc)):
+
+1. **`known_provider`** — the work's `doi` matches an arXiv DOI (`10.48550/arxiv.{id}`, giving `provider="arxiv"`), or its `ids.pmcid` contains a PMCID (`provider="europepmc"`); `identifier` is the extracted provider-native id, `pdf_url` is `null`.
+2. **`oa_link`** — otherwise, the first `pdf_url` found across the work's `locations` (falling back to `best_oa_location` when `locations` is empty), preferring a `publishedVersion` location over `acceptedVersion` over `submittedVersion`; `pdf_url` is set, `provider`/`identifier` are `null`.
+3. **`manual_upload`** — otherwise; `provider`/`identifier`/`pdf_url` are all `null`.
+
+**Errors:** `invalid_request` for the validation failures above; `rate_limited` on an HTTP 429 from OpenAlex — surfaced immediately rather than retried, since (unlike arXiv/Europe PMC) there is no serialised per-provider queue or bounded backoff in front of OpenAlex; `provider_unavailable` on a timeout, connection failure, or 5xx.
+
+### OpenAlex work-types resource
+
+**Resource URI:** `research://openalex/work-types` (static, no path parameters).
+
+**Underlying call:** `GET https://api.openalex.org/work-types?per-page=100`, plus `api_key=<PRIORIS_MCP_OPENALEX_API_KEY>` when configured (same authentication as `research_discovery` above). `per-page=100` comfortably covers OpenAlex's 25 defined types (as of writing) without relying on the endpoint's own default page size.
+
+**Output:** `{"types": [{"code": <string>, "name": <string>, "description": <string>}, ...]}`, sorted by `code`. `code` is the type slug taken from the last path segment of OpenAlex's own `id` (e.g. `https://openalex.org/types/article` → `article`); `name`/`description` are `display_name`/`description` verbatim from the response.
+
+**Caching:** covered by the standard `ResponseCachingMiddleware` `read_resource` path (`PRIORIS_MCP_RESPONSE_CACHE_TTL`), same as `research://arxiv/categories` above.
 
 ## Local filesystem
 
