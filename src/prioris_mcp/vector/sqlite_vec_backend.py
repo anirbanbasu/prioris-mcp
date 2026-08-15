@@ -169,6 +169,7 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
         provider: str | None = None,
         identifier: str | None = None,
         format: str | None = None,
+        offset: int = 0,
         limit: int = 10,
     ) -> list[dict]:
         """Cosine-similarity KNN search, ranked most-similar first.
@@ -183,8 +184,8 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
 
         def _search() -> list[dict]:
             # Over-fetch before collapsing same-chunk_id sub-splits, so collapsing never starves
-            # `limit` distinct chunks below what a caller asked for.
-            fetch_k = limit * _CHUNK_COLLAPSE_OVERFETCH_FACTOR
+            # `offset + limit` distinct chunks below what a caller asked for.
+            fetch_k = (offset + limit) * _CHUNK_COLLAPSE_OVERFETCH_FACTOR
             sql = (
                 "SELECT provider, identifier, format, chunk_id, span_start, text, distance "
                 "FROM document_vectors WHERE embedding MATCH ? AND k = ?"
@@ -208,7 +209,7 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
                 existing = best_per_chunk.get(key)
                 if existing is None or row["distance"] < existing["distance"]:
                     best_per_chunk[key] = row
-            ordered = sorted(best_per_chunk.values(), key=lambda r: r["distance"])[:limit]
+            ordered = sorted(best_per_chunk.values(), key=lambda r: r["distance"])[offset : offset + limit]
             return [
                 {
                     "provider": row["provider"],
@@ -225,6 +226,39 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
             ]
 
         return await to_thread.run_sync(_search)
+
+    async def count(
+        self, *, provider: str | None = None, identifier: str | None = None, format: str | None = None
+    ) -> int:
+        """Count of distinct indexed chunks matching the given filters.
+
+        Counts distinct (provider, identifier, format, chunk_id) tuples rather than raw
+        `document_vectors` rows, so an oversized chunk's sub-splits (see `search()`) are counted
+        once - matching how many distinct chunks `search()` can ever return for it.
+        """
+
+        def _count() -> int:
+            sql = (
+                "SELECT COUNT(*) AS n FROM ("
+                "SELECT DISTINCT provider, identifier, format, chunk_id "
+                "FROM document_vectors WHERE 1=1"
+            )
+            params: list[str] = []
+            if provider is not None:
+                sql += " AND provider = ?"
+                params.append(provider)
+            if identifier is not None:
+                sql += " AND identifier = ?"
+                params.append(identifier)
+            if format is not None:
+                sql += " AND format = ?"
+                params.append(format)
+            sql += ")"
+            with self._connect() as conn:
+                row = conn.execute(sql, params).fetchone()
+                return row["n"]
+
+        return await to_thread.run_sync(_count)
 
     async def status(self, provider: str, identifier: str, format: str) -> IndexStatus:
         """Compare this document's recorded embedded_model against the currently configured one."""

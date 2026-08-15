@@ -36,11 +36,22 @@ class DocumentVectorSearchBackend(ABC):
         provider: str | None = None,
         identifier: str | None = None,
         format: str | None = None,
+        offset: int = 0,
         limit: int = 10,
     ) -> list[dict]:
         """Cosine-similarity KNN search, ranked most-similar first.
 
         Returns list of {"provider", "identifier", "format", "chunk_id", "offset", "snippet", "score"}.
+        """
+
+    @abstractmethod
+    async def count(
+        self, *, provider: str | None = None, identifier: str | None = None, format: str | None = None
+    ) -> int:
+        """Count of distinct indexed chunks matching the given filters — unthresholded, unpaged.
+
+        Counts distinct (provider, identifier, format, chunk_id) — an oversized chunk's sub-splits
+        (see `search()`) must not be double-counted relative to what `search()` actually returns.
         """
 
     @abstractmethod

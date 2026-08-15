@@ -127,6 +127,129 @@ class TestIndexAndSearch:
         assert chunk_ids.count("c1") == 1
 
 
+class TestOffsetPaging:
+    """Test search() offset paging."""
+
+    def test_search_offset_paginates_without_overlap_or_gaps(self, tmp_path):
+        backend = _backend(tmp_path)
+        words = ["apple", "banana", "cherry", "date", "elderberry"]
+        for i, word in enumerate(words):
+            asyncio.run(
+                backend.index_entries(
+                    "arxiv", f"doc-{i}", "pdf", [{"chunk_id": "c1", "start": 0, "length": len(word), "text": word}]
+                )
+            )
+        query = asyncio.run(backend._embedding_backend.embed("fruit"))
+        full = asyncio.run(backend.search(query, limit=5))
+        assert len(full) == 5
+        page1 = asyncio.run(backend.search(query, offset=0, limit=2))
+        page2 = asyncio.run(backend.search(query, offset=2, limit=2))
+        page3 = asyncio.run(backend.search(query, offset=4, limit=2))
+        assert page1 == full[0:2]
+        assert page2 == full[2:4]
+        assert page3 == full[4:5]
+
+    def test_search_offset_beyond_available_results_returns_empty(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(
+            backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 4, "text": "cats"}])
+        )
+        query = asyncio.run(backend._embedding_backend.embed("cats"))
+        assert asyncio.run(backend.search(query, offset=10, limit=5)) == []
+
+    def test_search_offset_still_respects_chunk_id_collapse_for_oversized_chunks(self, tmp_path):
+        backend = _backend(tmp_path)
+        long_text = "the transformer architecture uses self attention. " * 100
+        asyncio.run(
+            backend.index_entries(
+                "arxiv",
+                "2106.09685v2",
+                "pdf",
+                [{"chunk_id": "c1", "start": 0, "length": len(long_text), "text": long_text}],
+            )
+        )
+        asyncio.run(
+            backend.index_entries(
+                "arxiv", "other", "pdf", [{"chunk_id": "c2", "start": 0, "length": 4, "text": "cats"}]
+            )
+        )
+        query = asyncio.run(backend._embedding_backend.embed("self attention mechanism"))
+        page1 = asyncio.run(backend.search(query, provider="arxiv", format="pdf", offset=0, limit=1))
+        page2 = asyncio.run(backend.search(query, provider="arxiv", format="pdf", offset=1, limit=1))
+        assert len(page1) == 1
+        assert len(page2) == 1
+        assert page1[0]["chunk_id"] != page2[0]["chunk_id"]
+
+
+class TestCount:
+    """Test count() — distinct-chunk counting, unpaged."""
+
+    def test_count_zero_for_empty_index(self, tmp_path):
+        backend = _backend(tmp_path)
+        assert asyncio.run(backend.count()) == 0
+
+    def test_count_matches_number_of_indexed_chunks(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(
+            backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 4, "text": "cats"}])
+        )
+        asyncio.run(
+            backend.index_entries(
+                "europepmc", "MED:1", "xml", [{"chunk_id": "c1", "start": 0, "length": 4, "text": "cats"}]
+            )
+        )
+        assert asyncio.run(backend.count()) == 2
+
+    def test_count_scoped_by_provider_identifier_format(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(
+            backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 4, "text": "cats"}])
+        )
+        asyncio.run(
+            backend.index_entries(
+                "europepmc", "MED:1", "xml", [{"chunk_id": "c1", "start": 0, "length": 4, "text": "cats"}]
+            )
+        )
+        assert asyncio.run(backend.count(provider="arxiv")) == 1
+        assert asyncio.run(backend.count(identifier="MED:1")) == 1
+        assert asyncio.run(backend.count(format="xml")) == 1
+
+    def test_count_reflects_removal(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(
+            backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 4, "text": "cats"}])
+        )
+        assert asyncio.run(backend.count()) == 1
+        asyncio.run(backend.remove_document("arxiv", "A", "pdf"))
+        assert asyncio.run(backend.count()) == 0
+
+    def test_count_counts_oversized_chunk_once_matching_what_search_can_return(self, tmp_path):
+        backend = _backend(tmp_path)
+        long_text = "the transformer architecture uses self attention. " * 100
+        asyncio.run(
+            backend.index_entries(
+                "arxiv",
+                "2106.09685v2",
+                "pdf",
+                [{"chunk_id": "c1", "start": 0, "length": len(long_text), "text": long_text}],
+            )
+        )
+        asyncio.run(
+            backend.index_entries(
+                "arxiv", "other", "pdf", [{"chunk_id": "c2", "start": 0, "length": 4, "text": "cats"}]
+            )
+        )
+        count = asyncio.run(backend.count(provider="arxiv", format="pdf"))
+        assert count == 2
+
+        query = asyncio.run(backend._embedding_backend.embed("self attention mechanism"))
+        results = asyncio.run(backend.search(query, provider="arxiv", format="pdf", limit=count))
+        assert len(results) == count
+        # One more page beyond `count` must be empty - there is nothing left to collapse into.
+        overflow = asyncio.run(backend.search(query, provider="arxiv", format="pdf", offset=count, limit=5))
+        assert overflow == []
+
+
 class TestReplaceOnReindex:
     """Test that indexing the same document replaces previous vectors."""
 

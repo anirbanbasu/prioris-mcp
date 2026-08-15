@@ -13,8 +13,11 @@ class _StubDocumentBackend(DocumentVectorSearchBackend):
     async def remove_document(self, provider, identifier, format):
         pass
 
-    async def search(self, query_embedding, *, provider=None, identifier=None, format=None, limit=10):
+    async def search(self, query_embedding, *, provider=None, identifier=None, format=None, offset=0, limit=10):
         return []
+
+    async def count(self, *, provider=None, identifier=None, format=None):
+        return 0
 
     async def status(self, provider, identifier, format):
         return "not_built"
@@ -45,6 +48,7 @@ class TestDocumentVectorSearchBackendContract:
         asyncio.run(backend.index_entries("arxiv", "2106.09685v2", "pdf", [{"chunk_id": "a", "text": "x"}]))
         assert backend.indexed[0][0] == "arxiv"
         assert asyncio.run(backend.status("arxiv", "2106.09685v2", "pdf")) == "not_built"
+        assert asyncio.run(backend.count()) == 0
 
 
 class TestNoteVectorSearchBackendContract:
