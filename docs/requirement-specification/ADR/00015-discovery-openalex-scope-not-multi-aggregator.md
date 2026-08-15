@@ -19,7 +19,7 @@ Discovery scope is narrowly OpenAlex's `search.semantic` parameter on `/works`.
 
 ## Consequences
 
-Practical limits inherited from the API itself apply directly: input capped at 2,000 characters (truncated beyond that), maximum 50 results per query, rate-limited to 1 request/second, and it can't be combined with OpenAlex's other `search`/`search.exact` parameters in the same request.
+Practical limits inherited from the API itself apply directly: maximum 50 results per query, rate-limited to 1 request/second, and it can't be combined with OpenAlex's other `search`/`search.exact` parameters in the same request. Input over 2,000 characters is a separate, PriorisMCP-imposed policy, not an inherited OpenAlex behaviour: OpenAlex's own `search.semantic` silently uses just the first 2,000 characters of a longer query rather than rejecting it, but `research_discovery` rejects it outright with `invalid_request` instead of silently discarding part of the caller's input — see [Interface specification → `research_discovery`](../06-interface-specification.md#research_discovery).
 
 ## Referenced from
 

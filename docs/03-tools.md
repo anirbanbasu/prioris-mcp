@@ -19,6 +19,7 @@ A tool failure surfaces as an MCP `ToolError` — a plain error response carryin
 | `rate_limited` | The provider's outbound queue exhausted its backoff budget after repeated `429`s from the source. Discovery has no such queue — a `429` from OpenAlex surfaces immediately instead of being retried. |
 | `provider_unavailable` | A timeout, connection failure, or `5xx` from the source — surfaced immediately, never retried. |
 | `file_too_large` | `research_localfile_fetch_full_text`'s decoded content exceeds `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`. Also covers the chunked-upload path: a single chunk over `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES` in `research_localfile_upload_chunk`, or a reassembled total over `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` in `research_localfile_upload_chunk`/`research_localfile_finalize_upload`. |
+| `configuration_error` | A required server-side configuration value is missing, checked before any outbound call — currently `research_discovery`/`research://openalex/work-types` when `PRIORIS_MCP_OPENALEX_API_KEY` isn't set (OpenAlex has required a key on every request since 2026-02-13). |
 
 ## arXiv tools
 
@@ -53,7 +54,7 @@ Europe PMC publishes no numeric rate limit; the provider self-imposes the same o
 |---|---|---|---|
 | `research_discovery` | Discover external research candidates not already in the local corpus, ranked by OpenAlex's embedding-based `search.semantic`. | `query` (free text, ≤2000 chars), `max_results` (1-50, default `PRIORIS_MCP_DISCOVERY_MAX_RESULTS`), `page` (default 1, 1-indexed), `from_year`/`to_year` (optional, inclusive `publication_year` bounds), `open_access_only` (default `false`) | `total` is capped at 50 — `search.semantic`'s own hard per-query ceiling, not a PriorisMCP-imposed limit. `page`/`per_page`/`total`/`has_more` reflect OpenAlex's own pre-exclusion counts; a returned page can carry fewer hits than requested once candidates already present in local storage are filtered out of the response. Each hit includes a `fetch_route` (`known_provider`\|`oa_link`\|`manual_upload`) describing how to actually retrieve full text for it — see [Fetch ladder](requirement-specification/02-discovery.md#fetch-ladder-for-results-that-land-outside-arxiveurope-pmc). |
 
-Authenticated via `PRIORIS_MCP_OPENALEX_API_KEY` (optional — unauthenticated requests still work, just without the higher rate limits a key grants), sent as OpenAlex's own `api_key` query parameter, not the deprecated `mailto` polite-pool parameter. See `research://openalex/work-types` in [Resources](04-resources.md) for the reference vocabulary behind a hit's own work-type metadata — it isn't a filter `research_discovery` itself accepts.
+Authenticated via `PRIORIS_MCP_OPENALEX_API_KEY`, sent as OpenAlex's own `api_key` query parameter, not the deprecated `mailto` polite-pool parameter. OpenAlex has required this key on every request since 2026-02-13; if it isn't configured, the tool fails with `configuration_error` rather than making an unauthenticated call. See `research://openalex/work-types` in [Resources](04-resources.md) for the reference vocabulary behind a hit's own `work_type` field — it isn't a filter `research_discovery` itself accepts.
 
 ## Identifier resolution
 

@@ -1,9 +1,10 @@
 import importlib
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
-from environs import EnvValidationError
+from environs import Env, EnvValidationError
 
 import prioris_mcp
 
@@ -82,8 +83,12 @@ class TestDiscoveryEnvVars:
     """OpenAlex discovery environment-variable defaults and validation."""
 
     def test_openalex_api_key_defaults_to_none(self, monkeypatch: "pytest.MonkeyPatch"):
+        # A developer's own .env may legitimately set PRIORIS_MCP_OPENALEX_API_KEY; module reload
+        # re-runs env.read_env(), which would silently restore it from .env and defeat delenv()
+        # below. Stub read_env() for just this reload so the default is checked in isolation.
         monkeypatch.delenv("PRIORIS_MCP_OPENALEX_API_KEY", raising=False)
-        reloaded = importlib.reload(prioris_mcp)
+        with patch.object(Env, "read_env", lambda self, *args, **kwargs: None):
+            reloaded = importlib.reload(prioris_mcp)
         assert reloaded.EnvVars.PRIORIS_MCP_OPENALEX_API_KEY is None
 
     def test_openalex_api_key_reads_from_env(self, monkeypatch: "pytest.MonkeyPatch"):

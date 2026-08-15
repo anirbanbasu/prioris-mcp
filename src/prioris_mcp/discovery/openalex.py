@@ -8,13 +8,20 @@ from urllib.parse import quote
 import httpx
 
 from prioris_mcp.discovery.fetch_ladder import resolve_fetch_route
-from prioris_mcp.errors import InvalidRequestError
+from prioris_mcp.errors import ConfigurationError, InvalidRequestError
 from prioris_mcp.models.discovery import DiscoveryHit, DiscoveryResult, OpenAlexWorkType, OpenAlexWorkTypesResult
 from prioris_mcp.providers import http as provider_http
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
 OPENALEX_WORK_TYPES_URL = "https://api.openalex.org/work-types"
 OPENALEX_SEARCH_SEMANTIC_MAX_CHARS = 2000
+# OpenAlex has required an API key on every request since 2026-02-13, removing (not just
+# deprecating) the unauthenticated "polite pool" - see https://help.openalex.org/api/authentication.
+_MISSING_API_KEY_MESSAGE = (
+    "PRIORIS_MCP_OPENALEX_API_KEY is not configured. OpenAlex has required an API key on every "
+    "request since 2026-02-13 - get a free key at https://openalex.org/settings/api-keys and set "
+    "PRIORIS_MCP_OPENALEX_API_KEY."
+)
 # OpenAlex's search.semantic caps total matches at 50 per query, not the ordinary /works
 # per-page cap of 200 - see https://help.openalex.org/api/semantic-search/.
 OPENALEX_MAX_RESULTS = 50
@@ -26,7 +33,7 @@ OPENALEX_MAX_RESULTS = 50
 _FILTER_SAFE_CHARS = ":,="
 
 
-def _build_works_url(query: str, *, per_page: int, page: int, filter_value: str | None, api_key: str | None) -> str:
+def _build_works_url(query: str, *, per_page: int, page: int, filter_value: str | None, api_key: str) -> str:
     """Build the `/works` request URL by hand, keeping `filter`'s `:`/`,`/`=` unescaped.
 
     httpx's `params=` dict support routes every value through the same encoding regardless of
@@ -37,8 +44,7 @@ def _build_works_url(query: str, *, per_page: int, page: int, filter_value: str 
     parts = [f"search.semantic={quote(query, safe='')}", f"per-page={per_page}", f"page={page}"]
     if filter_value:
         parts.append(f"filter={quote(filter_value, safe=_FILTER_SAFE_CHARS)}")
-    if api_key:
-        parts.append(f"api_key={quote(api_key, safe='')}")
+    parts.append(f"api_key={quote(api_key, safe='')}")
     return f"{OPENALEX_WORKS_URL}?{'&'.join(parts)}"
 
 
@@ -68,6 +74,7 @@ def _work_to_hit(work: dict) -> DiscoveryHit:
         authors=authors,
         publication_year=work.get("publication_year"),
         doi=work.get("doi"),
+        work_type=work.get("type"),
         score=work.get("relevance_score"),
         fetch_route=resolve_fetch_route(work),
     )
@@ -99,9 +106,12 @@ class OpenAlexClient:
         exposed here.
 
         Raises:
+            ConfigurationError: PRIORIS_MCP_OPENALEX_API_KEY is not configured.
             InvalidRequestError: `query`/`max_results`/`page` are out of range, or `from_year` is
                 after `to_year`.
         """
+        if not self._api_key:
+            raise ConfigurationError(_MISSING_API_KEY_MESSAGE)
         if len(query) > OPENALEX_SEARCH_SEMANTIC_MAX_CHARS:
             raise InvalidRequestError(
                 f"query exceeds OpenAlex search.semantic's {OPENALEX_SEARCH_SEMANTIC_MAX_CHARS}-character limit"
@@ -149,10 +159,13 @@ class OpenAlexClient:
         live testing, to silently under-filter alongside `search.semantic` - see
         `search_semantic`'s docstring); this is reference data for a caller inspecting a hit's own
         metadata, not a discovery-tool filter parameter.
+
+        Raises:
+            ConfigurationError: PRIORIS_MCP_OPENALEX_API_KEY is not configured.
         """
-        params = {"per-page": "100"}
-        if self._api_key:
-            params["api_key"] = self._api_key
+        if not self._api_key:
+            raise ConfigurationError(_MISSING_API_KEY_MESSAGE)
+        params = {"per-page": "100", "api_key": self._api_key}
         response = await provider_http.request(self._http_client, "GET", OPENALEX_WORK_TYPES_URL, params=params)
         payload = response.json()
         types = sorted(

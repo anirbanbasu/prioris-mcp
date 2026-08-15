@@ -50,6 +50,14 @@ class DiscoveryHit(BaseModel):
     authors: Annotated[list[DiscoveryAuthor], Field(default_factory=list, strict=True)]
     publication_year: Annotated[int | None, Field(default=None, strict=True)] = None
     doi: Annotated[str | None, Field(default=None, strict=True)] = None
+    work_type: Annotated[
+        str | None,
+        Field(
+            default=None,
+            strict=True,
+            description="OpenAlex's own work `type` code for this hit, e.g. `article` - see research://openalex/work-types.",
+        ),
+    ] = None
     score: Annotated[float, Field(..., strict=True, description="OpenAlex embedding-similarity score.")]
     fetch_route: Annotated[DiscoveryFetchRoute, Field(...)]
 

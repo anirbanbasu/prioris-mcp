@@ -14,7 +14,7 @@ The capability this chapter designs is narrowly OpenAlex's `search.semantic` par
 
 ## Authentication: an API key, not `mailto`
 
-OpenAlex deprecated the `mailto` polite-pool query parameter (ignored as of February 2026) in favour of a free API key — see [OpenAlex → API deprecations](https://help.openalex.org/api/deprecations). `PRIORIS_MCP_OPENALEX_API_KEY` configures it (optional: every discovery request still works unauthenticated, just without the higher rate limits an authenticated key grants), sent as the `api_key` query parameter on every outbound request `OpenAlexClient` makes.
+OpenAlex deprecated the `mailto` polite-pool query parameter in favour of a free API key, then went further: since 2026-02-13, an API key is **required** on every request — an unauthenticated call now fails outright rather than merely losing the higher rate limits a key grants (see [OpenAlex → Authentication](https://help.openalex.org/api/authentication)). `PRIORIS_MCP_OPENALEX_API_KEY` configures it, sent as the `api_key` query parameter on every outbound request `OpenAlexClient` makes. The environment variable itself stays optional at server startup (`default=None`) so an unconfigured key doesn't break unrelated tools; `OpenAlexClient.search_semantic`/`list_work_types` instead raise `ConfigurationError` (`configuration_error`) with an actionable message the moment `research_discovery`/`research://openalex/work-types` is actually used without one — see [Interface specification → Conventions](06-interface-specification.md#conventions).
 
 ## Discovery-only, not a `ResearchPublicationProvider` peer
 

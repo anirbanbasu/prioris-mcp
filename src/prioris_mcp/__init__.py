@@ -178,9 +178,12 @@ class EnvVars:
 
     PRIORIS_MCP_OPENALEX_API_KEY: str | None = env.str(
         "PRIORIS_MCP_OPENALEX_API_KEY",
-        # OpenAlex deprecated the mailto polite-pool parameter (ignored as of Feb 2026) in favour
-        # of a free API key - see https://help.openalex.org/api/deprecations. Optional: omitting
-        # it still works, just without the higher rate limits an authenticated key grants.
+        # OpenAlex has required an API key on every request since 2026-02-13, replacing the
+        # mailto polite-pool parameter (removed, not just deprecated) - see
+        # https://help.openalex.org/api/authentication. Left optional here (default=None), rather
+        # than failing startup, so an unconfigured key doesn't break tools unrelated to discovery;
+        # OpenAlexClient.search_semantic/list_work_types raise ConfigurationError with an
+        # actionable message the first time discovery is actually used without one.
         default=None,
     )
 

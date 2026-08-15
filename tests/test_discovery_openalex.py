@@ -5,7 +5,9 @@ import httpx
 import pytest
 
 from prioris_mcp.discovery.openalex import OpenAlexClient
-from prioris_mcp.errors import InvalidRequestError
+from prioris_mcp.errors import ConfigurationError, InvalidRequestError
+
+TEST_API_KEY = "test-api-key-123"
 
 
 def _work(**overrides) -> dict:
@@ -13,6 +15,7 @@ def _work(**overrides) -> dict:
         "id": "https://openalex.org/W2741809807",
         "doi": "https://doi.org/10.48550/arxiv.1706.03762",
         "title": "Attention Is All You Need",
+        "type": "article",
         "publication_year": 2017,
         "relevance_score": 0.91,
         "authorships": [{"author": {"display_name": "Ashish Vaswani"}}],
@@ -40,13 +43,14 @@ class TestSearchSemantic:
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         result = _run(
-            OpenAlexClient(client, api_key=None).search_semantic("transformer attention mechanisms", max_results=10)
+            OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic(
+                "transformer attention mechanisms", max_results=10
+            )
         )
         assert len(result.hits) == 1
         assert seen_params[0]["search.semantic"] == "transformer attention mechanisms"
         assert seen_params[0]["per-page"] == "10"
         assert "filter" not in seen_params[0]
-        assert "api_key" not in seen_params[0]
 
     def test_includes_api_key_when_configured(self):
         seen_params = []
@@ -56,15 +60,22 @@ class TestSearchSemantic:
             return httpx.Response(200, json={"results": []})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        _run(OpenAlexClient(client, api_key="test-api-key-123").search_semantic("query", max_results=5))
-        assert seen_params[0]["api_key"] == "test-api-key-123"
+        _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5))
+        assert seen_params[0]["api_key"] == TEST_API_KEY
+
+    def test_raises_configuration_error_when_api_key_missing(self):
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
+        )
+        with pytest.raises(ConfigurationError, match="PRIORIS_MCP_OPENALEX_API_KEY"):
+            _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5))
 
     def test_rejects_query_over_2000_characters(self):
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
         )
         with pytest.raises(InvalidRequestError, match="2000"):
-            _run(OpenAlexClient(client, api_key=None).search_semantic("x" * 2001, max_results=5))
+            _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("x" * 2001, max_results=5))
 
     @pytest.mark.parametrize("max_results", [0, 51])
     def test_rejects_max_results_outside_openalex_limit(self, max_results: int):
@@ -72,22 +83,32 @@ class TestSearchSemantic:
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
         )
         with pytest.raises(InvalidRequestError, match="max_results"):
-            _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=max_results))
+            _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=max_results))
 
     def test_maps_score_and_authors(self):
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": [_work()]}))
         )
-        hit = _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5)).hits[0]
+        hit = _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5)).hits[0]
         assert hit.score == 0.91
         assert hit.authors[0].name == "Ashish Vaswani"
         assert hit.openalex_id == "W2741809807"
+        assert hit.work_type == "article"
+
+    def test_missing_type_yields_none_work_type(self):
+        work = _work()
+        del work["type"]
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": [work]}))
+        )
+        hit = _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5)).hits[0]
+        assert hit.work_type is None
 
     def test_reconstructs_abstract_from_inverted_index(self):
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": [_work()]}))
         )
-        result = _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5))
+        result = _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5))
         assert result.hits[0].abstract == "We propose a new"
 
     def test_missing_abstract_inverted_index_yields_none(self):
@@ -96,14 +117,14 @@ class TestSearchSemantic:
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": [work]}))
         )
-        result = _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5))
+        result = _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5))
         assert result.hits[0].abstract is None
 
     def test_attaches_resolved_fetch_route(self):
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": [_work()]}))
         )
-        hit = _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5)).hits[0]
+        hit = _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5)).hits[0]
         assert hit.fetch_route.kind == "known_provider"
         assert hit.fetch_route.provider == "arxiv"
 
@@ -120,7 +141,9 @@ class TestSearchSemanticPagingAndFilters:
             return httpx.Response(200, json={"results": []})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5, open_access_only=True))
+        _run(
+            OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5, open_access_only=True)
+        )
         assert "filter=is_oa:true" in seen_urls[0]
         assert "%3A" not in seen_urls[0]
 
@@ -132,7 +155,7 @@ class TestSearchSemanticPagingAndFilters:
             return httpx.Response(200, json={"results": []})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5))
+        _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5))
         assert seen_params[0]["page"] == "1"
 
     def test_passes_through_requested_page(self):
@@ -143,7 +166,7 @@ class TestSearchSemanticPagingAndFilters:
             return httpx.Response(200, json={"results": []})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5, page=3))
+        _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5, page=3))
         assert seen_params[0]["page"] == "3"
 
     def test_rejects_page_below_1(self):
@@ -151,7 +174,7 @@ class TestSearchSemanticPagingAndFilters:
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
         )
         with pytest.raises(InvalidRequestError, match="page"):
-            _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5, page=0))
+            _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5, page=0))
 
     def test_builds_publication_year_and_is_oa_filter(self):
         seen_params = []
@@ -162,7 +185,7 @@ class TestSearchSemanticPagingAndFilters:
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         _run(
-            OpenAlexClient(client, api_key=None).search_semantic(
+            OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic(
                 "query", max_results=5, from_year=2020, to_year=2023, open_access_only=True
             )
         )
@@ -176,7 +199,7 @@ class TestSearchSemanticPagingAndFilters:
             return httpx.Response(200, json={"results": []})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5))
+        _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5))
         assert "filter" not in seen_params[0]
 
     def test_rejects_from_year_after_to_year(self):
@@ -185,7 +208,7 @@ class TestSearchSemanticPagingAndFilters:
         )
         with pytest.raises(InvalidRequestError, match="from_year"):
             _run(
-                OpenAlexClient(client, api_key=None).search_semantic(
+                OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic(
                     "query", max_results=5, from_year=2023, to_year=2020
                 )
             )
@@ -196,7 +219,7 @@ class TestSearchSemanticPagingAndFilters:
                 lambda request: httpx.Response(200, json={"results": [_work()], "meta": {"count": 50}})
             )
         )
-        result = _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5, page=2))
+        result = _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5, page=2))
         assert result.page == 2
         assert result.per_page == 5
         assert result.total == 50
@@ -208,14 +231,14 @@ class TestSearchSemanticPagingAndFilters:
                 lambda request: httpx.Response(200, json={"results": [], "meta": {"count": 10}})
             )
         )
-        result = _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=10, page=1))
+        result = _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=10, page=1))
         assert result.has_more is False
 
     def test_missing_meta_defaults_total_to_zero(self):
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
         )
-        result = _run(OpenAlexClient(client, api_key=None).search_semantic("query", max_results=5))
+        result = _run(OpenAlexClient(client, api_key=TEST_API_KEY).search_semantic("query", max_results=5))
         assert result.total == 0
         assert result.has_more is False
 
@@ -234,7 +257,7 @@ class TestListWorkTypes:
             ]
         }
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
-        result = _run(OpenAlexClient(client, api_key=None).list_work_types())
+        result = _run(OpenAlexClient(client, api_key=TEST_API_KEY).list_work_types())
         assert len(result.types) == 1
         assert result.types[0].code == "article"
         assert result.types[0].name == "article"
@@ -248,7 +271,7 @@ class TestListWorkTypes:
             ]
         }
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
-        result = _run(OpenAlexClient(client, api_key=None).list_work_types())
+        result = _run(OpenAlexClient(client, api_key=TEST_API_KEY).list_work_types())
         assert [work_type.code for work_type in result.types] == ["article", "preprint"]
 
     def test_requests_per_page_100(self):
@@ -259,9 +282,8 @@ class TestListWorkTypes:
             return httpx.Response(200, json={"results": []})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        _run(OpenAlexClient(client, api_key=None).list_work_types())
+        _run(OpenAlexClient(client, api_key=TEST_API_KEY).list_work_types())
         assert seen_params[0]["per-page"] == "100"
-        assert "api_key" not in seen_params[0]
 
     def test_includes_api_key_when_configured(self):
         seen_params = []
@@ -271,14 +293,22 @@ class TestListWorkTypes:
             return httpx.Response(200, json={"results": []})
 
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-        _run(OpenAlexClient(client, api_key="test-api-key-123").list_work_types())
-        assert seen_params[0]["api_key"] == "test-api-key-123"
+        _run(OpenAlexClient(client, api_key=TEST_API_KEY).list_work_types())
+        assert seen_params[0]["api_key"] == TEST_API_KEY
+
+    def test_raises_configuration_error_when_api_key_missing(self):
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
+        )
+        with pytest.raises(ConfigurationError, match="PRIORIS_MCP_OPENALEX_API_KEY"):
+            _run(OpenAlexClient(client, api_key=None).list_work_types())
 
 
 @pytest.mark.live_openalex
 @pytest.mark.skipif(
-    not os.environ.get("PRIORIS_MCP_RUN_LIVE_TESTS"),
-    reason="Hits the real OpenAlex API - opt in with PRIORIS_MCP_RUN_LIVE_TESTS=1",
+    not (os.environ.get("PRIORIS_MCP_RUN_LIVE_TESTS") and os.environ.get("PRIORIS_MCP_OPENALEX_API_KEY")),
+    reason="Hits the real OpenAlex API - opt in with PRIORIS_MCP_RUN_LIVE_TESTS=1 and a configured "
+    "PRIORIS_MCP_OPENALEX_API_KEY (OpenAlex has required a key on every request since 2026-02-13)",
 )
 class TestSearchSemanticAgainstRealOpenAlex:
     """One real call per run, not per commit: verifies OpenAlex still accepts our request shape.
@@ -292,9 +322,9 @@ class TestSearchSemanticAgainstRealOpenAlex:
     def test_search_semantic_returns_a_hit_for_a_well_known_query(self):
         async def _call() -> int:
             async with httpx.AsyncClient() as client:
-                result = await OpenAlexClient(client, api_key=None).search_semantic(
-                    "transformer attention mechanisms", max_results=1
-                )
+                result = await OpenAlexClient(
+                    client, api_key=os.environ["PRIORIS_MCP_OPENALEX_API_KEY"]
+                ).search_semantic("transformer attention mechanisms", max_results=1)
                 return len(result.hits)
 
         assert _run(_call()) >= 1
@@ -304,9 +334,9 @@ class TestSearchSemanticAgainstRealOpenAlex:
 
         async def _call() -> int:
             async with httpx.AsyncClient() as client:
-                result = await OpenAlexClient(client, api_key=None).search_semantic(
-                    "transformer attention mechanisms", max_results=1, open_access_only=True
-                )
+                result = await OpenAlexClient(
+                    client, api_key=os.environ["PRIORIS_MCP_OPENALEX_API_KEY"]
+                ).search_semantic("transformer attention mechanisms", max_results=1, open_access_only=True)
                 return len(result.hits)
 
         assert _run(_call()) >= 1
@@ -314,7 +344,9 @@ class TestSearchSemanticAgainstRealOpenAlex:
     def test_list_work_types_returns_the_full_openalex_vocabulary(self):
         async def _call() -> list[str]:
             async with httpx.AsyncClient() as client:
-                result = await OpenAlexClient(client, api_key=None).list_work_types()
+                result = await OpenAlexClient(
+                    client, api_key=os.environ["PRIORIS_MCP_OPENALEX_API_KEY"]
+                ).list_work_types()
                 return [work_type.code for work_type in result.types]
 
         codes = _run(_call())

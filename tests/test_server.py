@@ -1605,12 +1605,12 @@ class TestDeleteFetchedArtefactField:
 class TestResearchDiscovery:
     """End-to-end MCP tool tests for research_discovery."""
 
-    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch", handler):
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch", handler, *, api_key="test-key"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         mock_transport = httpx.MockTransport(handler)
         mcp_obj = PriorisMCP()
         mcp_obj._http_client = httpx.AsyncClient(transport=mock_transport)
-        mcp_obj._openalex_client = mcp_obj._openalex_client.__class__(mcp_obj._http_client, api_key=None)
+        mcp_obj._openalex_client = mcp_obj._openalex_client.__class__(mcp_obj._http_client, api_key=api_key)
         server = FastMCP()
         return mcp_obj, Client(transport=mcp_obj.register_features(server), timeout=60)
 
@@ -1683,6 +1683,20 @@ class TestResearchDiscovery:
             asyncio.run(scenario({"query": "x" * 2001}))
         with pytest.raises(ToolError):
             asyncio.run(scenario({"query": "valid", "max_results": 51}))
+
+    def test_research_discovery_fails_with_actionable_error_when_api_key_missing(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []}), api_key=None
+        )
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_discovery", arguments={"query": "graph neural networks"})
+
+        with pytest.raises(ToolError, match="PRIORIS_MCP_OPENALEX_API_KEY"):
+            asyncio.run(scenario())
 
     def test_research_discovery_passes_through_paging_and_filters(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -1812,6 +1826,20 @@ class TestResearchDiscovery:
                 return [str(resource.uri) for resource in resources]
 
         assert "research://openalex/work-types" in asyncio.run(scenario())
+
+    def test_openalex_work_types_resource_fails_with_actionable_error_when_api_key_missing(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []}), api_key=None
+        )
+
+        async def scenario():
+            async with client:
+                return await client.read_resource("research://openalex/work-types")
+
+        with pytest.raises(McpError):
+            asyncio.run(scenario())
 
     def test_openalex_work_types_resource_returns_sorted_types(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         work_types = {
