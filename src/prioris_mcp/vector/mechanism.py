@@ -22,9 +22,20 @@ class SearchMechanism(ABC):
 
     @abstractmethod
     async def search(
-        self, query: str, *, provider: str | None, identifier: str | None, format: str | None, limit: int
+        self,
+        query: str,
+        *,
+        provider: str | None,
+        identifier: str | None,
+        format: str | None,
+        offset: int = 0,
+        limit: int,
     ) -> list[dict]:
         """Run this mechanism's search, returning its own result-shape dicts."""
+
+    @abstractmethod
+    async def count(self, query: str, *, provider: str | None, identifier: str | None, format: str | None) -> int:
+        """Total matches for `query` and the given filters, ignoring paging."""
 
     @abstractmethod
     async def status(self, provider: str, identifier: str, format: str) -> IndexStatus:
@@ -40,10 +51,21 @@ class FtsMechanism(SearchMechanism):
         self._search_index = search_index
 
     async def search(
-        self, query: str, *, provider: str | None, identifier: str | None, format: str | None, limit: int
+        self,
+        query: str,
+        *,
+        provider: str | None,
+        identifier: str | None,
+        format: str | None,
+        offset: int = 0,
+        limit: int,
     ) -> list[dict]:
-        results = await self._search_index.search(query, provider=provider, identifier=identifier, format=format)
-        return results[:limit]
+        return await self._search_index.search(
+            query, provider=provider, identifier=identifier, format=format, offset=offset, limit=limit
+        )
+
+    async def count(self, query: str, *, provider: str | None, identifier: str | None, format: str | None) -> int:
+        return await self._search_index.count(query, provider=provider, identifier=identifier, format=format)
 
     async def status(self, provider: str, identifier: str, format: str) -> IndexStatus:
         # FTS has no "model" to go stale against - existence-only, per
@@ -62,12 +84,22 @@ class VectorMechanism(SearchMechanism):
         self._embedding_backend = embedding_backend
 
     async def search(
-        self, query: str, *, provider: str | None, identifier: str | None, format: str | None, limit: int
+        self,
+        query: str,
+        *,
+        provider: str | None,
+        identifier: str | None,
+        format: str | None,
+        offset: int = 0,
+        limit: int,
     ) -> list[dict]:
         query_embedding = await self._embedding_backend.embed(query)
         return await self._vector_backend.search(
-            query_embedding, provider=provider, identifier=identifier, format=format, limit=limit
+            query_embedding, provider=provider, identifier=identifier, format=format, offset=offset, limit=limit
         )
+
+    async def count(self, query: str, *, provider: str | None, identifier: str | None, format: str | None) -> int:
+        return await self._vector_backend.count(provider=provider, identifier=identifier, format=format)
 
     async def status(self, provider: str, identifier: str, format: str) -> IndexStatus:
         return await self._vector_backend.status(provider, identifier, format)
@@ -100,6 +132,11 @@ class NotesVectorMechanism:
         self._note_vector_backend = note_vector_backend
         self._embedding_backend = embedding_backend
 
-    async def search(self, query: str, *, note_ids: list[str] | None = None, limit: int = 10) -> list[dict]:
+    async def search(
+        self, query: str, *, note_ids: list[str] | None = None, offset: int = 0, limit: int = 10
+    ) -> list[dict]:
         query_embedding = await self._embedding_backend.embed(query)
-        return await self._note_vector_backend.search(query_embedding, note_ids=note_ids, limit=limit)
+        return await self._note_vector_backend.search(query_embedding, note_ids=note_ids, offset=offset, limit=limit)
+
+    async def count(self, *, note_ids: list[str] | None = None) -> int:
+        return await self._note_vector_backend.count(note_ids=note_ids)

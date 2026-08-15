@@ -24,6 +24,43 @@ class TestFtsMechanism:
         mechanism = FtsMechanism(SqliteFts5SearchIndex(tmp_path / "search.sqlite3"))
         assert asyncio.run(mechanism.status("arxiv", "A", "pdf")) == "not_built"
 
+    def test_search_respects_offset(self, tmp_path):
+        index = SqliteFts5SearchIndex(tmp_path / "search.sqlite3")
+        mechanism = FtsMechanism(index)
+        asyncio.run(
+            index.index_entries(
+                "arxiv",
+                "A",
+                "pdf",
+                [
+                    {"key": "k1", "start": 0, "length": 1, "text": "cats cats cats"},
+                    {"key": "k2", "start": 1, "length": 1, "text": "cats cats"},
+                    {"key": "k3", "start": 2, "length": 1, "text": "cats"},
+                ],
+            )
+        )
+        full = asyncio.run(mechanism.search("cats", provider=None, identifier=None, format=None, limit=10))
+        assert len(full) == 3
+        paged = asyncio.run(mechanism.search("cats", provider=None, identifier=None, format=None, offset=1, limit=1))
+        assert paged == full[1:2]
+
+    def test_count_ignores_offset_and_limit(self, tmp_path):
+        index = SqliteFts5SearchIndex(tmp_path / "search.sqlite3")
+        mechanism = FtsMechanism(index)
+        asyncio.run(
+            index.index_entries(
+                "arxiv",
+                "A",
+                "pdf",
+                [
+                    {"key": "k1", "start": 0, "length": 1, "text": "cats"},
+                    {"key": "k2", "start": 1, "length": 1, "text": "cats"},
+                    {"key": "k3", "start": 2, "length": 1, "text": "cats"},
+                ],
+            )
+        )
+        assert asyncio.run(mechanism.count("cats", provider=None, identifier=None, format=None)) == 3
+
 
 class TestVectorMechanism:
     """Test VectorMechanism's name and search adaptation over DocumentVectorSearchBackend."""
@@ -53,6 +90,46 @@ class TestVectorMechanism:
             backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 5, "text": "cats"}])
         )
         assert asyncio.run(mechanism.status("arxiv", "A", "pdf")) == "ready"
+
+    def test_search_respects_offset(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
+        mechanism = VectorMechanism(backend, embedding)
+        asyncio.run(
+            backend.index_entries(
+                "arxiv",
+                "A",
+                "pdf",
+                [
+                    {"chunk_id": "c1", "start": 0, "length": 5, "text": "cats"},
+                    {"chunk_id": "c2", "start": 5, "length": 5, "text": "cats"},
+                    {"chunk_id": "c3", "start": 10, "length": 5, "text": "cats"},
+                ],
+            )
+        )
+        full = asyncio.run(mechanism.search("cats", provider="arxiv", identifier=None, format=None, limit=10))
+        assert len(full) == 3
+        paged = asyncio.run(mechanism.search("cats", provider="arxiv", identifier=None, format=None, offset=1, limit=1))
+        assert paged == full[1:2]
+
+    def test_count_ignores_offset_and_limit(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
+        mechanism = VectorMechanism(backend, embedding)
+        asyncio.run(
+            backend.index_entries(
+                "arxiv",
+                "A",
+                "pdf",
+                [
+                    {"chunk_id": "c1", "start": 0, "length": 5, "text": "cats"},
+                    {"chunk_id": "c2", "start": 5, "length": 5, "text": "cats"},
+                    {"chunk_id": "c3", "start": 10, "length": 5, "text": "cats"},
+                ],
+            )
+        )
+        count = asyncio.run(mechanism.count("cats", provider="arxiv", identifier=None, format=None))
+        assert count == 3
 
 
 class TestNotesFtsMechanism:
@@ -95,3 +172,32 @@ class TestNotesVectorMechanism:
         asyncio.run(backend.index_note("note-2", "cats"))
         results = asyncio.run(mechanism.search("cats", note_ids=["note-1"], limit=10))
         assert [r["note_id"] for r in results] == ["note-1"]
+
+    def test_search_respects_offset(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecNoteBackend(tmp_path / "notes-vectors.sqlite3", embedding)
+        mechanism = NotesVectorMechanism(backend, embedding)
+        asyncio.run(backend.index_note("note-1", "cats"))
+        asyncio.run(backend.index_note("note-2", "cats"))
+        asyncio.run(backend.index_note("note-3", "cats"))
+        full = asyncio.run(mechanism.search("cats", limit=10))
+        assert len(full) == 3
+        paged = asyncio.run(mechanism.search("cats", offset=1, limit=1))
+        assert paged == full[1:2]
+
+    def test_count_ignores_offset_and_limit(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecNoteBackend(tmp_path / "notes-vectors.sqlite3", embedding)
+        mechanism = NotesVectorMechanism(backend, embedding)
+        asyncio.run(backend.index_note("note-1", "cats"))
+        asyncio.run(backend.index_note("note-2", "cats"))
+        asyncio.run(backend.index_note("note-3", "cats"))
+        assert asyncio.run(mechanism.count()) == 3
+
+    def test_count_respects_note_ids_scoping(self, tmp_path):
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecNoteBackend(tmp_path / "notes-vectors.sqlite3", embedding)
+        mechanism = NotesVectorMechanism(backend, embedding)
+        asyncio.run(backend.index_note("note-1", "cats"))
+        asyncio.run(backend.index_note("note-2", "cats"))
+        assert asyncio.run(mechanism.count(note_ids=["note-1"])) == 1
