@@ -3,6 +3,8 @@
 See docs/requirement-specification/02-discovery.md.
 """
 
+from urllib.parse import quote
+
 import httpx
 
 from prioris_mcp.discovery.fetch_ladder import resolve_fetch_route
@@ -15,6 +17,28 @@ OPENALEX_SEARCH_SEMANTIC_MAX_CHARS = 2000
 # OpenAlex's search.semantic caps total matches at 50 per query, not the ordinary /works
 # per-page cap of 200 - see https://help.openalex.org/api/semantic-search/.
 OPENALEX_MAX_RESULTS = 50
+# OpenAlex's own servers have been observed to hang (repeated HTTP 504) when the `filter`
+# parameter's `:` separator is percent-encoded (%3A) rather than sent literally - both are RFC
+# 3986-legal in a query string, but only the unescaped form works reliably in practice. `,` and
+# `=` are left unescaped for the same reason (they combine/assign filter clauses); `>`/`<` still
+# get encoded by `quote`, which OpenAlex does accept.
+_FILTER_SAFE_CHARS = ":,="
+
+
+def _build_works_url(query: str, *, per_page: int, page: int, filter_value: str | None, mailto: str | None) -> str:
+    """Build the `/works` request URL by hand, keeping `filter`'s `:`/`,`/`=` unescaped.
+
+    httpx's `params=` dict support routes every value through the same encoding regardless of
+    key (breaking `filter`, see `_FILTER_SAFE_CHARS`), and passing `params=` alongside a `url`
+    that already carries a query string silently discards that existing query instead of merging
+    with it - so the full query string is assembled here rather than relying on either.
+    """
+    parts = [f"search.semantic={quote(query, safe='')}", f"per-page={per_page}", f"page={page}"]
+    if filter_value:
+        parts.append(f"filter={quote(filter_value, safe=_FILTER_SAFE_CHARS)}")
+    if mailto:
+        parts.append(f"mailto={quote(mailto, safe='')}")
+    return f"{OPENALEX_WORKS_URL}?{'&'.join(parts)}"
 
 
 def _reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str | None:
@@ -96,12 +120,14 @@ class OpenAlexClient:
         if open_access_only:
             filters.append("is_oa:true")
 
-        params = {"search.semantic": query, "per-page": str(max_results), "page": str(page)}
-        if filters:
-            params["filter"] = ",".join(filters)
-        if self._mailto:
-            params["mailto"] = self._mailto
-        response = await provider_http.request(self._http_client, "GET", OPENALEX_WORKS_URL, params=params)
+        url = _build_works_url(
+            query,
+            per_page=max_results,
+            page=page,
+            filter_value=",".join(filters) if filters else None,
+            mailto=self._mailto,
+        )
+        response = await provider_http.request(self._http_client, "GET", url)
         payload = response.json()
         meta = payload.get("meta") or {}
         total = meta.get("count", 0)

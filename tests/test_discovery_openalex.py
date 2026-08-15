@@ -111,6 +111,19 @@ class TestSearchSemantic:
 class TestSearchSemanticPagingAndFilters:
     """Paging (page=) and the two filters confirmed to actually work with search.semantic."""
 
+    def test_filter_colon_is_sent_literally_not_percent_encoded(self):
+        """OpenAlex's servers were observed to 504 when filter's `:` is sent as %3A - see openalex.py."""
+        seen_urls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_urls.append(str(request.url))
+            return httpx.Response(200, json={"results": []})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        _run(OpenAlexClient(client, mailto=None).search_semantic("query", max_results=5, open_access_only=True))
+        assert "filter=is_oa:true" in seen_urls[0]
+        assert "%3A" not in seen_urls[0]
+
     def test_defaults_page_to_1(self):
         seen_params = []
 
@@ -226,6 +239,18 @@ class TestSearchSemanticAgainstRealOpenAlex:
             async with httpx.AsyncClient() as client:
                 result = await OpenAlexClient(client, mailto=None).search_semantic(
                     "transformer attention mechanisms", max_results=1
+                )
+                return len(result.hits)
+
+        assert _run(_call()) >= 1
+
+    def test_search_semantic_with_filter_does_not_504(self):
+        """The exact shape that previously hung against the real API: filter= alongside search.semantic."""
+
+        async def _call() -> int:
+            async with httpx.AsyncClient() as client:
+                result = await OpenAlexClient(client, mailto=None).search_semantic(
+                    "transformer attention mechanisms", max_results=1, open_access_only=True
                 )
                 return len(result.hits)
 
