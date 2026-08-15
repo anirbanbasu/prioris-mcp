@@ -96,8 +96,8 @@ class TestDiscoveryEnvVars:
         reloaded = importlib.reload(prioris_mcp)
         assert reloaded.EnvVars.PRIORIS_MCP_DISCOVERY_MAX_RESULTS == 25
 
-    def test_discovery_max_results_rejects_above_200(self, monkeypatch: "pytest.MonkeyPatch"):
-        monkeypatch.setenv("PRIORIS_MCP_DISCOVERY_MAX_RESULTS", "500")
+    def test_discovery_max_results_rejects_above_50(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_DISCOVERY_MAX_RESULTS", "51")
         with pytest.raises(EnvValidationError):
             importlib.reload(prioris_mcp)
 

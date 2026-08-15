@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import httpx
 import pytest
@@ -30,7 +31,7 @@ def _run(coro):
 class TestSearchSemantic:
     """OpenAlex semantic-search request and mapping behaviour."""
 
-    def test_builds_request_with_filter_and_per_page(self):
+    def test_builds_request_with_search_semantic_and_per_page(self):
         seen_params = []
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -42,8 +43,9 @@ class TestSearchSemantic:
             OpenAlexClient(client, mailto=None).search_semantic("transformer attention mechanisms", max_results=10)
         )
         assert len(result.hits) == 1
-        assert seen_params[0]["filter"] == "search.semantic:transformer attention mechanisms"
+        assert seen_params[0]["search.semantic"] == "transformer attention mechanisms"
         assert seen_params[0]["per-page"] == "10"
+        assert "filter" not in seen_params[0]
         assert "mailto" not in seen_params[0]
 
     def test_includes_mailto_when_configured(self):
@@ -64,7 +66,7 @@ class TestSearchSemantic:
         with pytest.raises(InvalidRequestError, match="2000"):
             _run(OpenAlexClient(client, mailto=None).search_semantic("x" * 2001, max_results=5))
 
-    @pytest.mark.parametrize("max_results", [0, 201])
+    @pytest.mark.parametrize("max_results", [0, 51])
     def test_rejects_max_results_outside_openalex_limit(self, max_results: int):
         client = httpx.AsyncClient(
             transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
@@ -104,3 +106,28 @@ class TestSearchSemantic:
         hit = _run(OpenAlexClient(client, mailto=None).search_semantic("query", max_results=5)).hits[0]
         assert hit.fetch_route.kind == "known_provider"
         assert hit.fetch_route.provider == "arxiv"
+
+
+@pytest.mark.live_openalex
+@pytest.mark.skipif(
+    not os.environ.get("PRIORIS_MCP_RUN_LIVE_TESTS"),
+    reason="Hits the real OpenAlex API - opt in with PRIORIS_MCP_RUN_LIVE_TESTS=1",
+)
+class TestSearchSemanticAgainstRealOpenAlex:
+    """One real call per run, not per commit: verifies OpenAlex still accepts our request shape.
+
+    Every other test in this file mocks the transport, so a URL/param shape the real API
+    rejects can never fail them - only a live call can. Kept to a single request (well under
+    OpenAlex's 1 req/sec limit) and off by default so normal test runs and CI never touch the
+    network or risk tripping rate limiting.
+    """
+
+    def test_search_semantic_returns_a_hit_for_a_well_known_query(self):
+        async def _call() -> int:
+            async with httpx.AsyncClient() as client:
+                result = await OpenAlexClient(client, mailto=None).search_semantic(
+                    "transformer attention mechanisms", max_results=1
+                )
+                return len(result.hits)
+
+        assert _run(_call()) >= 1

@@ -184,9 +184,10 @@ class EnvVars:
 
     PRIORIS_MCP_DISCOVERY_MAX_RESULTS: int = env.int(
         "PRIORIS_MCP_DISCOVERY_MAX_RESULTS",
-        # OpenAlex caps /works `per-page` at 200.
+        # OpenAlex's search.semantic caps /works results at 50 per query, not the ordinary
+        # /works per-page cap of 200 - see https://help.openalex.org/api/semantic-search/.
         default=25,
-        validate=Range(min=1, max=200),
+        validate=Range(min=1, max=50),
     )
 
     PRIORIS_MCP_PDF_OCR_ENABLED: bool = env.bool(

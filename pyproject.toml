@@ -107,6 +107,11 @@ convention = "google"
 docstring-code-format = false
 # quote-style = "single"
 
+[tool.pytest.ini_options]
+markers = [
+    "live_openalex: hits the real OpenAlex API; skipped unless PRIORIS_MCP_RUN_LIVE_TESTS=1 is set",
+]
+
 [tool.coverage.run]
 omit = [
     "tests/*", # Excludes all files and subdirectories within a 'tests' directory at the project root
