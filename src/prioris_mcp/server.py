@@ -1,7 +1,9 @@
+import asyncio
 import logging
 import re
 import sqlite3
 import sys
+import uuid
 from importlib.metadata import version
 from typing import Annotated, ClassVar, Literal, cast
 
@@ -79,6 +81,7 @@ from prioris_mcp.vector.mechanism import (
     SearchMechanism,
     VectorMechanism,
 )
+from prioris_mcp.vector.rebuild_progress import VectorRebuildProgress
 from prioris_mcp.vector.scheduler import EmbeddingScheduler
 from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
@@ -264,6 +267,8 @@ class PriorisMCP(MCPMixin):
             "fts": NotesFtsMechanism(self._notes_search_index),
             "vector": NotesVectorMechanism(self._note_vector_backend, self._embedding_backend),
         }
+        self._rebuild_progress = VectorRebuildProgress()
+        self._reconciliation_task: asyncio.Task | None = None
 
     async def research_arxiv_search(
         self,
@@ -914,6 +919,93 @@ class PriorisMCP(MCPMixin):
         if self._embedding_scheduler.is_building(("note", note_id)):
             return "building"
         return await self._note_vector_backend.status(note_id)
+
+    async def _force_vector_reconnect(self) -> None:
+        """Force both vector backends' `_connect()` to run now, so any model-mismatch drop happens here.
+
+        `count()` with no filters is the cheapest existing call that reaches `_connect()`. Must run
+        before anything else touches either vector backend for this process, so a model-name change
+        is always deliberately reconciled rather than dropped as a side effect of an ordinary
+        client request - see
+        docs/superpowers/specs/2026-08-15-vector-index-reconciliation-design.md.
+        """
+        await self._document_vector_backend.count()
+        await self._note_vector_backend.count()
+
+    async def reconcile_vector_index(self) -> None:
+        """Background corpus-wide re-embed of every document/note not yet ready under the configured model.
+
+        Fired as a background task from `_vector_reconciliation_lifespan`'s startup phase, after
+        `_force_vector_reconnect` has already made any destructive model-mismatch drop deliberate.
+        Reuses the same per-item `EmbeddingScheduler` trigger every other indexing path already
+        uses, so a bulk-scheduled item is visible as "building" the same way a freshly-fetched
+        document already is - see
+        docs/superpowers/specs/2026-08-15-vector-index-reconciliation-design.md.
+        """
+        await self._reconcile_documents()
+        await self._reconcile_notes()
+
+    async def _reconcile_documents(self) -> None:
+        model_name = self._embedding_backend.model_name
+        already_ready = await self._document_vector_backend.indexed_under(model_name)
+        to_rebuild: list[dict] = []
+        offset = 0
+        limit = 200
+        while True:
+            entries, total = await self._storage.list_markdown_entries(offset=offset, limit=limit)
+            to_rebuild.extend(
+                entry
+                for entry in entries
+                if (entry["provider"], entry["identifier"], entry["format"]) not in already_ready
+            )
+            offset += len(entries)
+            if not entries or offset >= total:
+                break
+        self._rebuild_progress.set_documents_total(len(to_rebuild))
+        for entry in to_rebuild:
+            self._schedule_document_reembed(entry)
+
+    def _schedule_document_reembed(self, entry: dict) -> None:
+        provider = entry["provider"]
+        canonical_identifier = entry["canonical_identifier"]
+        identifier = entry["identifier"]
+        format_ = entry["format"]
+
+        async def _reembed_and_mark_done() -> None:
+            markdown_bytes = await self._storage.read(provider, canonical_identifier, format_, artefact="markdown")
+            markdown = markdown_bytes.decode("utf-8")
+            manifest = self._storage.manifest_for(provider, canonical_identifier)
+            search_rows = await manifest.rows_for_search(format_)
+            reindex_entries = [
+                {
+                    "chunk_id": str(uuid.uuid4()),
+                    "start": row["start"],
+                    "length": row["length"],
+                    "text": markdown[row["start"] : row["start"] + row["length"]],
+                }
+                for row in search_rows
+            ]
+            await self._document_vector_backend.index_entries(provider, identifier, format_, reindex_entries)
+            self._rebuild_progress.document_done()
+
+        self._embedding_scheduler.schedule((provider, identifier, format_), _reembed_and_mark_done)
+
+    async def _reconcile_notes(self) -> None:
+        model_name = self._embedding_backend.model_name
+        already_ready = await self._note_vector_backend.indexed_under(model_name)
+        all_note_ids = await self._notes_backend.matching_ids()
+        to_rebuild = [note_id for note_id in all_note_ids if note_id not in already_ready]
+        self._rebuild_progress.set_notes_total(len(to_rebuild))
+        for note_id in to_rebuild:
+            self._schedule_note_reembed(note_id)
+
+    def _schedule_note_reembed(self, note_id: str) -> None:
+        async def _reembed_and_mark_done() -> None:
+            note = await self._notes_backend.read(note_id)
+            await self._note_vector_backend.index_note(note_id, note.text)
+            self._rebuild_progress.note_done()
+
+        self._embedding_scheduler.schedule(("note", note_id), _reembed_and_mark_done)
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []

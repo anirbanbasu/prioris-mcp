@@ -17,9 +17,32 @@ from prioris_mcp.models.common import ArxivResolvedIdentifierResult, MarkdownPag
 from prioris_mcp.models.discovery import OpenAlexWorkType, OpenAlexWorkTypesResult
 from prioris_mcp.server import PriorisMCP
 from prioris_mcp.vector.embedding import EmbeddingBackend
-from prioris_mcp.vector.sqlite_vec_backend import SqliteVecNoteBackend
+from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
 logger = logging.getLogger(__name__)
+
+
+class _RenamedStub(EmbeddingBackend):
+    """A same-dimension, differently-named EmbeddingBackend wrapping a real one - for simulating a model rename."""
+
+    def __init__(self, real: EmbeddingBackend, model_name: str) -> None:
+        self._real = real
+        self._model_name = model_name
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def dimension(self) -> int:
+        return self._real.dimension
+
+    @property
+    def max_chunk_chars(self) -> int:
+        return self._real.max_chunk_chars
+
+    async def embed(self, text: str) -> list[float]:
+        return await self._real.embed(text)
 
 
 class TestMCPServer:
@@ -3126,3 +3149,145 @@ class TestVectorSearchWiring:
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
         mcp_obj = PriorisMCP()
         assert mcp_obj._document_vector_backend._path.parent == tmp_path / "vectors"
+
+
+class TestVectorReconciliation:
+    """Tests for PriorisMCP's corpus-wide vector-index reconciliation (Task 7)."""
+
+    def test_force_vector_reconnect_does_not_raise_on_a_fresh_corpus(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        asyncio.run(mcp_obj._force_vector_reconnect())  # must not raise
+
+    def test_reconcile_schedules_a_not_built_document(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """A document written+chunked but never embedded.
+
+        Mirrors persist_parsed_markdown's own entries shape, built directly against
+        storage/manifest rather than through a provider - matching how
+        test_vector_sqlite_vec_document_backend.py builds fixtures directly against backends.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            assert await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf") == "not_built"
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+
+            return await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf")
+
+        status = asyncio.run(scenario())
+        assert status == "ready"
+
+    def test_reconcile_skips_a_document_already_ready_under_the_current_model(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            await mcp_obj._document_vector_backend.index_entries(
+                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "Body text."}]
+            )
+            await mcp_obj.reconcile_vector_index()
+            return mcp_obj._rebuild_progress.documents.total
+
+        total = asyncio.run(scenario())
+        assert total == 0  # already ready - nothing scheduled
+
+    def test_reconcile_reindexes_a_document_stale_under_a_renamed_model(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            # Index under a stand-in "old" model name directly against the same file, then point
+            # the real mcp_obj (a differently-named model) at it - mirrors the existing
+            # test_status_stale_when_recorded_model_differs_from_configured pattern.
+            old_backend = SqliteVecDocumentBackend(
+                tmp_path / "vectors" / "vectors.sqlite3", _RenamedStub(mcp_obj._embedding_backend, "old-model")
+            )
+            await old_backend.index_entries(
+                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "old text"}]
+            )
+            assert await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf") == "stale"
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+            return await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf")
+
+        status = asyncio.run(scenario())
+        assert status == "ready"
+
+    def test_reconcile_schedules_a_not_built_note(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            note = await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note about attention")
+            # Cancel the create-triggered live embed so this note starts genuinely not_built -
+            # isolates reconciliation's own scheduling from the create-time trigger already
+            # covered by existing tests.
+            await mcp_obj._embedding_scheduler.cancel(("note", note.id))
+            assert await mcp_obj._note_vector_backend.status(note.id) == "not_built"
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+            return await mcp_obj._note_vector_backend.status(note.id)
+
+        status = asyncio.run(scenario())
+        assert status == "ready"
+
+    def test_reconcile_updates_progress_counters(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            note = await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note")
+            await mcp_obj._embedding_scheduler.cancel(("note", note.id))
+
+            await mcp_obj.reconcile_vector_index()
+            before = (mcp_obj._rebuild_progress.documents.total, mcp_obj._rebuild_progress.notes.total)
+            before_remaining = (
+                mcp_obj._rebuild_progress.documents.remaining,
+                mcp_obj._rebuild_progress.notes.remaining,
+            )
+            await mcp_obj._embedding_scheduler.wait_all()
+            after_remaining = (mcp_obj._rebuild_progress.documents.remaining, mcp_obj._rebuild_progress.notes.remaining)
+            return before, before_remaining, after_remaining
+
+        before, before_remaining, after_remaining = asyncio.run(scenario())
+        assert before == (1, 1)
+        assert before_remaining == (1, 1)
+        assert after_remaining == (0, 0)
