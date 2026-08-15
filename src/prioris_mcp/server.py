@@ -455,10 +455,18 @@ class PriorisMCP(MCPMixin):
             Field(default=None, description="Restrict to one provider; omit to list all providers"),
         ] = None,
         format: Annotated[str | None, Field(default=None, description="Further restrict to one format")] = None,
+        offset: Annotated[int, Field(default=0)] = 0,
+        limit: Annotated[int, Field(default=50)] = 50,
     ) -> ListFetchedResult:
-        """Enumerate persisted (provider, identifier, format) manifest entries; never triggers a fetch."""
-        entries = await self._storage.list(provider, format)
-        return ListFetchedResult(entries=entries)
+        """Enumerate persisted (provider, identifier, format) manifest entries, newest first; never triggers a fetch."""
+        if offset < 0:
+            raise InvalidRequestError(f"offset must be >= 0, got {offset}")
+        if limit <= 0:
+            raise InvalidRequestError(f"limit must be > 0, got {limit}")
+        entries, total = await self._storage.list(provider, format, offset=offset, limit=limit)
+        return ListFetchedResult(
+            entries=entries, offset=offset, limit=limit, total=total, has_more=offset + len(entries) < total
+        )
 
     async def research_delete_fetched(
         self,

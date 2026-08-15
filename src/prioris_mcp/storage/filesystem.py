@@ -97,8 +97,10 @@ class FilesystemStorageBackend(StorageBackend):
         tmp_path.write_bytes(content)
         tmp_path.replace(path)
 
-    async def list(self, provider: str | None = None, format: str | None = None) -> list[dict]:
-        entries = await self._catalogue.list(provider, format)
+    async def list(
+        self, provider: str | None = None, format: str | None = None, *, offset: int = 0, limit: int = 50
+    ) -> tuple[list[dict], int]:
+        entries, total = await self._catalogue.list(provider, format, offset=offset, limit=limit)
         return [
             {
                 "provider": entry["provider"],
@@ -109,7 +111,7 @@ class FilesystemStorageBackend(StorageBackend):
                 "size_bytes": entry["size_bytes"],
             }
             for entry in entries
-        ]
+        ], total
 
     async def delete(self, provider: str, identifier: str, format: str, artefact: str) -> bool:
         entry = await self._catalogue.find_by_external_identifier(provider, identifier, format)

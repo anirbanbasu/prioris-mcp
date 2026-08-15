@@ -91,19 +91,25 @@ class Catalogue:
 
         return await to_thread.run_sync(_get)
 
-    async def list(self, provider: str | None = None, format: str | None = None) -> builtins.list[dict]:
-        def _list() -> list[dict]:
-            query = "SELECT * FROM entries WHERE 1=1"
+    async def list(
+        self, provider: str | None = None, format: str | None = None, *, offset: int = 0, limit: int = 50
+    ) -> tuple[builtins.list[dict], int]:
+        def _list() -> tuple[list[dict], int]:
+            where = "WHERE 1=1"
             params: list[str] = []
             if provider is not None:
-                query += " AND provider = ?"
+                where += " AND provider = ?"
                 params.append(provider)
             if format is not None:
-                query += " AND format = ?"
+                where += " AND format = ?"
                 params.append(format)
             with self._connect() as conn:
-                rows = conn.execute(query, params).fetchall()
-                return [self._row_to_entry(row) for row in rows]
+                total = conn.execute(f"SELECT COUNT(*) AS n FROM entries {where}", params).fetchone()["n"]
+                rows = conn.execute(
+                    f"SELECT * FROM entries {where} ORDER BY recorded_at DESC LIMIT ? OFFSET ?",
+                    (*params, limit, offset),
+                ).fetchall()
+                return [self._row_to_entry(row) for row in rows], total
 
         return await to_thread.run_sync(_list)
 

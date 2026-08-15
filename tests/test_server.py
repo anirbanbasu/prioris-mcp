@@ -1321,6 +1321,102 @@ class TestStorageManagementTools:
         result = asyncio.run(scenario())
         assert result.structured_content["entries"] == []
 
+    def test_list_fetched_paging_metadata_with_default_offset_and_limit(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+        payload = base64.b64encode(b"%PDF-1.4 fake content").decode("ascii")
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_localfile_fetch_full_text", arguments={"content_base64": payload})
+                return await client.call_tool("research_list_fetched", arguments={})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["offset"] == 0
+        assert result.structured_content["limit"] == 50
+        assert result.structured_content["total"] == 1
+        assert result.structured_content["has_more"] is False
+
+    def test_list_fetched_offset_equal_to_total_returns_empty_page_with_has_more_false(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+        payload = base64.b64encode(b"%PDF-1.4 fake content").decode("ascii")
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_localfile_fetch_full_text", arguments={"content_base64": payload})
+                return await client.call_tool("research_list_fetched", arguments={"offset": 1})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["entries"] == []
+        assert result.structured_content["total"] == 1
+        assert result.structured_content["has_more"] is False
+
+    def test_list_fetched_offset_beyond_total_returns_empty_page(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+        payload = base64.b64encode(b"%PDF-1.4 fake content").decode("ascii")
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_localfile_fetch_full_text", arguments={"content_base64": payload})
+                return await client.call_tool("research_list_fetched", arguments={"offset": 100})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["entries"] == []
+        assert result.structured_content["total"] == 1
+        assert result.structured_content["has_more"] is False
+
+    def test_list_fetched_limit_smaller_than_total_reports_has_more(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                for index in range(3):
+                    payload = base64.b64encode(f"%PDF-1.4 fake content {index}".encode()).decode("ascii")
+                    await client.call_tool("research_localfile_fetch_full_text", arguments={"content_base64": payload})
+                return await client.call_tool("research_list_fetched", arguments={"offset": 0, "limit": 2})
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["entries"]) == 2
+        assert result.structured_content["total"] == 3
+        assert result.structured_content["has_more"] is True
+
+    def test_list_fetched_negative_offset_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_list_fetched", arguments={"offset": -1})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_list_fetched_zero_limit_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_list_fetched", arguments={"limit": 0})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_list_fetched_negative_limit_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_list_fetched", arguments={"limit": -5})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
     def test_delete_fetched_removes_entry_and_reports_it(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         client = self._server_and_client(tmp_path, monkeypatch)
         payload = base64.b64encode(b"%PDF-1.4 fake content").decode("ascii")

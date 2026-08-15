@@ -57,17 +57,54 @@ class TestCatalogueList:
 
     def test_list_empty_catalogue(self, tmp_path):
         catalogue = Catalogue(tmp_path / "catalogue.sqlite")
-        result = asyncio.run(catalogue.list())
-        assert result == []
+        entries, total = asyncio.run(catalogue.list())
+        assert entries == []
+        assert total == 0
 
     def test_list_filters_by_provider_and_format(self, tmp_path):
         catalogue = Catalogue(tmp_path / "catalogue.sqlite")
         asyncio.run(catalogue.upsert(_entry(provider="arxiv", format="pdf")))
         asyncio.run(catalogue.upsert(_entry(provider="arxiv", format="html", artefact="markdown")))
         asyncio.run(catalogue.upsert(_entry(provider="europepmc", canonical_identifier="MED:1", format="xml")))
-        assert len(asyncio.run(catalogue.list())) == 3
-        assert len(asyncio.run(catalogue.list(provider="arxiv"))) == 2
-        assert len(asyncio.run(catalogue.list(provider="arxiv", format="pdf"))) == 1
+        entries, total = asyncio.run(catalogue.list())
+        assert len(entries) == 3
+        assert total == 3
+        arxiv_entries, arxiv_total = asyncio.run(catalogue.list(provider="arxiv"))
+        assert len(arxiv_entries) == 2
+        assert arxiv_total == 2
+        arxiv_pdf_entries, arxiv_pdf_total = asyncio.run(catalogue.list(provider="arxiv", format="pdf"))
+        assert len(arxiv_pdf_entries) == 1
+        assert arxiv_pdf_total == 1
+
+    def test_list_orders_newest_first_by_recorded_at(self, tmp_path):
+        catalogue = Catalogue(tmp_path / "catalogue.sqlite")
+        asyncio.run(catalogue.upsert(_entry(canonical_identifier="A", recorded_at="2026-08-01T00:00:00+00:00")))
+        asyncio.run(catalogue.upsert(_entry(canonical_identifier="B", recorded_at="2026-08-03T00:00:00+00:00")))
+        asyncio.run(catalogue.upsert(_entry(canonical_identifier="C", recorded_at="2026-08-02T00:00:00+00:00")))
+        entries, total = asyncio.run(catalogue.list())
+        assert total == 3
+        assert [e["canonical_identifier"] for e in entries] == ["B", "C", "A"]
+
+    def test_list_offset_and_limit_page_through_results(self, tmp_path):
+        catalogue = Catalogue(tmp_path / "catalogue.sqlite")
+        for index in range(5):
+            asyncio.run(
+                catalogue.upsert(
+                    _entry(
+                        canonical_identifier=f"doc-{index}",
+                        recorded_at=f"2026-08-0{index + 1}T00:00:00+00:00",
+                    )
+                )
+            )
+        first_page, total = asyncio.run(catalogue.list(offset=0, limit=2))
+        assert total == 5
+        assert [e["canonical_identifier"] for e in first_page] == ["doc-4", "doc-3"]
+        second_page, total2 = asyncio.run(catalogue.list(offset=2, limit=2))
+        assert total2 == 5
+        assert [e["canonical_identifier"] for e in second_page] == ["doc-2", "doc-1"]
+        past_end, total3 = asyncio.run(catalogue.list(offset=5, limit=2))
+        assert total3 == 5
+        assert past_end == []
 
 
 class TestCatalogueRemove:
@@ -102,8 +139,9 @@ class TestCatalogueRemove:
         asyncio.run(catalogue.upsert(_entry(artefact="markdown")))
         removed = asyncio.run(catalogue.remove_all_artefacts("arxiv", "2106.09685v2", "pdf"))
         assert sorted(removed) == ["document", "markdown"]
-        result = asyncio.run(catalogue.list(provider="arxiv"))
+        result, total = asyncio.run(catalogue.list(provider="arxiv"))
         assert result == []
+        assert total == 0
 
     def test_remove_all_artefacts_on_missing_document_returns_empty_list(self, tmp_path):
         catalogue = Catalogue(tmp_path / "catalogue.sqlite")

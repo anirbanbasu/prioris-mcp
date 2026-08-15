@@ -71,10 +71,14 @@ class StorageBackend(ABC):
         """
 
     @abstractmethod
-    async def list(self, provider: str | None = None, format: str | None = None) -> list[dict]:
+    async def list(
+        self, provider: str | None = None, format: str | None = None, *, offset: int = 0, limit: int = 50
+    ) -> tuple[list[dict], int]:
         """Enumerate persisted catalogue entries, optionally filtered by provider/format.
 
         Each entry: {"provider", "identifier", "format", "artefact", "fetched_at_or_parsed_at", "size_bytes"}.
+        Newest-first (by recorded_at). Returns (entries, total) — total is the unpaged count
+        matching the given filters.
         """
 
     @abstractmethod

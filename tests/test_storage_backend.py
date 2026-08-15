@@ -47,12 +47,15 @@ class _InMemoryStorageBackend(StorageBackend):
     async def read(self, provider: str, identifier: str, format: str, artefact: str = "document") -> bytes:
         return self._content[(provider, identifier, format, artefact)]
 
-    async def list(self, provider: str | None = None, format: str | None = None) -> list[dict]:
-        return [
+    async def list(
+        self, provider: str | None = None, format: str | None = None, *, offset: int = 0, limit: int = 50
+    ) -> tuple[list[dict], int]:
+        matches = [
             m
             for m in self._manifests.values()
             if (provider is None or m["provider"] == provider) and (format is None or m["format"] == format)
         ]
+        return matches[offset : offset + limit], len(matches)
 
     async def delete(self, provider: str, identifier: str, format: str, artefact: str) -> bool:
         key = (provider, identifier, format, artefact)
