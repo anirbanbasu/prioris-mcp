@@ -1,14 +1,17 @@
 import asyncio
 import base64
+import json
 import logging
 import ssl
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import McpError
+from mcp.types import TextResourceContents
 
 from prioris_mcp import EnvVars
 from prioris_mcp.errors import InvalidRequestError
@@ -3291,3 +3294,45 @@ class TestVectorReconciliation:
         assert before == (1, 1)
         assert before_remaining == (1, 1)
         assert after_remaining == (0, 0)
+
+    def test_rebuild_status_resource_reports_zero_on_a_fresh_corpus(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.read_resource("research://vector-index/rebuild-status")
+
+        result = asyncio.run(scenario())
+        payload = json.loads(cast(TextResourceContents, result[0]).text)
+        assert payload == {"documents": {"total": 0, "remaining": 0}, "notes": {"total": 0, "remaining": 0}}
+
+    def test_rebuild_status_resource_reflects_progress_mid_reconciliation(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            await mcp_obj.reconcile_vector_index()
+            async with client:
+                mid_result = await client.read_resource("research://vector-index/rebuild-status")
+                mid_payload = json.loads(cast(TextResourceContents, mid_result[0]).text)
+                await mcp_obj._embedding_scheduler.wait_all()
+                done_result = await client.read_resource("research://vector-index/rebuild-status")
+                done_payload = json.loads(cast(TextResourceContents, done_result[0]).text)
+            return mid_payload, done_payload
+
+        mid_payload, done_payload = asyncio.run(scenario())
+        assert mid_payload["documents"] == {"total": 1, "remaining": 1}
+        assert done_payload["documents"] == {"total": 1, "remaining": 0}

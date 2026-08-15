@@ -46,6 +46,8 @@ from prioris_mcp.models.common import (
     ResolvedIdentifierResult,
     SearchFetchedResult,
     SearchMatch,
+    VectorRebuildMechanismStatus,
+    VectorRebuildStatus,
 )
 from prioris_mcp.models.discovery import DiscoveryHit, DiscoveryResult
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
@@ -180,6 +182,7 @@ class PriorisMCP(MCPMixin):
         {"fn": "read_arxiv_categories_resource", "uri": "research://arxiv/categories"},
         {"fn": "read_openalex_work_types_resource", "uri": "research://openalex/work-types"},
         {"fn": "read_notes_export_resource", "uri": "notes://{note_id}/export"},
+        {"fn": "read_vector_rebuild_status_resource", "uri": "research://vector-index/rebuild-status"},
     ]
 
     def __init__(self) -> None:
@@ -1144,6 +1147,23 @@ class PriorisMCP(MCPMixin):
         file.
         """
         return (await self._notes_backend.export(note_id)).model_dump_json()
+
+    async def read_vector_rebuild_status_resource(self) -> str:
+        """Read corpus-wide vector-index rebuild progress for the reconciliation run started at server startup.
+
+        `total`/`remaining` count only items this run decided needed rebuilding - a corpus already
+        fully ready under the configured model reports `{"total": 0, "remaining": 0}`.
+        Process-local, in-memory, not persisted - see
+        docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
+        Returns the `VectorRebuildStatus` serialised to JSON - see `read_markdown_resource` for why.
+        """
+        progress = self._rebuild_progress
+        return VectorRebuildStatus(
+            documents=VectorRebuildMechanismStatus(
+                total=progress.documents.total, remaining=progress.documents.remaining
+            ),
+            notes=VectorRebuildMechanismStatus(total=progress.notes.total, remaining=progress.notes.remaining),
+        ).model_dump_json()
 
 
 def app() -> FastMCP:  # pragma: no cover
