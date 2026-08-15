@@ -58,6 +58,14 @@ class DocumentVectorSearchBackend(ABC):
     async def status(self, provider: str, identifier: str, format: str) -> IndexStatus:
         """Compare this document's recorded embedded_model against the currently configured one."""
 
+    @abstractmethod
+    async def indexed_under(self, model_name: str) -> set[tuple[str, str, str]]:
+        """Every (provider, identifier, format) currently recorded as embedded under `model_name`.
+
+        Used by corpus-wide reconciliation to diff the full persisted corpus against what's
+        already ready, without polling `status()` once per document.
+        """
+
 
 class NoteVectorSearchBackend(ABC):
     """Corpus-wide embedding index over every note's text."""

@@ -35,7 +35,17 @@ class EmbeddingBackend(ABC):
     @property
     @abstractmethod
     def model_name(self) -> str:
-        """The configured model name - recorded per vector row for index_status comparison."""
+        """The configured model name - recorded per vector row for index_status comparison.
+
+        MUST fully and uniquely identify the exact embedding function (weights/quantization/
+        revision), not just a family name - staleness detection (see sqlite_vec_backend.py's
+        `_connect()`) is a direct string comparison of this value, nothing else. `FastEmbedBackend`
+        satisfies this by construction: `_resolve_dimension` validates the given name against
+        fastembed's own registry, where differently-sized/quantized variants are distinct entries.
+        A future implementation against a self-hosted server (e.g. Ollama) has no such registry to
+        validate against, so it must construct a value that's unique on its own - e.g. Ollama's own
+        fully-qualified tag (`qwen3.6:35b-a3b-q4_K_M`), not a bare model family name.
+        """
 
     @property
     @abstractmethod

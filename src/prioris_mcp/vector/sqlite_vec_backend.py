@@ -68,12 +68,17 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
             "provider TEXT NOT NULL, identifier TEXT NOT NULL, format TEXT NOT NULL, "
             "embedded_model TEXT NOT NULL, PRIMARY KEY (provider, identifier, format))"
         )
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS document_vectors_meta "
-            "(id INTEGER PRIMARY KEY CHECK (id = 1), dimension INTEGER NOT NULL)"
-        )
-        meta_row = conn.execute("SELECT dimension FROM document_vectors_meta WHERE id = 1").fetchone()
-        if meta_row is not None and meta_row["dimension"] != self._embedding_backend.dimension:
+        conn.execute("CREATE TABLE IF NOT EXISTS document_vectors_meta (id INTEGER PRIMARY KEY CHECK (id = 1))")
+        existing_columns = {row["name"] for row in conn.execute("PRAGMA table_info(document_vectors_meta)")}
+        if "model_name" not in existing_columns:
+            # Guarded ADD COLUMN, not a fresh CREATE: an on-disk database from before this change
+            # only has a `dimension` column. A NULL model_name here will never equal the currently
+            # configured model_name below, so the very next connect after this upgrade always
+            # trips the mismatch branch and safely rebuilds - the correct conservative behaviour
+            # for a database whose recorded model identity is unknown under the new scheme.
+            conn.execute("ALTER TABLE document_vectors_meta ADD COLUMN model_name TEXT")
+        meta_row = conn.execute("SELECT model_name FROM document_vectors_meta WHERE id = 1").fetchone()
+        if meta_row is not None and meta_row["model_name"] != self._embedding_backend.model_name:
             conn.execute("DROP TABLE IF EXISTS document_vectors")
         conn.execute(
             f"""
@@ -90,9 +95,9 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
             """
         )
         conn.execute(
-            "INSERT INTO document_vectors_meta (id, dimension) VALUES (1, ?) "
-            "ON CONFLICT(id) DO UPDATE SET dimension = excluded.dimension",
-            (self._embedding_backend.dimension,),
+            "INSERT INTO document_vectors_meta (id, model_name) VALUES (1, ?) "
+            "ON CONFLICT(id) DO UPDATE SET model_name = excluded.model_name",
+            (self._embedding_backend.model_name,),
         )
         return conn
 
@@ -288,6 +293,19 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
             return "ready" if row["embedded_model"] == self._embedding_backend.model_name else "stale"
 
         return await to_thread.run_sync(_status)
+
+    async def indexed_under(self, model_name: str) -> set[tuple[str, str, str]]:
+        """Every (provider, identifier, format) currently recorded as embedded under `model_name`."""
+
+        def _query() -> set[tuple[str, str, str]]:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT provider, identifier, format FROM document_vectors_status WHERE embedded_model = ?",
+                    (model_name,),
+                ).fetchall()
+            return {(row["provider"], row["identifier"], row["format"]) for row in rows}
+
+        return await to_thread.run_sync(_query)
 
 
 class SqliteVecNoteBackend(NoteVectorSearchBackend):

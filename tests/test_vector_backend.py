@@ -22,6 +22,9 @@ class _StubDocumentBackend(DocumentVectorSearchBackend):
     async def status(self, provider, identifier, format):
         return "not_built"
 
+    async def indexed_under(self, model_name: str) -> set[tuple[str, str, str]]:
+        return set()
+
 
 class _StubNoteBackend(NoteVectorSearchBackend):
     async def index_note(self, note_id, text):

@@ -402,3 +402,55 @@ class TestStatus:
 
         query = asyncio.run(backend._embedding_backend.embed("x"))
         assert asyncio.run(backend.search(query, provider="arxiv", identifier="A")) == []
+
+    def test_status_stale_for_a_same_dimension_differently_named_model(self, tmp_path):
+        """The Low finding this task fixes: same dimension, different model name, must still be stale."""
+        db_path = tmp_path / "vectors.sqlite3"
+        backend_a = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-a", 4))
+        asyncio.run(
+            backend_a.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 3, "text": "old"}])
+        )
+
+        backend_b = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-b", 4))  # same dimension
+        assert asyncio.run(backend_b.status("arxiv", "A", "pdf")) == "stale"
+
+        # Must not raise despite backend_b's table already existing under model-a's rows - a
+        # same-dimension mismatch must still trigger the drop-and-recreate, not silently reuse
+        # model-a's stale vectors.
+        asyncio.run(
+            backend_b.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c2", "start": 0, "length": 3, "text": "new"}])
+        )
+        assert asyncio.run(backend_b.status("arxiv", "A", "pdf")) == "ready"
+        query = asyncio.run(backend_b._embedding_backend.embed("new"))
+        results = asyncio.run(backend_b.search(query, provider="arxiv", identifier="A"))
+        assert [r["chunk_id"] for r in results] == ["c2"]
+
+
+class TestIndexedUnder:
+    """Test indexed_under() - the corpus-diffing primitive reconciliation uses (Task 1)."""
+
+    def test_empty_index_returns_empty_set(self, tmp_path):
+        backend = _backend(tmp_path)
+        assert asyncio.run(backend.indexed_under(backend._embedding_backend.model_name)) == set()
+
+    def test_returns_every_document_indexed_under_that_model(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(
+            backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 3, "text": "cat"}])
+        )
+        asyncio.run(
+            backend.index_entries(
+                "europepmc", "MED:1", "xml", [{"chunk_id": "c1", "start": 0, "length": 3, "text": "dog"}]
+            )
+        )
+        result = asyncio.run(backend.indexed_under(backend._embedding_backend.model_name))
+        assert result == {("arxiv", "A", "pdf"), ("europepmc", "MED:1", "xml")}
+
+    def test_excludes_documents_indexed_under_a_different_model(self, tmp_path):
+        db_path = tmp_path / "vectors.sqlite3"
+        backend_a = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-a", 4))
+        asyncio.run(
+            backend_a.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 3, "text": "cat"}])
+        )
+        assert asyncio.run(backend_a.indexed_under("model-b")) == set()
+        assert asyncio.run(backend_a.indexed_under("model-a")) == {("arxiv", "A", "pdf")}
