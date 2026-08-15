@@ -415,7 +415,11 @@ class PriorisMCP(MCPMixin):
             provider: await self._fetched_discovery_identifiers(provider) for provider in routed_providers
         }
         return DiscoveryResult(
-            hits=[hit for hit in result.hits if not self._is_locally_fetched_discovery_hit(hit, fetched_identifiers)]
+            hits=[hit for hit in result.hits if not self._is_locally_fetched_discovery_hit(hit, fetched_identifiers)],
+            page=result.page,
+            per_page=result.per_page,
+            total=result.total,
+            has_more=result.has_more,
         )
 
     def _is_locally_fetched_discovery_hit(self, hit: DiscoveryHit, fetched_identifiers: dict[str, set[str]]) -> bool:
@@ -445,10 +449,27 @@ class PriorisMCP(MCPMixin):
                 default=None, ge=1, le=OPENALEX_MAX_RESULTS, description="Defaults to PRIORIS_MCP_DISCOVERY_MAX_RESULTS"
             ),
         ] = None,
+        page: Annotated[
+            int, Field(default=1, ge=1, description="1-indexed page of results, within search.semantic's 50-match cap")
+        ] = 1,
+        from_year: Annotated[
+            int | None, Field(default=None, description="Only works published in or after this year")
+        ] = None,
+        to_year: Annotated[
+            int | None, Field(default=None, description="Only works published in or before this year")
+        ] = None,
+        open_access_only: Annotated[
+            bool, Field(default=False, description="Restrict to works OpenAlex marks as open access")
+        ] = False,
     ) -> DiscoveryResult:
         """Discover external research candidates that are not already in the local corpus."""
         result = await self._openalex_client.search_semantic(
-            query, max_results=max_results if max_results is not None else EnvVars.PRIORIS_MCP_DISCOVERY_MAX_RESULTS
+            query,
+            max_results=max_results if max_results is not None else EnvVars.PRIORIS_MCP_DISCOVERY_MAX_RESULTS,
+            page=page,
+            from_year=from_year,
+            to_year=to_year,
+            open_access_only=open_access_only,
         )
         return await self._exclude_local_discovery_hits(result)
 

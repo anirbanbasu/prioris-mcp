@@ -59,4 +59,12 @@ class TestDiscoveryResult:
     """Validation tests for discovery result envelopes."""
 
     def test_empty_hits_is_valid(self):
-        assert DiscoveryResult(hits=[]).hits == []
+        result = DiscoveryResult(hits=[], page=1, per_page=25, total=0, has_more=False)
+        assert result.hits == []
+        assert result.has_more is False
+
+    def test_rejects_unknown_field(self):
+        with pytest.raises(ValidationError):
+            DiscoveryResult.model_validate(
+                {"hits": [], "page": 1, "per_page": 25, "total": 0, "has_more": False, "extra_field": "nope"}
+            )

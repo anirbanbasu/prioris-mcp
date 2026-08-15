@@ -55,8 +55,21 @@ class DiscoveryHit(BaseModel):
 
 
 class DiscoveryResult(BaseModel):
-    """Output of ``research_discovery``."""
+    """Output of ``research_discovery``.
+
+    `total`/`has_more` reflect OpenAlex's own counts for the underlying `search.semantic` query,
+    not the post-local-exclusion `hits` list - a page can come back with fewer than `per_page`
+    hits once already-fetched candidates are filtered out, even though more remain to page
+    through. `total` itself is capped at 50: that's `search.semantic`'s own hard ceiling on
+    matches per query, not a PriorisMCP-imposed limit.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     hits: Annotated[list[DiscoveryHit], Field(..., strict=True)]
+    page: Annotated[int, Field(..., strict=True, description="The 1-indexed page of results returned.")]
+    per_page: Annotated[int, Field(..., strict=True, description="The number of results requested per page.")]
+    total: Annotated[
+        int, Field(..., strict=True, description="OpenAlex's own total-match count, capped at 50 by search.semantic.")
+    ]
+    has_more: Annotated[bool, Field(..., strict=True, description="Whether a further page exists.")]

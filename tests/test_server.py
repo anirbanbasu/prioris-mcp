@@ -1681,7 +1681,39 @@ class TestResearchDiscovery:
         with pytest.raises(ToolError):
             asyncio.run(scenario({"query": "x" * 2001}))
         with pytest.raises(ToolError):
-            asyncio.run(scenario({"query": "valid", "max_results": 201}))
+            asyncio.run(scenario({"query": "valid", "max_results": 51}))
+
+    def test_research_discovery_passes_through_paging_and_filters(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        seen_params = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_params.append(request.url.params)
+            return httpx.Response(200, json={"results": [], "meta": {"count": 0}})
+
+        _, client = self._server_and_client(tmp_path, monkeypatch, handler)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_discovery",
+                    arguments={
+                        "query": "graph neural networks",
+                        "page": 2,
+                        "from_year": 2020,
+                        "to_year": 2023,
+                        "open_access_only": True,
+                    },
+                )
+
+        result = asyncio.run(scenario())
+        assert seen_params[0]["page"] == "2"
+        assert seen_params[0]["filter"] == "publication_year:>=2020,publication_year:<=2023,is_oa:true"
+        structured = result.structured_content
+        assert structured["page"] == 2
+        assert structured["total"] == 0
+        assert structured["has_more"] is False
 
     def test_research_discovery_excludes_fetched_known_provider_hits(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"

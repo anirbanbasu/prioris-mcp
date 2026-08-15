@@ -108,6 +108,105 @@ class TestSearchSemantic:
         assert hit.fetch_route.provider == "arxiv"
 
 
+class TestSearchSemanticPagingAndFilters:
+    """Paging (page=) and the two filters confirmed to actually work with search.semantic."""
+
+    def test_defaults_page_to_1(self):
+        seen_params = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_params.append(request.url.params)
+            return httpx.Response(200, json={"results": []})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        _run(OpenAlexClient(client, mailto=None).search_semantic("query", max_results=5))
+        assert seen_params[0]["page"] == "1"
+
+    def test_passes_through_requested_page(self):
+        seen_params = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_params.append(request.url.params)
+            return httpx.Response(200, json={"results": []})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        _run(OpenAlexClient(client, mailto=None).search_semantic("query", max_results=5, page=3))
+        assert seen_params[0]["page"] == "3"
+
+    def test_rejects_page_below_1(self):
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
+        )
+        with pytest.raises(InvalidRequestError, match="page"):
+            _run(OpenAlexClient(client, mailto=None).search_semantic("query", max_results=5, page=0))
+
+    def test_builds_publication_year_and_is_oa_filter(self):
+        seen_params = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_params.append(request.url.params)
+            return httpx.Response(200, json={"results": []})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        _run(
+            OpenAlexClient(client, mailto=None).search_semantic(
+                "query", max_results=5, from_year=2020, to_year=2023, open_access_only=True
+            )
+        )
+        assert seen_params[0]["filter"] == "publication_year:>=2020,publication_year:<=2023,is_oa:true"
+
+    def test_omits_filter_param_when_no_filters_requested(self):
+        seen_params = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_params.append(request.url.params)
+            return httpx.Response(200, json={"results": []})
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        _run(OpenAlexClient(client, mailto=None).search_semantic("query", max_results=5))
+        assert "filter" not in seen_params[0]
+
+    def test_rejects_from_year_after_to_year(self):
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
+        )
+        with pytest.raises(InvalidRequestError, match="from_year"):
+            _run(
+                OpenAlexClient(client, mailto=None).search_semantic(
+                    "query", max_results=5, from_year=2023, to_year=2020
+                )
+            )
+
+    def test_maps_pagination_metadata_from_response_meta(self):
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"results": [_work()], "meta": {"count": 50}})
+            )
+        )
+        result = _run(OpenAlexClient(client, mailto=None).search_semantic("query", max_results=5, page=2))
+        assert result.page == 2
+        assert result.per_page == 5
+        assert result.total == 50
+        assert result.has_more is True
+
+    def test_has_more_false_on_last_page(self):
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"results": [], "meta": {"count": 10}})
+            )
+        )
+        result = _run(OpenAlexClient(client, mailto=None).search_semantic("query", max_results=10, page=1))
+        assert result.has_more is False
+
+    def test_missing_meta_defaults_total_to_zero(self):
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={"results": []}))
+        )
+        result = _run(OpenAlexClient(client, mailto=None).search_semantic("query", max_results=5))
+        assert result.total == 0
+        assert result.has_more is False
+
+
 @pytest.mark.live_openalex
 @pytest.mark.skipif(
     not os.environ.get("PRIORIS_MCP_RUN_LIVE_TESTS"),
