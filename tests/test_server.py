@@ -3502,12 +3502,7 @@ class TestVectorReconciliation:
             )
         )
 
-        mcp_obj = PriorisMCP()
-        mcp_app = FastMCP(
-            name="test",
-            lifespan=_vector_reconciliation_lifespan(mcp_obj),
-        )
-        mcp_obj.register_features(mcp_app)
+        mcp_app = app()
 
         async def run_and_wait():
             async with Client(transport=mcp_app, timeout=60):
