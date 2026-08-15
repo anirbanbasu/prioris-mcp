@@ -8,7 +8,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from prioris_mcp.models.vector import NoteVectorSearchMatch
+from prioris_mcp.models.vector import PagedNoteVectorMatches
 
 
 class AnchorLocation(BaseModel):
@@ -138,5 +138,5 @@ class NotesSearchResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     fts: Annotated[PagedNotes | None, Field(default=None)] = None
-    vector: Annotated[list[NoteVectorSearchMatch] | None, Field(default=None)] = None
+    vector: Annotated[PagedNoteVectorMatches | None, Field(default=None)] = None
     index_status: Annotated[dict[str, str] | None, Field(default=None)] = None

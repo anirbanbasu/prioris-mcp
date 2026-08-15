@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from prioris_mcp.models.vector import VectorSearchMatch
+from prioris_mcp.models.vector import PagedVectorSearchMatches
 
 
 class FullTextFetchResult(BaseModel):
@@ -137,6 +137,10 @@ class ListFetchedResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     entries: Annotated[list[StorageEntry], Field(..., strict=True, description="The matching persisted entries.")]
+    offset: Annotated[int, Field(..., strict=True)]
+    limit: Annotated[int, Field(..., strict=True)]
+    total: Annotated[int, Field(..., strict=True)]
+    has_more: Annotated[bool, Field(..., strict=True)]
 
 
 class DeleteEntryRef(BaseModel):
@@ -174,6 +178,18 @@ class SearchMatch(BaseModel):
     score: Annotated[float, Field(..., strict=True)]
 
 
+class PagedSearchMatches(BaseModel):
+    """One page of FTS search results, with paging metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    matches: Annotated[list[SearchMatch], Field(..., strict=True)]
+    offset: Annotated[int, Field(..., strict=True)]
+    limit: Annotated[int, Field(..., strict=True)]
+    total: Annotated[int, Field(..., strict=True)]
+    has_more: Annotated[bool, Field(..., strict=True)]
+
+
 class SearchFetchedResult(BaseModel):
     """Output of `research_search_fetched`.
 
@@ -185,6 +201,6 @@ class SearchFetchedResult(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    fts: Annotated[list[SearchMatch] | None, Field(default=None)] = None
-    vector: Annotated[list[VectorSearchMatch] | None, Field(default=None)] = None
+    fts: Annotated[PagedSearchMatches | None, Field(default=None)] = None
+    vector: Annotated[PagedVectorSearchMatches | None, Field(default=None)] = None
     index_status: Annotated[dict[str, str], Field(default_factory=dict)]

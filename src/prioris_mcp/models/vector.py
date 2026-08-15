@@ -22,6 +22,18 @@ class VectorSearchMatch(BaseModel):
     score: Annotated[float, Field(..., strict=True)]
 
 
+class PagedVectorSearchMatches(BaseModel):
+    """One page of document-corpus vector search results, with paging metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    matches: Annotated[list[VectorSearchMatch], Field(..., strict=True)]
+    offset: Annotated[int, Field(..., strict=True)]
+    limit: Annotated[int, Field(..., strict=True)]
+    total: Annotated[int, Field(..., strict=True)]
+    has_more: Annotated[bool, Field(..., strict=True)]
+
+
 class NoteVectorSearchMatch(BaseModel):
     """One notes-corpus vector search result."""
 
@@ -30,3 +42,15 @@ class NoteVectorSearchMatch(BaseModel):
     note_id: Annotated[str, Field(..., strict=True)]
     score: Annotated[float, Field(..., strict=True)]
     text_preview: Annotated[str, Field(..., strict=True)]
+
+
+class PagedNoteVectorMatches(BaseModel):
+    """One page of notes-corpus vector search results, with paging metadata."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    matches: Annotated[list[NoteVectorSearchMatch], Field(..., strict=True)]
+    offset: Annotated[int, Field(..., strict=True)]
+    limit: Annotated[int, Field(..., strict=True)]
+    total: Annotated[int, Field(..., strict=True)]
+    has_more: Annotated[bool, Field(..., strict=True)]
