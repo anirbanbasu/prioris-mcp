@@ -269,3 +269,17 @@ class TestVectorSearchEnvVarsDefaults:
         monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         reloaded = importlib.reload(prioris_mcp)
         assert reloaded.EnvVars.PRIORIS_MCP_VECTOR_DIR.name == "vectors"
+
+
+class TestEmbeddingMaxConcurrencyDefault:
+    """EnvVars.PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY default and override."""
+
+    def test_defaults_to_4(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY == 4
+
+    def test_explicit_override_wins(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY", "8")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY == 8

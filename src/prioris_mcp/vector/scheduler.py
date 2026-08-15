@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 class EmbeddingScheduler:
     """Fire-and-forget async task tracking, keyed by an opaque tuple (e.g. (provider, id, format))."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_concurrent: int | None = None) -> None:
         self._tasks: dict[tuple, asyncio.Task] = {}
         self._pending: dict[tuple, Callable[[], Awaitable[None]]] = {}
+        self._semaphore = asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
 
     def is_building(self, key: tuple) -> bool:
         """Whether a live background embedding task currently exists for `key`."""
@@ -55,7 +56,11 @@ class EmbeddingScheduler:
 
     async def _run(self, key: tuple, coro_factory: Callable[[], Awaitable[None]]) -> None:
         try:
-            await coro_factory()
+            if self._semaphore is not None:
+                async with self._semaphore:
+                    await coro_factory()
+            else:
+                await coro_factory()
         except asyncio.CancelledError:
             raise
         except Exception:

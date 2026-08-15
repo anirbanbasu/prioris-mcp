@@ -244,3 +244,88 @@ class TestDirtyRerun:
         still_building_after = asyncio.run(scenario())
         assert still_building_after is False
         assert effects == ["first", "second"]
+
+
+class TestMaxConcurrent:
+    """Tests for EmbeddingScheduler(max_concurrent=...) bounding concurrent task execution."""
+
+    def test_is_building_true_for_a_queued_task_waiting_on_the_semaphore(self):
+        """A task queued behind the concurrency limit is still "building", not "not started"."""
+        scheduler = EmbeddingScheduler(max_concurrent=1)
+        first_started = asyncio.Event()
+        first_release = asyncio.Event()
+        second_started = asyncio.Event()
+
+        async def first_task():
+            first_started.set()
+            await first_release.wait()
+
+        async def second_task():
+            second_started.set()
+
+        async def scenario():
+            scheduler.schedule(("k1",), first_task)
+            await first_started.wait()
+            scheduler.schedule(("k2",), second_task)
+            # second_task must not have started yet - the semaphore (max_concurrent=1) is held by
+            # first_task - but is_building() must already report True for it regardless.
+            still_building_k2 = scheduler.is_building(("k2",))
+            second_not_started_yet = not second_started.is_set()
+            first_release.set()
+            await scheduler.wait_all()
+            return still_building_k2, second_not_started_yet
+
+        still_building_k2, second_not_started_yet = asyncio.run(scenario())
+        assert still_building_k2 is True
+        assert second_not_started_yet is True
+
+    def test_second_task_runs_only_after_first_completes(self):
+        scheduler = EmbeddingScheduler(max_concurrent=1)
+        order: list[str] = []
+        first_release = asyncio.Event()
+
+        async def first_task():
+            await first_release.wait()
+            order.append("first")
+
+        async def second_task():
+            order.append("second")
+
+        async def scenario():
+            scheduler.schedule(("k1",), first_task)
+            scheduler.schedule(("k2",), second_task)
+            await asyncio.sleep(0)  # let both schedule() calls' tasks start running/queue
+            first_release.set()
+            await scheduler.wait_all()
+
+        asyncio.run(scenario())
+        assert order == ["first", "second"]
+
+    def test_none_max_concurrent_is_unbounded_default_behaviour(self):
+        """max_concurrent=None (the default) must not change any existing behaviour."""
+        scheduler = EmbeddingScheduler()
+        assert asyncio.run(_run_and_check_unbounded(scheduler)) is True
+
+
+async def _run_and_check_unbounded(scheduler: EmbeddingScheduler) -> bool:
+    both_started = asyncio.Event()
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+
+    async def first_task():
+        first_started.set()
+        if second_started.is_set():
+            both_started.set()
+        await both_started.wait()
+
+    async def second_task():
+        second_started.set()
+        if first_started.is_set():
+            both_started.set()
+        await both_started.wait()
+
+    scheduler.schedule(("k1",), first_task)
+    scheduler.schedule(("k2",), second_task)
+    await asyncio.wait_for(both_started.wait(), timeout=5)
+    await scheduler.wait_all()
+    return True

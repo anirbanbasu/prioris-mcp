@@ -120,6 +120,17 @@ class EnvVars:
         default=_default_data_home / "prioris-mcp" / "vectors",
     )
 
+    PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY: int = env.int(
+        "PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY",
+        # Bounds concurrently-running background embedding tasks - both a live per-document
+        # trigger and a corpus-wide reconciliation run at startup (see
+        # docs/requirement-specification/search/02-vector-search.md) share this one bound via
+        # EmbeddingScheduler(max_concurrent=...), so a large corpus reconciliation can't storm the
+        # process with unbounded concurrent embedding tasks.
+        default=4,
+        validate=Range(min=1),
+    )
+
     PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS = env.float(
         "PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS",
         # Total time a single tool call's rate-limit backoff may spend retrying before giving up

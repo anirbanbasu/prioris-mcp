@@ -192,7 +192,7 @@ class PriorisMCP(MCPMixin):
             vector_dir / "vectors.sqlite3", self._embedding_backend
         )
         self._note_vector_backend = SqliteVecNoteBackend(vector_dir / "notes-vectors.sqlite3", self._embedding_backend)
-        self._embedding_scheduler = EmbeddingScheduler()
+        self._embedding_scheduler = EmbeddingScheduler(max_concurrent=EnvVars.PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY)
         self._search_mechanisms: dict[str, SearchMechanism] = {
             "fts": FtsMechanism(self._search_index),
             "vector": VectorMechanism(
