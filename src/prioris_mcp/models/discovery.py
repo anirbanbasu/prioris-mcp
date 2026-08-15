@@ -73,3 +73,21 @@ class DiscoveryResult(BaseModel):
         int, Field(..., strict=True, description="OpenAlex's own total-match count, capped at 50 by search.semantic.")
     ]
     has_more: Annotated[bool, Field(..., strict=True, description="Whether a further page exists.")]
+
+
+class OpenAlexWorkType(BaseModel):
+    """One OpenAlex work `type` value, from the `/work-types` endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: Annotated[str, Field(..., strict=True, description="OpenAlex's type slug, e.g. 'article'.")]
+    name: Annotated[str, Field(..., strict=True, description="The type's display name.")]
+    description: Annotated[str, Field(..., strict=True, description="A one-line definition of the type.")]
+
+
+class OpenAlexWorkTypesResult(BaseModel):
+    """Output of the `research://openalex/work-types` resource."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    types: Annotated[list[OpenAlexWorkType], Field(..., strict=True, description="Every OpenAlex work type.")]

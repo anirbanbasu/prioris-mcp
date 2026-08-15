@@ -9,10 +9,11 @@ import httpx
 
 from prioris_mcp.discovery.fetch_ladder import resolve_fetch_route
 from prioris_mcp.errors import InvalidRequestError
-from prioris_mcp.models.discovery import DiscoveryHit, DiscoveryResult
+from prioris_mcp.models.discovery import DiscoveryHit, DiscoveryResult, OpenAlexWorkType, OpenAlexWorkTypesResult
 from prioris_mcp.providers import http as provider_http
 
 OPENALEX_WORKS_URL = "https://api.openalex.org/works"
+OPENALEX_WORK_TYPES_URL = "https://api.openalex.org/work-types"
 OPENALEX_SEARCH_SEMANTIC_MAX_CHARS = 2000
 # OpenAlex's search.semantic caps total matches at 50 per query, not the ordinary /works
 # per-page cap of 200 - see https://help.openalex.org/api/semantic-search/.
@@ -25,7 +26,7 @@ OPENALEX_MAX_RESULTS = 50
 _FILTER_SAFE_CHARS = ":,="
 
 
-def _build_works_url(query: str, *, per_page: int, page: int, filter_value: str | None, mailto: str | None) -> str:
+def _build_works_url(query: str, *, per_page: int, page: int, filter_value: str | None, api_key: str | None) -> str:
     """Build the `/works` request URL by hand, keeping `filter`'s `:`/`,`/`=` unescaped.
 
     httpx's `params=` dict support routes every value through the same encoding regardless of
@@ -36,8 +37,8 @@ def _build_works_url(query: str, *, per_page: int, page: int, filter_value: str 
     parts = [f"search.semantic={quote(query, safe='')}", f"per-page={per_page}", f"page={page}"]
     if filter_value:
         parts.append(f"filter={quote(filter_value, safe=_FILTER_SAFE_CHARS)}")
-    if mailto:
-        parts.append(f"mailto={quote(mailto, safe='')}")
+    if api_key:
+        parts.append(f"api_key={quote(api_key, safe='')}")
     return f"{OPENALEX_WORKS_URL}?{'&'.join(parts)}"
 
 
@@ -73,11 +74,11 @@ def _work_to_hit(work: dict) -> DiscoveryHit:
 
 
 class OpenAlexClient:
-    """Thin wrapper around OpenAlex's ``/works`` ``search.semantic`` filter."""
+    """Thin wrapper around OpenAlex's ``/works`` ``search.semantic`` filter and ``/work-types``."""
 
-    def __init__(self, http_client: httpx.AsyncClient, mailto: str | None) -> None:
+    def __init__(self, http_client: httpx.AsyncClient, api_key: str | None) -> None:
         self._http_client = http_client
-        self._mailto = mailto
+        self._api_key = api_key
 
     async def search_semantic(
         self,
@@ -125,7 +126,7 @@ class OpenAlexClient:
             per_page=max_results,
             page=page,
             filter_value=",".join(filters) if filters else None,
-            mailto=self._mailto,
+            api_key=self._api_key,
         )
         response = await provider_http.request(self._http_client, "GET", url)
         payload = response.json()
@@ -138,3 +139,31 @@ class OpenAlexClient:
             total=total,
             has_more=page * max_results < total,
         )
+
+    async def list_work_types(self) -> OpenAlexWorkTypesResult:
+        """Return every OpenAlex work `type` value and its description, as reference data.
+
+        See https://help.openalex.org/data/work-types - a static-ish reference list (25 entries
+        as of writing), fetched live rather than hardcoded so a new type OpenAlex adds shows up
+        without a code change. `research_discovery` itself doesn't filter by `type` (found, via
+        live testing, to silently under-filter alongside `search.semantic` - see
+        `search_semantic`'s docstring); this is reference data for a caller inspecting a hit's own
+        metadata, not a discovery-tool filter parameter.
+        """
+        params = {"per-page": "100"}
+        if self._api_key:
+            params["api_key"] = self._api_key
+        response = await provider_http.request(self._http_client, "GET", OPENALEX_WORK_TYPES_URL, params=params)
+        payload = response.json()
+        types = sorted(
+            (
+                OpenAlexWorkType(
+                    code=work_type["id"].rsplit("/", maxsplit=1)[-1],
+                    name=work_type["display_name"],
+                    description=work_type["description"],
+                )
+                for work_type in payload.get("results", [])
+            ),
+            key=lambda work_type: work_type.code,
+        )
+        return OpenAlexWorkTypesResult(types=types)

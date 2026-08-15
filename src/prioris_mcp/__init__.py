@@ -176,9 +176,11 @@ class EnvVars:
         validate=Range(min=1),
     )
 
-    PRIORIS_MCP_OPENALEX_MAILTO: str | None = env.str(
-        "PRIORIS_MCP_OPENALEX_MAILTO",
-        # OpenAlex's polite pool uses a contact email to provide faster, more consistent responses.
+    PRIORIS_MCP_OPENALEX_API_KEY: str | None = env.str(
+        "PRIORIS_MCP_OPENALEX_API_KEY",
+        # OpenAlex deprecated the mailto polite-pool parameter (ignored as of Feb 2026) in favour
+        # of a free API key - see https://help.openalex.org/api/deprecations. Optional: omitting
+        # it still works, just without the higher rate limits an authenticated key grants.
         default=None,
     )
 

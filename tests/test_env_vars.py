@@ -81,15 +81,15 @@ class TestRateLimitBackoffBudgetDefault:
 class TestDiscoveryEnvVars:
     """OpenAlex discovery environment-variable defaults and validation."""
 
-    def test_openalex_mailto_defaults_to_none(self, monkeypatch: "pytest.MonkeyPatch"):
-        monkeypatch.delenv("PRIORIS_MCP_OPENALEX_MAILTO", raising=False)
+    def test_openalex_api_key_defaults_to_none(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_OPENALEX_API_KEY", raising=False)
         reloaded = importlib.reload(prioris_mcp)
-        assert reloaded.EnvVars.PRIORIS_MCP_OPENALEX_MAILTO is None
+        assert reloaded.EnvVars.PRIORIS_MCP_OPENALEX_API_KEY is None
 
-    def test_openalex_mailto_reads_from_env(self, monkeypatch: "pytest.MonkeyPatch"):
-        monkeypatch.setenv("PRIORIS_MCP_OPENALEX_MAILTO", "researcher@example.com")
+    def test_openalex_api_key_reads_from_env(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_OPENALEX_API_KEY", "test-api-key-123")
         reloaded = importlib.reload(prioris_mcp)
-        assert reloaded.EnvVars.PRIORIS_MCP_OPENALEX_MAILTO == "researcher@example.com"
+        assert reloaded.EnvVars.PRIORIS_MCP_OPENALEX_API_KEY == "test-api-key-123"
 
     def test_discovery_max_results_defaults_to_25(self, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.delenv("PRIORIS_MCP_DISCOVERY_MAX_RESULTS", raising=False)

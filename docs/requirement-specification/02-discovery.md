@@ -12,6 +12,10 @@ icon: lucide/globe
 
 The capability this chapter designs is narrowly OpenAlex's `search.semantic` parameter on `/works`: it embeds the title and abstract of every indexed work using GTE Large EN (1,024-dimensional), embeds the query the same way at search time, and ranks by cosine similarity — genuine embedding-based retrieval, not Elasticsearch relevance scoring dressed up as "semantic." See [ADR-00015: Discovery scope is OpenAlex `search.semantic`, not a general multi-aggregator expansion](ADR/00015-discovery-openalex-scope-not-multi-aggregator.md) for why this doesn't extend to Semantic Scholar, PubMed, or CORE, and for the API's practical limits.
 
+## Authentication: an API key, not `mailto`
+
+OpenAlex deprecated the `mailto` polite-pool query parameter (ignored as of February 2026) in favour of a free API key — see [OpenAlex → API deprecations](https://help.openalex.org/api/deprecations). `PRIORIS_MCP_OPENALEX_API_KEY` configures it (optional: every discovery request still works unauthenticated, just without the higher rate limits an authenticated key grants), sent as the `api_key` query parameter on every outbound request `OpenAlexClient` makes.
+
 ## Discovery-only, not a `ResearchPublicationProvider` peer
 
 A `search.semantic` hit is metadata (title, abstract, authors, OA-location pointer if one exists) — the endpoint itself returns ranked candidates, not full text. OpenAlex does now host first-party full text for a large share of its corpus (PDFs/TEI XML, filterable via `has_content.pdf`), a materially different, sanctioned mechanism from the `best_oa_location` external pointer the "Auto-fetch rejected" section below addresses. Whether that hosting is enough to make OpenAlex a full `ResearchPublicationProvider` is genuinely undesigned and deliberately out of scope here — tracked as its own future debate ([#33](https://github.com/anirbanbasu/prioris-mcp/issues/33)), not decided in this chapter.
@@ -23,6 +27,14 @@ Within this chapter's scope, OpenAlex stays discovery-only, sitting in front of 
 [Vector search](search/02-vector-search.md) settles `research_search_fetched` exposing `fts`/`vector`/`hybrid` via a single `mode` parameter — one tool, several retrieval mechanisms, all sharing one domain: local corpus content already fetched into storage, returning a consistent chunk/doc-shaped result.
 
 Discovery gets its own tool instead, `research_discovery`, mirroring `research_arxiv_search`/`research_europepmc_search` in naming — but unlike those two, it isn't provider-backed. Discovery is a capability layer sitting in front of providers, not a provider itself, so `research_discovery` has no `ResearchPublicationProvider` behind it unless/until [#33](https://github.com/anirbanbasu/prioris-mcp/issues/33) changes that. See [ADR-00016: `research_discovery` is a new tool, not a `mode` on `research_search_fetched`](ADR/00016-research-discovery-new-tool-not-mode.md) for why.
+
+## Paging, filters, and the work-type reference resource
+
+`research_discovery` mirrors OpenAlex's own `page`/`per-page` request shape for pagination rather than this codebase's usual offset/limit convention — `search.semantic` has a hard 50-match ceiling per query, which makes offset-based paging over an unbounded total misleading here. `total`/`has_more` in the response reflect OpenAlex's own pre-filter counts for the query, not the count after local-corpus exclusion (see [Fetch ladder](#fetch-ladder-for-results-that-land-outside-arxiveurope-pmc) below) — a page can come back with fewer hits than requested even though more remain to page through.
+
+Only two of OpenAlex's `/works` filters are exposed, as `from_year`/`to_year` (`publication_year`) and `open_access_only` (`is_oa`): live testing against the real API found these two reliably narrow `search.semantic` results, while `from_publication_date`/`to_publication_date` are rejected outright (not in `search.semantic`'s own supported-filter list) and `type` silently lets a meaningful fraction of non-matching results through rather than actually filtering — an OpenAlex-side limitation, not a client bug, so `type` isn't offered as a filter.
+
+The `research://openalex/work-types` resource (mirroring `research://arxiv/categories`'s pattern) exposes OpenAlex's work-type vocabulary — see [OpenAlex → Work types](https://help.openalex.org/data/work-types) — as reference data for interpreting a hit's own metadata, not as a discovery-tool filter parameter.
 
 ## Fetch ladder for results that land outside arXiv/Europe PMC
 

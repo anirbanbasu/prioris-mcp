@@ -136,8 +136,9 @@ Per [Storage → Future: extracted PDF images](storage/01-document-storage.md#fu
 - `research://{provider}/{identifier}/{format}/markdown` behaves the same way relative to `parse_full_text`.
 - Reading either of the above resources must never itself trigger a fetch or a parse — assert no outbound network request or parse executes as a side effect of a resource read.
 - `research://arxiv/categories` returns only leaf category codes (no archive/group nodes with children of their own), each with its derived `code` and its `name` taken from the OAI-PMH response, sorted by `code`.
+- `research://openalex/work-types` returns every type from OpenAlex's `/work-types` response, each with its derived `code` (the last path segment of `id`), `name` (`display_name`), and `description`, sorted by `code`.
 - `research://localfile/{id}/pdf/fulltext` and `research://localfile/{id}/pdf/markdown` behave identically to the arXiv/Europe PMC cases above, keyed on the caller-facing `id` returned by `research_localfile_fetch_full_text` — reading either never re-triggers a fetch or a parse.
-- No per-item metadata resource template exists — confirm the registered resource list contains exactly `fulltext`, `markdown`, and `research://arxiv/categories`, per [Functional requirements → Resources](03-functional-requirements.md#resources).
+- No per-item metadata resource template exists — confirm the registered resource list contains exactly `fulltext`, `markdown`, `research://arxiv/categories`, and `research://openalex/work-types`, per [Functional requirements → Resources](03-functional-requirements.md#resources).
 
 ## Cross-cutting: concurrency
 

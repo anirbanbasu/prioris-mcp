@@ -174,6 +174,7 @@ class PriorisMCP(MCPMixin):
             "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
         },
         {"fn": "read_arxiv_categories_resource", "uri": "research://arxiv/categories"},
+        {"fn": "read_openalex_work_types_resource", "uri": "research://openalex/work-types"},
         {"fn": "read_notes_export_resource", "uri": "notes://{note_id}/export"},
     ]
 
@@ -205,7 +206,7 @@ class PriorisMCP(MCPMixin):
             verify=not EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS,
             timeout=EnvVars.PRIORIS_MCP_HTTP_TIMEOUT_SECONDS,
         )
-        self._openalex_client = OpenAlexClient(self._http_client, mailto=EnvVars.PRIORIS_MCP_OPENALEX_MAILTO)
+        self._openalex_client = OpenAlexClient(self._http_client, api_key=EnvVars.PRIORIS_MCP_OPENALEX_API_KEY)
         arxiv_queue = ProviderRequestQueue(
             base_spacing_seconds=ARXIV_BASE_SPACING_SECONDS,
             max_total_backoff_seconds=EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS,
@@ -1018,6 +1019,13 @@ class PriorisMCP(MCPMixin):
         Returns the `ArxivCategoriesResult` serialised to JSON - see `read_markdown_resource` for why.
         """
         return (await self._arxiv_provider.list_categories()).model_dump_json()
+
+    async def read_openalex_work_types_resource(self) -> str:
+        """Read OpenAlex's work `type` vocabulary, for interpreting a `research_discovery` hit's own metadata.
+
+        Returns the `OpenAlexWorkTypesResult` serialised to JSON - see `read_markdown_resource` for why.
+        """
+        return (await self._openalex_client.list_work_types()).model_dump_json()
 
     async def read_notes_export_resource(self, note_id: str) -> str:
         """Read one note's file representation, for the caller to write to disk itself.

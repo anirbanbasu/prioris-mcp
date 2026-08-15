@@ -14,6 +14,7 @@ from prioris_mcp import EnvVars
 from prioris_mcp.errors import InvalidRequestError
 from prioris_mcp.models.arxiv import ArxivCategoriesResult, ArxivCategory
 from prioris_mcp.models.common import ArxivResolvedIdentifierResult, MarkdownPage
+from prioris_mcp.models.discovery import OpenAlexWorkType, OpenAlexWorkTypesResult
 from prioris_mcp.server import PriorisMCP
 from prioris_mcp.vector.embedding import EmbeddingBackend
 from prioris_mcp.vector.sqlite_vec_backend import SqliteVecNoteBackend
@@ -1609,7 +1610,7 @@ class TestResearchDiscovery:
         mock_transport = httpx.MockTransport(handler)
         mcp_obj = PriorisMCP()
         mcp_obj._http_client = httpx.AsyncClient(transport=mock_transport)
-        mcp_obj._openalex_client = mcp_obj._openalex_client.__class__(mcp_obj._http_client, mailto=None)
+        mcp_obj._openalex_client = mcp_obj._openalex_client.__class__(mcp_obj._http_client, api_key=None)
         server = FastMCP()
         return mcp_obj, Client(transport=mcp_obj.register_features(server), timeout=60)
 
@@ -1799,6 +1800,54 @@ class TestResearchDiscovery:
 
     def test_normalise_discovery_identifier_leaves_unknown_provider_unchanged(self):
         assert PriorisMCP._normalise_discovery_identifier("localfile", "id-1") == "id-1"
+
+    def test_openalex_work_types_resource_is_registered(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []})
+        )
+
+        async def scenario():
+            async with client:
+                resources = await client.list_resources()
+                return [str(resource.uri) for resource in resources]
+
+        assert "research://openalex/work-types" in asyncio.run(scenario())
+
+    def test_openalex_work_types_resource_returns_sorted_types(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        work_types = {
+            "results": [
+                {
+                    "id": "https://openalex.org/types/preprint",
+                    "display_name": "preprint",
+                    "description": "An article whose primary location is a preprint repository.",
+                },
+                {
+                    "id": "https://openalex.org/types/article",
+                    "display_name": "article",
+                    "description": "Original, citable research usually in a journal.",
+                },
+            ]
+        }
+        _, client = self._server_and_client(tmp_path, monkeypatch, lambda request: httpx.Response(200, json=work_types))
+
+        async def scenario():
+            async with client:
+                return await client.read_resource("research://openalex/work-types")
+
+        result = asyncio.run(scenario())
+        parsed = OpenAlexWorkTypesResult.model_validate_json(result[0].text)
+        assert parsed == OpenAlexWorkTypesResult(
+            types=[
+                OpenAlexWorkType(
+                    code="article", name="article", description="Original, citable research usually in a journal."
+                ),
+                OpenAlexWorkType(
+                    code="preprint",
+                    name="preprint",
+                    description="An article whose primary location is a preprint repository.",
+                ),
+            ]
+        )
 
 
 class TestResearchSearchFetched:
