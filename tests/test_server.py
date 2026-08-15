@@ -20,7 +20,7 @@ from prioris_mcp.models.arxiv import ArxivCategoriesResult, ArxivCategory
 from prioris_mcp.models.common import ArxivResolvedIdentifierResult, MarkdownPage
 from prioris_mcp.models.discovery import OpenAlexWorkType, OpenAlexWorkTypesResult
 from prioris_mcp.server import PriorisMCP, _vector_reconciliation_lifespan, app
-from prioris_mcp.vector.embedding import EmbeddingBackend
+from prioris_mcp.vector.embedding import EmbeddingBackend, FastEmbedBackend
 from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
 logger = logging.getLogger(__name__)
@@ -3437,3 +3437,91 @@ class TestVectorReconciliation:
                 pass
 
         asyncio.run(scenario())  # must not raise - confirms the lifespan context manager is entered cleanly
+
+    def test_full_server_startup_reconciles_a_dimension_changing_model_swap(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression test for the review's exact repro, through the full server + lifespan.
+
+        Original bug: index one document, reopen the same database at a different embedding
+        dimension, call search() immediately - count() went from 1 to 0, search() returned [],
+        with no path back. This must now self-heal automatically via app()'s lifespan.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+
+        mcp_obj_a = PriorisMCP()
+        asyncio.run(
+            mcp_obj_a._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+        )
+        manifest = mcp_obj_a._storage.manifest_for("arxiv", "2106.09685v2")
+        asyncio.run(
+            manifest.replace_chunk_rows("pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1")
+        )
+        asyncio.run(
+            mcp_obj_a._document_vector_backend.index_entries(
+                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "Body text."}]
+            )
+        )
+        assert asyncio.run(mcp_obj_a._document_vector_backend.count()) == 1
+
+        mcp_app = app()
+
+        async def run_and_check():
+            async with Client(transport=mcp_app, timeout=60):
+                pass  # lifespan's synchronous force-reconnect phase has fully run by this point
+            check_backend = SqliteVecDocumentBackend(
+                tmp_path / "vectors" / "vectors.sqlite3", FastEmbedBackend("BAAI/bge-small-en-v1.5")
+            )
+            return await check_backend.count()
+
+        count_after_startup = asyncio.run(run_and_check())
+        assert count_after_startup == 1  # not silently emptied by server startup
+
+    def test_full_server_startup_reconciles_a_same_dimension_renamed_model(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """The Low-finding half of the repro: same dimension, renamed model, must not go undetected."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+
+        mcp_obj_a = PriorisMCP()
+        asyncio.run(
+            mcp_obj_a._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+        )
+        manifest = mcp_obj_a._storage.manifest_for("arxiv", "2106.09685v2")
+        asyncio.run(
+            manifest.replace_chunk_rows("pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1")
+        )
+        old_backend = SqliteVecDocumentBackend(
+            tmp_path / "vectors" / "vectors.sqlite3", _RenamedStub(mcp_obj_a._embedding_backend, "old-model")
+        )
+        asyncio.run(
+            old_backend.index_entries(
+                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "old text"}]
+            )
+        )
+
+        mcp_obj = PriorisMCP()
+        mcp_app = FastMCP(
+            name="test",
+            lifespan=_vector_reconciliation_lifespan(mcp_obj),
+        )
+        mcp_obj.register_features(mcp_app)
+
+        async def run_and_wait():
+            async with Client(transport=mcp_app, timeout=60):
+                check_backend = SqliteVecDocumentBackend(
+                    tmp_path / "vectors" / "vectors.sqlite3", FastEmbedBackend("BAAI/bge-small-en-v1.5")
+                )
+                # Reconciliation's own re-embed runs in the background - poll status until it settles
+                # rather than assuming it's already done the instant the client connection closes.
+                for _ in range(50):
+                    status = await check_backend.status("arxiv", "2106.09685v2", "pdf")
+                    if status == "ready":
+                        return status
+                    await asyncio.sleep(0.05)
+                return status
+
+        final_status = asyncio.run(run_and_wait())
+        assert final_status == "ready"
