@@ -36,12 +36,25 @@ class SearchIndex(ABC):
 
     @abstractmethod
     async def search(
-        self, query: str, *, provider: str | None = None, identifier: str | None = None, format: str | None = None
+        self,
+        query: str,
+        *,
+        provider: str | None = None,
+        identifier: str | None = None,
+        format: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
     ) -> list[dict]:
         """Full-text search, ranked by relevance (most relevant first).
 
         Returns list of {"provider", "identifier", "format", "snippet", "offset", "score"}.
         """
+
+    @abstractmethod
+    async def count(
+        self, query: str, *, provider: str | None = None, identifier: str | None = None, format: str | None = None
+    ) -> int:
+        """Count of entries matching `query` and the given filters — same filters as `search()`, unpaged."""
 
     @abstractmethod
     async def has_entries(self, provider: str, identifier: str, format: str) -> bool:
@@ -90,7 +103,14 @@ class SqliteFts5SearchIndex(SearchIndex):
         await to_thread.run_sync(_remove)
 
     async def search(
-        self, query: str, *, provider: str | None = None, identifier: str | None = None, format: str | None = None
+        self,
+        query: str,
+        *,
+        provider: str | None = None,
+        identifier: str | None = None,
+        format: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
     ) -> list[dict]:
         def _search() -> list[dict]:
             sql = (
@@ -98,7 +118,7 @@ class SqliteFts5SearchIndex(SearchIndex):
                 "snippet(search, 0, '', '', '...', 8) AS snippet "
                 "FROM search WHERE search MATCH ?"
             )
-            params: list[str] = [query]
+            params: list[str | int] = [query]
             if provider is not None:
                 sql += " AND provider = ?"
                 params.append(provider)
@@ -108,7 +128,9 @@ class SqliteFts5SearchIndex(SearchIndex):
             if format is not None:
                 sql += " AND format = ?"
                 params.append(format)
-            sql += " ORDER BY bm25(search)"
+            sql += " ORDER BY bm25(search) LIMIT ? OFFSET ?"
+            params.append(limit)
+            params.append(offset)
             with self._connect() as conn:
                 rows = conn.execute(sql, params).fetchall()
                 return [
@@ -124,6 +146,27 @@ class SqliteFts5SearchIndex(SearchIndex):
                 ]
 
         return await to_thread.run_sync(_search)
+
+    async def count(
+        self, query: str, *, provider: str | None = None, identifier: str | None = None, format: str | None = None
+    ) -> int:
+        def _count() -> int:
+            sql = "SELECT COUNT(*) AS n FROM search WHERE search MATCH ?"
+            params: list[str] = [query]
+            if provider is not None:
+                sql += " AND provider = ?"
+                params.append(provider)
+            if identifier is not None:
+                sql += " AND identifier = ?"
+                params.append(identifier)
+            if format is not None:
+                sql += " AND format = ?"
+                params.append(format)
+            with self._connect() as conn:
+                row = conn.execute(sql, params).fetchone()
+                return row["n"]
+
+        return await to_thread.run_sync(_count)
 
     async def has_entries(self, provider: str, identifier: str, format: str) -> bool:
         def _has_entries() -> bool:
