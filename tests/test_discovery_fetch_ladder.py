@@ -82,6 +82,14 @@ class TestOaLinkRoute:
         }
         assert resolve_fetch_route(work).pdf_url == "https://example.org/best.pdf"
 
+    def test_uses_any_version_when_no_preferred_version_has_a_pdf(self):
+        work = {
+            "doi": None,
+            "ids": {},
+            "locations": [{"version": "other", "pdf_url": "https://example.org/other.pdf"}],
+        }
+        assert resolve_fetch_route(work).pdf_url == "https://example.org/other.pdf"
+
 
 class TestManualUploadRoute:
     """Manual-upload fallback routing."""

@@ -1601,6 +1601,174 @@ class TestDeleteFetchedArtefactField:
         assert matches_after == []
 
 
+class TestResearchDiscovery:
+    """End-to-end MCP tool tests for research_discovery."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch", handler):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        mock_transport = httpx.MockTransport(handler)
+        mcp_obj = PriorisMCP()
+        mcp_obj._http_client = httpx.AsyncClient(transport=mock_transport)
+        mcp_obj._openalex_client = mcp_obj._openalex_client.__class__(mcp_obj._http_client, mailto=None)
+        server = FastMCP()
+        return mcp_obj, Client(transport=mcp_obj.register_features(server), timeout=60)
+
+    def test_research_discovery_is_registered(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []})
+        )
+
+        async def scenario():
+            async with client:
+                tools = await client.list_tools()
+                return [tool.name for tool in tools]
+
+        assert "research_discovery" in asyncio.run(scenario())
+
+    def test_research_discovery_returns_hits(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        work = {
+            "id": "https://openalex.org/W2741809807",
+            "doi": None,
+            "title": "A Paper",
+            "publication_year": 2020,
+            "relevance_score": 0.5,
+            "authorships": [],
+            "abstract_inverted_index": None,
+            "ids": {},
+            "locations": [],
+        }
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": [work]})
+        )
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_discovery", arguments={"query": "graph neural networks"})
+
+        hits = asyncio.run(scenario()).structured_content["hits"]
+        assert len(hits) == 1
+        assert hits[0]["openalex_id"] == "W2741809807"
+        assert hits[0]["fetch_route"]["kind"] == "manual_upload"
+
+    def test_research_discovery_defaults_max_results_from_env_var(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_DISCOVERY_MAX_RESULTS", 7)
+        seen_params = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_params.append(request.url.params)
+            return httpx.Response(200, json={"results": []})
+
+        _, client = self._server_and_client(tmp_path, monkeypatch, handler)
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_discovery", arguments={"query": "quantum computing"})
+
+        asyncio.run(scenario())
+        assert seen_params[0]["per-page"] == "7"
+
+    def test_research_discovery_rejects_invalid_requests(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []})
+        )
+
+        async def scenario(arguments: dict):
+            async with client:
+                return await client.call_tool("research_discovery", arguments=arguments)
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario({"query": "x" * 2001}))
+        with pytest.raises(ToolError):
+            asyncio.run(scenario({"query": "valid", "max_results": 201}))
+
+    def test_research_discovery_excludes_fetched_known_provider_hits(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        works = [
+            {
+                "id": "https://openalex.org/W1",
+                "doi": "https://doi.org/10.48550/arxiv.1706.03762",
+                "title": "Fetched arXiv Paper",
+                "publication_year": 2017,
+                "relevance_score": 0.9,
+                "authorships": [],
+                "abstract_inverted_index": None,
+                "ids": {},
+                "locations": [],
+            },
+            {
+                "id": "https://openalex.org/W2",
+                "doi": None,
+                "title": "Unfetched Paper",
+                "publication_year": 2018,
+                "relevance_score": 0.8,
+                "authorships": [],
+                "abstract_inverted_index": None,
+                "ids": {},
+                "locations": [],
+            },
+        ]
+        mcp_obj, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": works})
+        )
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "1706.03762v2", "pdf", b"%PDF")
+            async with client:
+                return await client.call_tool("research_discovery", arguments={"query": "transformers"})
+
+        hits = asyncio.run(scenario()).structured_content["hits"]
+        assert [hit["openalex_id"] for hit in hits] == ["W2"]
+
+    def test_research_discovery_excludes_fetched_europepmc_hit(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        work = {
+            "id": "https://openalex.org/W1",
+            "doi": None,
+            "title": "Fetched Europe PMC Paper",
+            "publication_year": 2017,
+            "relevance_score": 0.9,
+            "authorships": [],
+            "abstract_inverted_index": None,
+            "ids": {"pmcid": "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4767193"},
+            "locations": [],
+        }
+        mcp_obj, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": [work]})
+        )
+
+        async def scenario():
+            await mcp_obj._storage.write("europepmc", "PMC:4767193", "xml", b"<article/>")
+            async with client:
+                return await client.call_tool("research_discovery", arguments={"query": "biology"})
+
+        assert asyncio.run(scenario()).structured_content["hits"] == []
+
+    def test_fetched_discovery_identifiers_paginates_and_stops_on_empty_page(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        mcp_obj, _ = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []})
+        )
+        pages = [
+            ([{"identifier": "1706.03762v2"}], 2),
+            ([{"identifier": "2401.00001"}], 2),
+            ([], 3),
+        ]
+
+        async def list_entries(provider: str, *, offset: int, limit: int):
+            assert provider == "arxiv"
+            assert limit == 200
+            return pages.pop(0)
+
+        monkeypatch.setattr(mcp_obj._storage, "list", list_entries)
+        assert asyncio.run(mcp_obj._fetched_discovery_identifiers("arxiv")) == {"1706.03762", "2401.00001"}
+
+    def test_normalise_discovery_identifier_leaves_unknown_provider_unchanged(self):
+        assert PriorisMCP._normalise_discovery_identifier("localfile", "id-1") == "id-1"
+
+
 class TestResearchSearchFetched:
     """End-to-end MCP tool tests for research_search_fetched."""
 

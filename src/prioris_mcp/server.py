@@ -1,4 +1,5 @@
 import logging
+import re
 import sqlite3
 import sys
 from importlib.metadata import version
@@ -21,6 +22,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 from prioris_mcp import PACKAGE_NAME, EnvVars
+from prioris_mcp.discovery.openalex import OPENALEX_MAX_RESULTS, OpenAlexClient
 from prioris_mcp.errors import InvalidRequestError, NotFoundError
 from prioris_mcp.middleware import (
     DecodeBinaryResourceContentMiddleware,
@@ -43,6 +45,7 @@ from prioris_mcp.models.common import (
     SearchFetchedResult,
     SearchMatch,
 )
+from prioris_mcp.models.discovery import DiscoveryHit, DiscoveryResult
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, NotesSearchResult, PagedNotes
@@ -152,6 +155,7 @@ class PriorisMCP(MCPMixin):
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
         {"fn": "research_search_fetched", "tags": ["research", "storage"], "annotations": {"readOnlyHint": True}},
+        {"fn": "research_discovery", "tags": ["research", "discovery"], "annotations": {"readOnlyHint": True}},
         {"fn": "research_notes_create", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
         {"fn": "research_notes_read", "tags": ["research", "notes"], "annotations": {"readOnlyHint": True}},
         {"fn": "research_notes_update", "tags": ["research", "notes"], "annotations": {"readOnlyHint": False}},
@@ -201,6 +205,7 @@ class PriorisMCP(MCPMixin):
             verify=not EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS,
             timeout=EnvVars.PRIORIS_MCP_HTTP_TIMEOUT_SECONDS,
         )
+        self._openalex_client = OpenAlexClient(self._http_client, mailto=EnvVars.PRIORIS_MCP_OPENALEX_MAILTO)
         arxiv_queue = ProviderRequestQueue(
             base_spacing_seconds=ARXIV_BASE_SPACING_SECONDS,
             max_total_backoff_seconds=EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS,
@@ -377,6 +382,75 @@ class PriorisMCP(MCPMixin):
         return await resolve_research_identifier(
             identifier, format, self._http_client, self._arxiv_provider, self._europepmc_provider
         )
+
+    @staticmethod
+    def _normalise_discovery_identifier(provider: str, identifier: str) -> str:
+        """Normalise a provider identifier to the form discovery can compare with local storage."""
+        if provider == "arxiv":
+            return re.sub(r"v\d+$", "", identifier, flags=re.IGNORECASE)
+        if provider == "europepmc":
+            return identifier.upper().removeprefix("PMC:").removeprefix("PMC")
+        return identifier
+
+    async def _fetched_discovery_identifiers(self, provider: str) -> set[str]:
+        """Return every locally fetched identifier for a provider, normalised for discovery."""
+        identifiers: set[str] = set()
+        offset = 0
+        limit = 200
+        while True:
+            entries, total = await self._storage.list(provider, offset=offset, limit=limit)
+            identifiers.update(self._normalise_discovery_identifier(provider, entry["identifier"]) for entry in entries)
+            offset += len(entries)
+            if not entries or offset >= total:
+                return identifiers
+
+    async def _exclude_local_discovery_hits(self, result: DiscoveryResult) -> DiscoveryResult:
+        """Remove hits already fetched through a route whose provider-native identity is known."""
+        routed_providers = {
+            hit.fetch_route.provider
+            for hit in result.hits
+            if hit.fetch_route.kind == "known_provider" and hit.fetch_route.provider is not None
+        }
+        fetched_identifiers = {
+            provider: await self._fetched_discovery_identifiers(provider) for provider in routed_providers
+        }
+        return DiscoveryResult(
+            hits=[hit for hit in result.hits if not self._is_locally_fetched_discovery_hit(hit, fetched_identifiers)]
+        )
+
+    def _is_locally_fetched_discovery_hit(self, hit: DiscoveryHit, fetched_identifiers: dict[str, set[str]]) -> bool:
+        """Whether a discovery hit has a provider-native identifier already in local storage."""
+        route = hit.fetch_route
+        if route.kind != "known_provider" or route.provider is None or route.identifier is None:
+            return False
+        return self._normalise_discovery_identifier(route.provider, route.identifier) in fetched_identifiers.get(
+            route.provider, set()
+        )
+
+    async def research_discovery(
+        self,
+        ctx: Context,
+        query: Annotated[
+            str,
+            Field(
+                description=(
+                    "Free-text query (title, abstract, grant summary, or similar - up to 2000 characters), "
+                    "embedded and ranked by similarity via OpenAlex search.semantic"
+                )
+            ),
+        ],
+        max_results: Annotated[
+            int | None,
+            Field(
+                default=None, ge=1, le=OPENALEX_MAX_RESULTS, description="Defaults to PRIORIS_MCP_DISCOVERY_MAX_RESULTS"
+            ),
+        ] = None,
+    ) -> DiscoveryResult:
+        """Discover external research candidates that are not already in the local corpus."""
+        result = await self._openalex_client.search_semantic(
+            query, max_results=max_results if max_results is not None else EnvVars.PRIORIS_MCP_DISCOVERY_MAX_RESULTS
+        )
+        return await self._exclude_local_discovery_hits(result)
 
     async def research_localfile_fetch_full_text(
         self,
@@ -989,6 +1063,7 @@ def app() -> FastMCP:  # pragma: no cover
                     "research_europepmc_fetch_full_text",
                     "research_europepmc_parse_full_text",
                     "research_resolve_identifier",
+                    "research_discovery",
                 ],
                 ttl=EnvVars.PRIORIS_MCP_RESPONSE_CACHE_TTL,
                 enabled=EnvVars.PRIORIS_MCP_RESPONSE_CACHE_TTL > 0,
