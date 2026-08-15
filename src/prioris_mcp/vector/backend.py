@@ -72,13 +72,17 @@ class NoteVectorSearchBackend(ABC):
 
     @abstractmethod
     async def search(
-        self, query_embedding: list[float], *, note_ids: list[str] | None = None, limit: int = 10
+        self, query_embedding: list[float], *, note_ids: list[str] | None = None, offset: int = 0, limit: int = 10
     ) -> list[dict]:
         """Cosine-similarity KNN search over notes, ranked most-similar first.
 
         `note_ids`, when given, scopes the search to that id set (e.g. notes on one document).
         Returns list of {"note_id", "score", "text_preview"}.
         """
+
+    @abstractmethod
+    async def count(self, *, note_ids: list[str] | None = None) -> int:
+        """Count of indexed notes, optionally scoped to `note_ids` — unthresholded, unpaged."""
 
     @abstractmethod
     async def status(self, note_id: str) -> IndexStatus:

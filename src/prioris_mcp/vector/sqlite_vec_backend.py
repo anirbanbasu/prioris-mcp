@@ -354,7 +354,7 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
         await to_thread.run_sync(_remove)
 
     async def search(
-        self, query_embedding: list[float], *, note_ids: list[str] | None = None, limit: int = 10
+        self, query_embedding: list[float], *, note_ids: list[str] | None = None, offset: int = 0, limit: int = 10
     ) -> list[dict]:
         """Cosine-similarity KNN search over notes, ranked most-similar first.
 
@@ -363,7 +363,7 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
 
         def _search() -> list[dict]:
             sql = "SELECT note_id, text, distance FROM note_vectors WHERE embedding MATCH ? AND k = ?"
-            params: list[object] = [json.dumps(query_embedding), limit]
+            params: list[object] = [json.dumps(query_embedding), offset + limit]
             if note_ids is not None:
                 placeholders = ", ".join("?" for _ in note_ids)
                 sql += f" AND note_id IN ({placeholders})"
@@ -371,6 +371,7 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
             sql += " ORDER BY distance"
             with self._connect() as conn:
                 rows = conn.execute(sql, params).fetchall()
+            ordered = rows[offset : offset + limit]
             return [
                 {
                     "note_id": row["note_id"],
@@ -379,10 +380,26 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
                     "score": row["distance"],
                     "text_preview": row["text"][:200] + ("..." if len(row["text"]) > 200 else ""),
                 }
-                for row in rows
+                for row in ordered
             ]
 
         return await to_thread.run_sync(_search)
+
+    async def count(self, *, note_ids: list[str] | None = None) -> int:
+        """Count of indexed notes, optionally scoped to `note_ids`."""
+
+        def _count() -> int:
+            sql = "SELECT COUNT(*) AS n FROM note_vectors WHERE 1=1"
+            params: list[str] = []
+            if note_ids is not None:
+                placeholders = ", ".join("?" for _ in note_ids)
+                sql += f" AND note_id IN ({placeholders})"
+                params.extend(note_ids)
+            with self._connect() as conn:
+                row = conn.execute(sql, params).fetchone()
+                return row["n"]
+
+        return await to_thread.run_sync(_count)
 
     async def status(self, note_id: str) -> IndexStatus:
         """Compare this note's recorded embedded_model against the currently configured one."""

@@ -30,8 +30,11 @@ class _StubNoteBackend(NoteVectorSearchBackend):
     async def remove_note(self, note_id):
         pass
 
-    async def search(self, query_embedding, *, note_ids=None, limit=10):
+    async def search(self, query_embedding, *, note_ids=None, offset=0, limit=10):
         return []
+
+    async def count(self, *, note_ids=None):
+        return 0
 
     async def status(self, note_id):
         return "not_built"

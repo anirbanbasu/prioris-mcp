@@ -149,3 +149,99 @@ class TestHasAnyIndexed:
         backend = _backend(tmp_path)
         asyncio.run(backend.index_note("note-1", "x"))
         assert asyncio.run(backend.has_any_indexed("some-other-model")) is False
+
+
+class TestPagination:
+    """Test offset/limit pagination for search."""
+
+    def test_offset_skips_results(self, tmp_path):
+        backend = _backend(tmp_path)
+        # Index multiple notes with identical semantic distance (same text).
+        asyncio.run(backend.index_note("note-1", "the same text"))
+        asyncio.run(backend.index_note("note-2", "the same text"))
+        asyncio.run(backend.index_note("note-3", "the same text"))
+
+        query = asyncio.run(backend._embedding_backend.embed("the same text"))
+
+        # Get first page (offset=0, limit=2).
+        page1 = asyncio.run(backend.search(query, offset=0, limit=2))
+        assert len(page1) == 2
+
+        # Get second page (offset=2, limit=2).
+        page2 = asyncio.run(backend.search(query, offset=2, limit=2))
+        assert len(page2) == 1
+
+        # Ensure pages don't overlap.
+        page1_ids = {r["note_id"] for r in page1}
+        page2_ids = {r["note_id"] for r in page2}
+        assert page1_ids.isdisjoint(page2_ids)
+
+        # Ensure all notes are covered across pages.
+        all_ids = page1_ids | page2_ids
+        assert all_ids == {"note-1", "note-2", "note-3"}
+
+    def test_offset_with_note_ids_scoping(self, tmp_path):
+        backend = _backend(tmp_path)
+        # Index notes with same text.
+        asyncio.run(backend.index_note("note-a", "shared text"))
+        asyncio.run(backend.index_note("note-b", "shared text"))
+        asyncio.run(backend.index_note("note-c", "shared text"))
+
+        query = asyncio.run(backend._embedding_backend.embed("shared text"))
+
+        # Scope to a subset, then paginate.
+        page1 = asyncio.run(backend.search(query, note_ids=["note-a", "note-b"], offset=0, limit=1))
+        assert len(page1) == 1
+
+        page2 = asyncio.run(backend.search(query, note_ids=["note-a", "note-b"], offset=1, limit=1))
+        assert len(page2) == 1
+
+        # Scoped search shouldn't return note-c.
+        all_ids = {r["note_id"] for r in page1 + page2}
+        assert all_ids <= {"note-a", "note-b"}
+
+
+class TestCount:
+    """Test count() method for corpus-wide and scoped counts."""
+
+    def test_count_empty_index_is_zero(self, tmp_path):
+        backend = _backend(tmp_path)
+        assert asyncio.run(backend.count()) == 0
+
+    def test_count_increases_with_indexed_notes(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(backend.index_note("note-1", "first"))
+        assert asyncio.run(backend.count()) == 1
+
+        asyncio.run(backend.index_note("note-2", "second"))
+        assert asyncio.run(backend.count()) == 2
+
+    def test_count_scoped_to_note_ids(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(backend.index_note("note-1", "a"))
+        asyncio.run(backend.index_note("note-2", "b"))
+        asyncio.run(backend.index_note("note-3", "c"))
+
+        # Count all notes.
+        assert asyncio.run(backend.count()) == 3
+
+        # Count only a subset.
+        assert asyncio.run(backend.count(note_ids=["note-1", "note-2"])) == 2
+
+        # Count single note.
+        assert asyncio.run(backend.count(note_ids=["note-1"])) == 1
+
+    def test_count_reflects_removals(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(backend.index_note("note-1", "x"))
+        asyncio.run(backend.index_note("note-2", "y"))
+        assert asyncio.run(backend.count()) == 2
+
+        asyncio.run(backend.remove_note("note-1"))
+        assert asyncio.run(backend.count()) == 1
+
+    def test_count_scoped_unrelated_note_ids_is_zero(self, tmp_path):
+        backend = _backend(tmp_path)
+        asyncio.run(backend.index_note("note-1", "x"))
+        # Count with note_ids that don't match anything.
+        assert asyncio.run(backend.count(note_ids=["note-999", "note-1000"])) == 0
