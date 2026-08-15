@@ -376,3 +376,62 @@ class TestManifestForIntegration:
             return await backend.manifest_for("arxiv", "2106.09685v2").total_pages("pdf")
 
         assert asyncio.run(scenario()) == 1
+
+
+class TestListMarkdownEntries:
+    """list_markdown_entries() - the corpus-enumeration primitive reconciliation uses (Task 4)."""
+
+    def test_empty_store_returns_nothing(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        entries, total = asyncio.run(backend.list_markdown_entries())
+        assert entries == []
+        assert total == 0
+
+    def test_only_includes_markdown_artefacts(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"raw", artefact="document")
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"# md", artefact="markdown")
+            return await backend.list_markdown_entries()
+
+        entries, total = asyncio.run(scenario())
+        assert total == 1
+        assert entries[0]["format"] == "pdf"
+
+    def test_entry_carries_both_canonical_and_external_identifier(self, tmp_path: Path):
+        """Localfile's canonical (storage-key/hash) identifier differs from its public one."""
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write(
+                "localfile", "abc123hash", "pdf", b"# md", artefact="markdown", public_identifier="20260729-1430-a3f2"
+            )
+            return await backend.list_markdown_entries()
+
+        entries, _total = asyncio.run(scenario())
+        assert entries[0]["canonical_identifier"] == "abc123hash"
+        assert entries[0]["identifier"] == "20260729-1430-a3f2"
+
+    def test_entry_identifier_falls_back_to_canonical_when_no_public_identifier(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"# md", artefact="markdown")
+            return await backend.list_markdown_entries()
+
+        entries, _total = asyncio.run(scenario())
+        assert entries[0]["canonical_identifier"] == "2106.09685v2"
+        assert entries[0]["identifier"] == "2106.09685v2"
+
+    def test_offset_and_limit_thread_through(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            for i in range(3):
+                await backend.write("arxiv", f"doc-{i}", "pdf", b"# md", artefact="markdown")
+            return await backend.list_markdown_entries(offset=1, limit=1)
+
+        entries, total = asyncio.run(scenario())
+        assert total == 3
+        assert len(entries) == 1

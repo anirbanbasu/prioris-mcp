@@ -106,6 +106,23 @@ class TestCatalogueList:
         assert total3 == 5
         assert past_end == []
 
+    def test_list_filters_by_artefact(self, tmp_path):
+        catalogue = Catalogue(tmp_path / "catalogue.sqlite")
+        asyncio.run(catalogue.upsert(_entry(artefact="document")))
+        asyncio.run(catalogue.upsert(_entry(artefact="markdown")))
+        markdown_entries, markdown_total = asyncio.run(catalogue.list(artefact="markdown"))
+        assert len(markdown_entries) == 1
+        assert markdown_total == 1
+        assert markdown_entries[0]["artefact"] == "markdown"
+
+    def test_list_with_no_artefact_filter_is_unchanged(self, tmp_path):
+        """artefact=None (the default) must preserve list()'s existing unfiltered behaviour."""
+        catalogue = Catalogue(tmp_path / "catalogue.sqlite")
+        asyncio.run(catalogue.upsert(_entry(artefact="document")))
+        asyncio.run(catalogue.upsert(_entry(artefact="markdown")))
+        _entries, total = asyncio.run(catalogue.list())
+        assert total == 2
+
 
 class TestCatalogueRemove:
     """Test Catalogue remove operations."""

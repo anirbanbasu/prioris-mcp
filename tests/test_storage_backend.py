@@ -1,4 +1,5 @@
 import asyncio
+import builtins
 
 from prioris_mcp.storage.backend import KeyedAsyncLockManager, StorageBackend
 from prioris_mcp.storage.manifest import DocumentManifest
@@ -54,6 +55,19 @@ class _InMemoryStorageBackend(StorageBackend):
             m
             for m in self._manifests.values()
             if (provider is None or m["provider"] == provider) and (format is None or m["format"] == format)
+        ]
+        return matches[offset : offset + limit], len(matches)
+
+    async def list_markdown_entries(self, *, offset: int = 0, limit: int = 50) -> tuple[builtins.list[dict], int]:
+        matches = [
+            {
+                "provider": m["provider"],
+                "canonical_identifier": m["canonical_identifier"],
+                "identifier": m.get("public_identifier") or m["canonical_identifier"],
+                "format": m["format"],
+            }
+            for m in self._manifests.values()
+            if m["artefact"] == "markdown"
         ]
         return matches[offset : offset + limit], len(matches)
 

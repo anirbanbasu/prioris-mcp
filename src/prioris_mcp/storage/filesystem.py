@@ -4,6 +4,7 @@ See docs/requirement-specification/02-storage.md#directory-layout and
 docs/requirement-specification/02-storage.md#v1-local-filesystem-backend.
 """
 
+import builtins
 import hashlib
 import json
 import logging
@@ -109,6 +110,18 @@ class FilesystemStorageBackend(StorageBackend):
                 "artefact": entry["artefact"],
                 "fetched_at_or_parsed_at": entry["recorded_at"],
                 "size_bytes": entry["size_bytes"],
+            }
+            for entry in entries
+        ], total
+
+    async def list_markdown_entries(self, *, offset: int = 0, limit: int = 50) -> tuple[builtins.list[dict], int]:
+        entries, total = await self._catalogue.list(artefact="markdown", offset=offset, limit=limit)
+        return [
+            {
+                "provider": entry["provider"],
+                "canonical_identifier": entry["canonical_identifier"],
+                "identifier": entry["public_identifier"] or entry["canonical_identifier"],
+                "format": entry["format"],
             }
             for entry in entries
         ], total

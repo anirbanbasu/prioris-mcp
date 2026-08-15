@@ -92,7 +92,13 @@ class Catalogue:
         return await to_thread.run_sync(_get)
 
     async def list(
-        self, provider: str | None = None, format: str | None = None, *, offset: int = 0, limit: int = 50
+        self,
+        provider: str | None = None,
+        format: str | None = None,
+        *,
+        artefact: str | None = None,
+        offset: int = 0,
+        limit: int = 50,
     ) -> tuple[builtins.list[dict], int]:
         def _list() -> tuple[list[dict], int]:
             where = "WHERE 1=1"
@@ -103,6 +109,9 @@ class Catalogue:
             if format is not None:
                 where += " AND format = ?"
                 params.append(format)
+            if artefact is not None:
+                where += " AND artefact = ?"
+                params.append(artefact)
             with self._connect() as conn:
                 total = conn.execute(f"SELECT COUNT(*) AS n FROM entries {where}", params).fetchone()["n"]
                 rows = conn.execute(
