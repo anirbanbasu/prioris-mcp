@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import pytest
+from environs import EnvValidationError
 
 import prioris_mcp
 
@@ -75,6 +76,30 @@ class TestRateLimitBackoffBudgetDefault:
         monkeypatch.setenv("PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS", "12.5")
         reloaded = importlib.reload(prioris_mcp)
         assert reloaded.EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS == 12.5
+
+
+class TestDiscoveryEnvVars:
+    """OpenAlex discovery environment-variable defaults and validation."""
+
+    def test_openalex_mailto_defaults_to_none(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_OPENALEX_MAILTO", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_OPENALEX_MAILTO is None
+
+    def test_openalex_mailto_reads_from_env(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_OPENALEX_MAILTO", "researcher@example.com")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_OPENALEX_MAILTO == "researcher@example.com"
+
+    def test_discovery_max_results_defaults_to_25(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_DISCOVERY_MAX_RESULTS", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_DISCOVERY_MAX_RESULTS == 25
+
+    def test_discovery_max_results_rejects_above_200(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_DISCOVERY_MAX_RESULTS", "500")
+        with pytest.raises(EnvValidationError):
+            importlib.reload(prioris_mcp)
 
 
 class TestHttpTimeoutSecondsDefault:

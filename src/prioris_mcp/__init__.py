@@ -176,6 +176,19 @@ class EnvVars:
         validate=Range(min=1),
     )
 
+    PRIORIS_MCP_OPENALEX_MAILTO: str | None = env.str(
+        "PRIORIS_MCP_OPENALEX_MAILTO",
+        # OpenAlex's polite pool uses a contact email to provide faster, more consistent responses.
+        default=None,
+    )
+
+    PRIORIS_MCP_DISCOVERY_MAX_RESULTS: int = env.int(
+        "PRIORIS_MCP_DISCOVERY_MAX_RESULTS",
+        # OpenAlex caps /works `per-page` at 200.
+        default=25,
+        validate=Range(min=1, max=200),
+    )
+
     PRIORIS_MCP_PDF_OCR_ENABLED: bool = env.bool(
         "PRIORIS_MCP_PDF_OCR_ENABLED",
         # liteparse's own default (True) silently falls back to its bundled Tesseract engine,
