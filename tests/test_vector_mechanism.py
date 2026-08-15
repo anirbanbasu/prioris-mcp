@@ -4,6 +4,7 @@ from prioris_mcp.notes.search_index import SqliteFts5NotesSearchIndex
 from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
 from prioris_mcp.vector.embedding import FastEmbedBackend
 from prioris_mcp.vector.mechanism import FtsMechanism, NotesFtsMechanism, NotesVectorMechanism, VectorMechanism
+from prioris_mcp.vector.scheduler import EmbeddingScheduler
 from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
 
@@ -68,13 +69,13 @@ class TestVectorMechanism:
     def test_name_is_vector(self, tmp_path):
         embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
         backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
-        mechanism = VectorMechanism(backend, embedding)
+        mechanism = VectorMechanism(backend, embedding, EmbeddingScheduler())
         assert mechanism.name == "vector"
 
     def test_search_embeds_the_query_text(self, tmp_path):
         embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
         backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
-        mechanism = VectorMechanism(backend, embedding)
+        mechanism = VectorMechanism(backend, embedding, EmbeddingScheduler())
         asyncio.run(
             backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 5, "text": "cats"}])
         )
@@ -84,17 +85,43 @@ class TestVectorMechanism:
     def test_status_delegates_to_backend(self, tmp_path):
         embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
         backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
-        mechanism = VectorMechanism(backend, embedding)
+        mechanism = VectorMechanism(backend, embedding, EmbeddingScheduler())
         assert asyncio.run(mechanism.status("arxiv", "A", "pdf")) == "not_built"
         asyncio.run(
             backend.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 5, "text": "cats"}])
         )
         assert asyncio.run(mechanism.status("arxiv", "A", "pdf")) == "ready"
 
+    def test_status_reports_building_while_a_scheduler_task_is_in_flight(self, tmp_path):
+        """`status` must consult the scheduler, not only the backend's persisted state.
+
+        Otherwise a poll immediately after scheduling a (re-)embed sees whatever the backend's
+        last completed write left behind (`not_built`/`stale`/even a stale `ready`), not
+        `building` - see docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
+        """
+        embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
+        backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
+        scheduler = EmbeddingScheduler()
+        mechanism = VectorMechanism(backend, embedding, scheduler)
+
+        gate = asyncio.Event()
+
+        async def scenario():
+            scheduler.schedule(("arxiv", "A", "pdf"), gate.wait)
+            during = await mechanism.status("arxiv", "A", "pdf")
+            gate.set()
+            await scheduler.wait_all()
+            after = await mechanism.status("arxiv", "A", "pdf")
+            return during, after
+
+        during, after = asyncio.run(scenario())
+        assert during == "building"
+        assert after == "not_built"
+
     def test_search_respects_offset(self, tmp_path):
         embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
         backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
-        mechanism = VectorMechanism(backend, embedding)
+        mechanism = VectorMechanism(backend, embedding, EmbeddingScheduler())
         asyncio.run(
             backend.index_entries(
                 "arxiv",
@@ -115,7 +142,7 @@ class TestVectorMechanism:
     def test_count_ignores_offset_and_limit(self, tmp_path):
         embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
         backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
-        mechanism = VectorMechanism(backend, embedding)
+        mechanism = VectorMechanism(backend, embedding, EmbeddingScheduler())
         asyncio.run(
             backend.index_entries(
                 "arxiv",

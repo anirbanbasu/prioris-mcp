@@ -8,7 +8,7 @@ type-tagged interface - the two corpora have genuinely different filter/result s
 from abc import ABC, abstractmethod
 from typing import Literal
 
-IndexStatus = Literal["not_built", "stale", "ready"]
+IndexStatus = Literal["not_built", "stale", "ready", "building"]
 
 
 class DocumentVectorSearchBackend(ABC):

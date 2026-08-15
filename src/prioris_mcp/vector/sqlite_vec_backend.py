@@ -182,15 +182,12 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
         happen to share a `chunk_id` value could incorrectly collapse into one result.
         """
 
-        def _search() -> list[dict]:
-            # Over-fetch before collapsing same-chunk_id sub-splits, so collapsing never starves
-            # `offset + limit` distinct chunks below what a caller asked for.
-            fetch_k = (offset + limit) * _CHUNK_COLLAPSE_OVERFETCH_FACTOR
+        def _build_query(k: int) -> tuple[str, list[object]]:
             sql = (
                 "SELECT provider, identifier, format, chunk_id, span_start, text, distance "
                 "FROM document_vectors WHERE embedding MATCH ? AND k = ?"
             )
-            params: list[object] = [json.dumps(query_embedding), fetch_k]
+            params: list[object] = [json.dumps(query_embedding), k]
             if provider is not None:
                 sql += " AND provider = ?"
                 params.append(provider)
@@ -201,14 +198,30 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
                 sql += " AND format = ?"
                 params.append(format)
             sql += " ORDER BY distance"
+            return sql, params
+
+        def _search() -> list[dict]:
+            needed = offset + limit
+            # Over-fetch before collapsing same-chunk_id sub-splits, so collapsing never starves
+            # `offset + limit` distinct chunks below what a caller asked for. The overfetch factor
+            # is empirical, not a bound - if an oversized parent chunk has more winning sub-splits
+            # than the current window, keep doubling the KNN window (re-querying, since `k` must
+            # be re-issued as a new MATCH) until either enough distinct chunks are found or the KNN
+            # query itself returns fewer rows than requested (there is nothing left to fetch).
+            fetch_k = needed * _CHUNK_COLLAPSE_OVERFETCH_FACTOR
             with self._connect() as conn:
-                rows = conn.execute(sql, params).fetchall()
-            best_per_chunk: dict[tuple[str, str, str, str], sqlite3.Row] = {}
-            for row in rows:
-                key = (row["provider"], row["identifier"], row["format"], row["chunk_id"])
-                existing = best_per_chunk.get(key)
-                if existing is None or row["distance"] < existing["distance"]:
-                    best_per_chunk[key] = row
+                while True:
+                    sql, params = _build_query(fetch_k)
+                    rows = conn.execute(sql, params).fetchall()
+                    best_per_chunk: dict[tuple[str, str, str, str], sqlite3.Row] = {}
+                    for row in rows:
+                        key = (row["provider"], row["identifier"], row["format"], row["chunk_id"])
+                        existing = best_per_chunk.get(key)
+                        if existing is None or row["distance"] < existing["distance"]:
+                            best_per_chunk[key] = row
+                    if len(best_per_chunk) >= needed or len(rows) < fetch_k:
+                        break
+                    fetch_k *= 2
             ordered = sorted(best_per_chunk.values(), key=lambda r: r["distance"])[offset : offset + limit]
             return [
                 {

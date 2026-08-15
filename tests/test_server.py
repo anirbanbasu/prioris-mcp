@@ -2061,6 +2061,34 @@ class TestResearchSearchFetched:
         result = asyncio.run(scenario())
         assert result.structured_content["index_status"]["fts"] == "ready"
 
+    def test_index_status_reports_building_while_a_reembed_task_is_in_flight(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """A poll during a live (re-)embed must see "building", not the backend's persisted status.
+
+        See docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                gate = asyncio.Event()
+                mcp_obj._embedding_scheduler.schedule(("arxiv", "A", "pdf"), gate.wait)
+                try:
+                    return await client.call_tool(
+                        "research_search_fetched",
+                        arguments={"query": "quantum", "provider": "arxiv", "identifier": "A", "format": "pdf"},
+                    )
+                finally:
+                    gate.set()
+                    await mcp_obj._embedding_scheduler.wait_all()
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"] == {"fts": "not_built", "vector": "building"}
+
     def test_limit_defaults_from_env_var(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
@@ -2813,6 +2841,43 @@ class TestResearchNotesSearch:
         result = asyncio.run(scenario())
         assert len(result.structured_content["vector"]["matches"]) == 1
         assert result.structured_content["index_status"] == {"vector": "ready"}
+
+    def test_mode_vector_reports_building_while_a_reembed_task_is_in_flight(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """A poll during a live re-embed must see "building", not whatever the backend's last completed write left behind.
+
+        Here, that would still be "ready" from the initial embed - see
+        docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                create_result = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                note_id = create_result.structured_content["id"]  # ty: ignore[not-subscriptable]
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                gate = asyncio.Event()
+                mcp_obj._embedding_scheduler.schedule(("note", note_id), gate.wait)
+                try:
+                    return await client.call_tool(
+                        "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                    )
+                finally:
+                    gate.set()
+                    await mcp_obj._embedding_scheduler.wait_all()
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]["matches"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "building"}
 
     def test_mode_vector_reports_not_built_when_a_matched_note_has_no_status_row(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"

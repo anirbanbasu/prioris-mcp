@@ -13,6 +13,7 @@ from prioris_mcp.notes.search_index import NotesSearchIndex
 from prioris_mcp.storage.search_index import SearchIndex
 from prioris_mcp.vector.backend import DocumentVectorSearchBackend, IndexStatus, NoteVectorSearchBackend
 from prioris_mcp.vector.embedding import EmbeddingBackend
+from prioris_mcp.vector.scheduler import EmbeddingScheduler
 
 
 class SearchMechanism(ABC):
@@ -79,9 +80,15 @@ class VectorMechanism(SearchMechanism):
 
     name = "vector"
 
-    def __init__(self, vector_backend: DocumentVectorSearchBackend, embedding_backend: EmbeddingBackend) -> None:
+    def __init__(
+        self,
+        vector_backend: DocumentVectorSearchBackend,
+        embedding_backend: EmbeddingBackend,
+        embedding_scheduler: EmbeddingScheduler,
+    ) -> None:
         self._vector_backend = vector_backend
         self._embedding_backend = embedding_backend
+        self._embedding_scheduler = embedding_scheduler
 
     async def search(
         self,
@@ -102,6 +109,15 @@ class VectorMechanism(SearchMechanism):
         return await self._vector_backend.count(provider=provider, identifier=identifier, format=format)
 
     async def status(self, provider: str, identifier: str, format: str) -> IndexStatus:
+        """Backend's persisted status, overridden to `"building"` while a live re-embed task exists.
+
+        `is_building` is checked before the persisted status because a live task can be rewriting
+        this document's rows right now - the persisted status still reflects whatever the last
+        completed write left behind (e.g. still `"ready"` under the old model mid-reindex), and
+        `"building"` is the more actionable signal for a caller deciding whether to poll again.
+        """
+        if self._embedding_scheduler.is_building((provider, identifier, format)):
+            return "building"
         return await self._vector_backend.status(provider, identifier, format)
 
 

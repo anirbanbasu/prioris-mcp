@@ -157,6 +157,54 @@ class TestOffsetPaging:
         query = asyncio.run(backend._embedding_backend.embed("cats"))
         assert asyncio.run(backend.search(query, offset=10, limit=5)) == []
 
+    def test_search_offset_paginates_correctly_when_winning_sub_splits_exceed_the_overfetch_window(self, tmp_path):
+        """Regression test for a parent chunk with more winning sub-splits than the initial KNN window.
+
+        That used to starve `best_per_chunk`, making a later page report `[]` even though
+        `count()` said distinct chunks remained. See `sqlite_vec_backend.py`'s `search()` loop.
+        """
+
+        class _CoordEmbedding(EmbeddingBackend):
+            """Stub returning a fixed 2-D vector per exact input text, for deterministic KNN ranking."""
+
+            model_name = "coord-stub"
+            dimension = 2
+            max_chunk_chars = 2000
+
+            def __init__(self, vectors: dict[str, list[float]]) -> None:
+                self._vectors = vectors
+
+            async def embed(self, text: str) -> list[float]:
+                return self._vectors[text]
+
+        # 100 sub-splits of one oversized "winner" chunk, all identical text so they all embed to
+        # the same (closest-to-query) vector - more than `_CHUNK_COLLAPSE_OVERFETCH_FACTOR *
+        # needed` (4 * 10 = 40) for the first page below. 10 single-window "loser" chunks, each
+        # with its own distinct chunk_id and a monotonically farther-from-query vector.
+        vectors = {"a": [1.0, 0.0]}
+        for i in range(10):
+            vectors[str(i)] = [1 - (i + 1) * 0.05, (i + 1) * 0.05]
+        embedding = _CoordEmbedding(vectors)
+        backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding, max_chunk_chars=1)
+
+        entries = [{"chunk_id": "winner", "start": 0, "length": 100, "text": "a" * 100}]
+        entries += [{"chunk_id": f"loser{i}", "start": 0, "length": 1, "text": str(i)} for i in range(10)]
+        asyncio.run(backend.index_entries("arxiv", "doc", "pdf", entries))
+
+        assert asyncio.run(backend.count()) == 11
+
+        query = [1.0, 0.0]
+        page1 = asyncio.run(backend.search(query, offset=0, limit=10))
+        page2 = asyncio.run(backend.search(query, offset=10, limit=10))
+        assert len(page1) == 10
+        # Previously: the winner's 100 tied-distance sub-splits alone filled the fixed overfetch
+        # window, so only the winner chunk was ever discovered and this page came back empty even
+        # though an 11th distinct chunk (loser9) exists.
+        assert len(page2) == 1
+        assert {r["chunk_id"] for r in page1} | {r["chunk_id"] for r in page2} == {"winner"} | {
+            f"loser{i}" for i in range(10)
+        }
+
     def test_search_offset_still_respects_chunk_id_collapse_for_oversized_chunks(self, tmp_path):
         backend = _backend(tmp_path)
         long_text = "the transformer architecture uses self attention. " * 100

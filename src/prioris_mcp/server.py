@@ -70,6 +70,7 @@ from prioris_mcp.providers.localfile import LocalFileProvider, UploadSessionMana
 from prioris_mcp.rate_limit import ProviderRequestQueue
 from prioris_mcp.storage import FilesystemStorageBackend
 from prioris_mcp.storage.search_index import SqliteFts5SearchIndex
+from prioris_mcp.vector.backend import IndexStatus
 from prioris_mcp.vector.embedding import FastEmbedBackend
 from prioris_mcp.vector.mechanism import (
     FtsMechanism,
@@ -194,7 +195,9 @@ class PriorisMCP(MCPMixin):
         self._embedding_scheduler = EmbeddingScheduler()
         self._search_mechanisms: dict[str, SearchMechanism] = {
             "fts": FtsMechanism(self._search_index),
-            "vector": VectorMechanism(self._document_vector_backend, self._embedding_backend),
+            "vector": VectorMechanism(
+                self._document_vector_backend, self._embedding_backend, self._embedding_scheduler
+            ),
         }
         if EnvVars.PRIORIS_MCP_UNVERIFIED_HTTPS:
             logger.warning(
@@ -883,13 +886,15 @@ class PriorisMCP(MCPMixin):
 
         index_status: dict[str, str] | None = None
         if vector_result is not None:
-            statuses = [await self._note_vector_backend.status(match.note_id) for match in vector_result.matches]
+            statuses = [await self._note_index_status(match.note_id) for match in vector_result.matches]
             if not statuses:
                 # Zero matches alone doesn't distinguish "index genuinely empty/never built" from
                 # "index built, nothing matched this particular query/filters" - fall back to a
                 # corpus-wide existence check under the currently configured model.
                 has_any = await self._note_vector_backend.has_any_indexed(self._embedding_backend.model_name)
                 index_status = {"vector": "ready" if has_any else "not_built"}
+            elif "building" in statuses:
+                index_status = {"vector": "building"}
             elif "not_built" in statuses:
                 index_status = {"vector": "not_built"}
             elif "stale" in statuses:
@@ -898,6 +903,17 @@ class PriorisMCP(MCPMixin):
                 index_status = {"vector": "ready"}
 
         return NotesSearchResult(fts=fts_result, vector=vector_result, index_status=index_status)
+
+    async def _note_index_status(self, note_id: str) -> IndexStatus:
+        """This note's persisted vector status, overridden to `"building"` while a live re-embed task exists for it.
+
+        Mirrors `VectorMechanism.status`'s override for documents, kept inline here since notes'
+        `index_status` is aggregated over matched notes rather than polled per-note through a
+        `SearchMechanism`.
+        """
+        if self._embedding_scheduler.is_building(("note", note_id)):
+            return "building"
+        return await self._note_vector_backend.status(note_id)
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []
