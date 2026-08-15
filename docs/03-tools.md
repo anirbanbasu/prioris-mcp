@@ -86,6 +86,10 @@ Deliberately narrower than the arXiv/Europe PMC tool sets — no search, listing
 
 Grouping-level, like `research_resolve_identifier` — not split per provider, since none of the three tools validates anything provider-specific (see [Architecture → `list_fetched`/`delete_fetched`](requirement-specification/01-architecture.md#list_fetched-delete_fetched-grouping-level)). See [Vector search](requirement-specification/search/02-vector-search.md) for the full semantic-search design and [Interface specification → `research_search_fetched`](requirement-specification/06-interface-specification.md#research_search_fetched) for exact wire-level fields.
 
+## Vector index reconciliation
+
+Corpus-wide vector reindexing after an embedding-model change (`PRIORIS_MCP_EMBEDDING_MODEL`) runs automatically at server startup — there is no tool to trigger it — see [Vector search → Reconciliation runs automatically at server startup](requirement-specification/search/02-vector-search.md#reconciliation-runs-automatically-at-server-startup) and [ADR-00030](requirement-specification/ADR/00030-vector-index-reconciliation.md). Its live progress is readable via the `research://vector-index/rebuild-status` resource: `{"documents": {"total": <int>, "remaining": <int>}, "notes": {"total": <int>, "remaining": <int>}}`, where `total`/`remaining` count only the documents/notes the most recent reconciliation run decided needed rebuilding (a corpus already fully `ready` under the configured model reports all zeros). This state is process-local and in-memory, not a durable job log — it resets to a fresh count on every server restart, the same "derived transiently, self-healing on restart" property `index_status`'s own `building` value already has (see [Vector search → Index status is per-document/note](requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model)).
+
 ## Notes tools
 
 | Tool | Description | Key inputs | Notes |
