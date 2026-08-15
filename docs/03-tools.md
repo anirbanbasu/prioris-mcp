@@ -16,7 +16,7 @@ A tool failure surfaces as an MCP `ToolError` — a plain error response carryin
 | `format_unavailable` | The identifier is valid, but doesn't offer the requested format. |
 | `unsupported_provider` | A DOI resolved to a domain outside the v1 provider allowlist (arXiv, Europe PMC). |
 | `invalid_request` | Caller-supplied arguments fail validation before any outbound call or storage read (e.g. an arXiv search exceeding arXiv's own result-count bounds, an unsupported `format` passed to `research_resolve_identifier`, `page` passed to `research_arxiv_parse_full_text` with `format="html"`, `identifier` passed to `research_search_fetched` without `provider`, or malformed FTS5 query syntax in `research_search_fetched`/`research_notes_search`). Also covers `research_notes_search`'s other structured-filter validation — `canonical_identifier` without `provider`, `author_filter="named"` without `author_name` (or vice versa), and an unparseable `date_from`/`date_to`. |
-| `rate_limited` | The provider's outbound queue exhausted its backoff budget after repeated `429`s from the source. |
+| `rate_limited` | The provider's outbound queue exhausted its backoff budget after repeated `429`s from the source. Discovery has no such queue — a `429` from OpenAlex surfaces immediately instead of being retried. |
 | `provider_unavailable` | A timeout, connection failure, or `5xx` from the source — surfaced immediately, never retried. |
 | `file_too_large` | `research_localfile_fetch_full_text`'s decoded content exceeds `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES`. Also covers the chunked-upload path: a single chunk over `PRIORIS_MCP_LOCAL_FILE_UPLOAD_MAX_CHUNK_BYTES` in `research_localfile_upload_chunk`, or a reassembled total over `PRIORIS_MCP_LOCAL_FILE_MAX_SIZE_BYTES` in `research_localfile_upload_chunk`/`research_localfile_finalize_upload`. |
 
@@ -44,6 +44,16 @@ All arXiv tools share a single outbound request queue, serialised to arXiv's doc
 There is no `research_europepmc_list_top_n` — Europe PMC has no single classification field equivalent to arXiv's subject categories.
 
 Europe PMC publishes no numeric rate limit; the provider self-imposes the same one-request-per-3-seconds policy as arXiv, through its own separate queue.
+
+## Discovery tool
+
+**v3** — see [Discovery](requirement-specification/02-discovery.md). Not a per-provider tool: `research_discovery` sits in front of OpenAlex's `/works` `search.semantic` parameter, ranking external, not-yet-fetched candidates by embedding similarity rather than keyword overlap.
+
+| Tool | Description | Key inputs | Notes |
+|---|---|---|---|
+| `research_discovery` | Discover external research candidates not already in the local corpus, ranked by OpenAlex's embedding-based `search.semantic`. | `query` (free text, ≤2000 chars), `max_results` (1-50, default `PRIORIS_MCP_DISCOVERY_MAX_RESULTS`), `page` (default 1, 1-indexed), `from_year`/`to_year` (optional, inclusive `publication_year` bounds), `open_access_only` (default `false`) | `total` is capped at 50 — `search.semantic`'s own hard per-query ceiling, not a PriorisMCP-imposed limit. `page`/`per_page`/`total`/`has_more` reflect OpenAlex's own pre-exclusion counts; a returned page can carry fewer hits than requested once candidates already present in local storage are filtered out of the response. Each hit includes a `fetch_route` (`known_provider`\|`oa_link`\|`manual_upload`) describing how to actually retrieve full text for it — see [Fetch ladder](requirement-specification/02-discovery.md#fetch-ladder-for-results-that-land-outside-arxiveurope-pmc). |
+
+Authenticated via `PRIORIS_MCP_OPENALEX_API_KEY` (optional — unauthenticated requests still work, just without the higher rate limits a key grants), sent as OpenAlex's own `api_key` query parameter, not the deprecated `mailto` polite-pool parameter. See `research://openalex/work-types` in [Resources](04-resources.md) for the reference vocabulary behind a hit's own work-type metadata — it isn't a filter `research_discovery` itself accepts.
 
 ## Identifier resolution
 
@@ -89,7 +99,7 @@ Notes are persisted separately from fetched-document storage — one user-author
 
 ## Caching and rate limiting
 
-`research_*_search`, `research_*_list_top_n`, and `research_*_fetch_metadata` responses are covered by the server's response-caching middleware (`PRIORIS_MCP_RESPONSE_CACHE_TTL`, see [Configuration](02-configuration.md)). `fetch_full_text` and `parse_full_text` are backed by persistent storage instead (see [Resources](04-resources.md)) — a repeat call returns the already-persisted content (`served_from_storage: true`) without a second network fetch or parse.
+`research_*_search`, `research_*_list_top_n`, `research_*_fetch_metadata`, and `research_discovery` responses are covered by the server's response-caching middleware (`PRIORIS_MCP_RESPONSE_CACHE_TTL`, see [Configuration](02-configuration.md)). `fetch_full_text` and `parse_full_text` are backed by persistent storage instead (see [Resources](04-resources.md)) — a repeat call returns the already-persisted content (`served_from_storage: true`) without a second network fetch or parse.
 
 Response shapes are still evolving alongside the SRS — prefer the [Interface specification](requirement-specification/06-interface-specification.md) as the source of truth for exact wire-level fields.
 
