@@ -1621,7 +1621,9 @@ class TestResearchSearchFetched:
                 return await client.call_tool("research_search_fetched", arguments={"query": "quantum"})
 
         result = asyncio.run(scenario())
-        assert result.structured_content["fts"] == []
+        assert result.structured_content["fts"]["matches"] == []
+        assert result.structured_content["fts"]["total"] == 0
+        assert result.structured_content["fts"]["has_more"] is False
 
     def test_identifier_without_provider_raises_invalid_request(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -1654,7 +1656,7 @@ class TestResearchSearchFetched:
                 return caller_facing_id, search_result
 
         caller_facing_id, search_result = asyncio.run(scenario())
-        matches = search_result.structured_content["fts"]
+        matches = search_result.structured_content["fts"]["matches"]
         assert len(matches) >= 1
         assert matches[0]["provider"] == "localfile"
         assert matches[0]["identifier"] == caller_facing_id
@@ -1688,7 +1690,7 @@ class TestResearchSearchFetched:
 
         result = asyncio.run(scenario())
         assert result.structured_content["fts"] is None
-        assert len(result.structured_content["vector"]) == 1
+        assert len(result.structured_content["vector"]["matches"]) == 1
 
     def test_mode_hybrid_returns_both_mechanisms(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
@@ -1703,8 +1705,8 @@ class TestResearchSearchFetched:
                 )
 
         result = asyncio.run(scenario())
-        assert result.structured_content["fts"] == []
-        assert result.structured_content["vector"] == []
+        assert result.structured_content["fts"]["matches"] == []
+        assert result.structured_content["vector"]["matches"] == []
 
     def test_unrecognised_mode_raises_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
@@ -1806,7 +1808,7 @@ class TestResearchSearchFetched:
                 )
 
         result = asyncio.run(scenario())
-        assert len(result.structured_content["vector"]) == 1
+        assert len(result.structured_content["vector"]["matches"]) == 1
 
     def test_limit_param_overrides_the_default(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
@@ -1832,7 +1834,127 @@ class TestResearchSearchFetched:
                 )
 
         result = asyncio.run(scenario())
-        assert len(result.structured_content["vector"]) == 2
+        assert len(result.structured_content["vector"]["matches"]) == 2
+
+    def test_offset_pages_through_fts_results_without_repeats(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+
+                page1 = await client.call_tool(
+                    "research_search_fetched", arguments={"query": "Hello", "limit": 1, "offset": 0}
+                )
+                page2 = await client.call_tool(
+                    "research_search_fetched", arguments={"query": "Hello", "limit": 1, "offset": 1}
+                )
+                return page1, page2
+
+        page1, page2 = asyncio.run(scenario())
+        matches1 = page1.structured_content["fts"]["matches"]
+        matches2 = page2.structured_content["fts"]["matches"]
+        assert len(matches1) == 1
+        if matches2:
+            assert matches1[0]["offset"] != matches2[0]["offset"] or matches1[0]["snippet"] != matches2[0]["snippet"]
+        assert page1.structured_content["fts"]["offset"] == 0
+        assert page2.structured_content["fts"]["offset"] == 1
+
+    def test_offset_pages_through_vector_results_without_repeats(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv",
+                    "A",
+                    "pdf",
+                    [
+                        {"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention mechanism"},
+                        {"chunk_id": "c2", "start": 5, "length": 5, "text": "attention mechanism transformer"},
+                    ],
+                )
+                page1 = await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 1, "offset": 0},
+                )
+                page2 = await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 1, "offset": 1},
+                )
+                return page1, page2
+
+        page1, page2 = asyncio.run(scenario())
+        matches1 = page1.structured_content["vector"]["matches"]
+        matches2 = page2.structured_content["vector"]["matches"]
+        assert len(matches1) == 1
+        assert len(matches2) == 1
+        assert matches1[0]["chunk_id"] != matches2[0]["chunk_id"]
+        assert page1.structured_content["vector"]["total"] == 2
+        assert page2.structured_content["vector"]["total"] == 2
+
+    def test_total_and_has_more_boundary_cases(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv",
+                    "A",
+                    "pdf",
+                    [
+                        {"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention mechanism"},
+                        {"chunk_id": "c2", "start": 5, "length": 5, "text": "attention mechanism transformer"},
+                    ],
+                )
+                not_exhausted = await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 1, "offset": 0},
+                )
+                exhausted = await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 1, "offset": 1},
+                )
+                return not_exhausted, exhausted
+
+        not_exhausted, exhausted = asyncio.run(scenario())
+        assert not_exhausted.structured_content["vector"]["total"] == 2
+        assert not_exhausted.structured_content["vector"]["has_more"] is True
+        assert exhausted.structured_content["vector"]["total"] == 2
+        assert exhausted.structured_content["vector"]["has_more"] is False
+
+    def test_negative_offset_raises_invalid_request(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_search_fetched", arguments={"query": "quantum", "offset": -1})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_non_positive_limit_raises_invalid_request(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_search_fetched", arguments={"query": "quantum", "limit": 0})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
 
 
 class TestResearchNotesCreate:

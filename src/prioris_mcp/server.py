@@ -37,6 +37,7 @@ from prioris_mcp.models.common import (
     FullTextFetchResult,
     ListFetchedResult,
     MarkdownPage,
+    PagedSearchMatches,
     ParsedFullText,
     ResolvedIdentifierResult,
     SearchFetchedResult,
@@ -45,7 +46,7 @@ from prioris_mcp.models.common import (
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, NotesSearchResult, PagedNotes
-from prioris_mcp.models.vector import NoteVectorSearchMatch, VectorSearchMatch
+from prioris_mcp.models.vector import NoteVectorSearchMatch, PagedVectorSearchMatches, VectorSearchMatch
 from prioris_mcp.notes.backend import NotesBackend
 from prioris_mcp.notes.search_index import NotesSearchIndex, SqliteFts5NotesSearchIndex
 from prioris_mcp.notes.sqlite_backend import SqliteNotesBackend
@@ -511,6 +512,7 @@ class PriorisMCP(MCPMixin):
                 ),
             ),
         ] = "fts",
+        offset: Annotated[int, Field(default=0, description="Number of matches to skip, per mechanism")] = 0,
         limit: Annotated[
             int | None,
             Field(
@@ -522,6 +524,10 @@ class PriorisMCP(MCPMixin):
         """Search previously-persisted chunks; never fetches or parses. See mode for mechanism choice."""
         if identifier is not None and provider is None:
             raise InvalidRequestError("identifier requires provider")
+        if offset < 0:
+            raise InvalidRequestError(f"offset must be >= 0, got {offset}")
+        if limit is not None and limit <= 0:
+            raise InvalidRequestError(f"limit must be > 0, got {limit}")
         if mode == "hybrid":
             selected = list(self._search_mechanisms.values())
         else:
@@ -531,26 +537,51 @@ class PriorisMCP(MCPMixin):
             selected = [mechanism]
 
         effective_limit = limit if limit is not None else EnvVars.PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT
-        results: dict[str, list] = {}
+        results: dict[str, tuple[list, int]] = {}
         for mechanism in selected:
             try:
                 raw = await mechanism.search(
-                    query, provider=provider, identifier=identifier, format=format, limit=effective_limit
+                    query,
+                    provider=provider,
+                    identifier=identifier,
+                    format=format,
+                    offset=offset,
+                    limit=effective_limit,
                 )
+                total = await mechanism.count(query, provider=provider, identifier=identifier, format=format)
             except sqlite3.OperationalError as exc:
                 raise InvalidRequestError(f"invalid search query: {exc}") from exc
-            results[mechanism.name] = raw
+            results[mechanism.name] = (raw, total)
 
         index_status: dict[str, str] = {}
         if identifier is not None and provider is not None and format is not None:
             for mechanism in self._search_mechanisms.values():
                 index_status[mechanism.name] = await mechanism.status(provider, identifier, format)
 
-        return SearchFetchedResult(
-            fts=[SearchMatch(**m) for m in results["fts"]] if "fts" in results else None,
-            vector=[VectorSearchMatch(**m) for m in results["vector"]] if "vector" in results else None,
-            index_status=index_status,
-        )
+        fts_paged = None
+        if "fts" in results:
+            raw, total = results["fts"]
+            matches = [SearchMatch(**m) for m in raw]
+            fts_paged = PagedSearchMatches(
+                matches=matches,
+                offset=offset,
+                limit=effective_limit,
+                total=total,
+                has_more=offset + len(matches) < total,
+            )
+        vector_paged = None
+        if "vector" in results:
+            raw, total = results["vector"]
+            matches = [VectorSearchMatch(**m) for m in raw]
+            vector_paged = PagedVectorSearchMatches(
+                matches=matches,
+                offset=offset,
+                limit=effective_limit,
+                total=total,
+                has_more=offset + len(matches) < total,
+            )
+
+        return SearchFetchedResult(fts=fts_paged, vector=vector_paged, index_status=index_status)
 
     async def research_notes_create(
         self,
