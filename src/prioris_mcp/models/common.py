@@ -205,3 +205,30 @@ class SearchFetchedResult(BaseModel):
     fts: Annotated[PagedSearchMatches | None, Field(default=None)] = None
     vector: Annotated[PagedVectorSearchMatches | None, Field(default=None)] = None
     index_status: Annotated[dict[str, IndexStatus], Field(default_factory=dict)]
+
+
+class VectorRebuildMechanismStatus(BaseModel):
+    """One mechanism's (documents or notes) corpus-wide rebuild progress.
+
+    See docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
+    `total`/`remaining` count only items reconciliation decided needed rebuilding this run, not
+    the whole corpus - a corpus already fully ready reports total=0, remaining=0.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: Annotated[int, Field(..., strict=True, ge=0)]
+    remaining: Annotated[int, Field(..., strict=True, ge=0)]
+
+
+class VectorRebuildStatus(BaseModel):
+    """Output of the `research://vector-index/rebuild-status` resource.
+
+    Process-local, in-memory, not persisted - answers "is the rebuild that started when this
+    process started still going," not a durable job log.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    documents: Annotated[VectorRebuildMechanismStatus, Field(...)]
+    notes: Annotated[VectorRebuildMechanismStatus, Field(...)]
