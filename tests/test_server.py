@@ -49,6 +49,36 @@ class _RenamedStub(EmbeddingBackend):
         return await self._real.embed(text)
 
 
+class _DifferentDimensionStub(EmbeddingBackend):
+    """A differently-named, differently-dimensioned EmbeddingBackend - for simulating a genuine dimension-changing model swap.
+
+    Deliberately does not wrap a real backend (unlike `_RenamedStub`, which is for the
+    same-dimension rename case): `embed()` only needs to produce a fixed-length vector matching
+    `self._dim`, mirroring test_vector_sqlite_vec_document_backend.py's `_StubEmbedding` pattern
+    used for the same purpose - avoids spinning up two real fastembed models just to exercise a
+    dimension change.
+    """
+
+    def __init__(self, model_name: str, dimension: int) -> None:
+        self._model_name = model_name
+        self._dim = dimension
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    @property
+    def max_chunk_chars(self) -> int:
+        return 2000
+
+    async def embed(self, text: str) -> list[float]:
+        return [0.1] * self._dim
+
+
 class TestMCPServer:
     """Test suite for the MCP server features."""
 
@@ -3296,6 +3326,103 @@ class TestVectorReconciliation:
         assert before_remaining == (1, 1)
         assert after_remaining == (0, 0)
 
+    def test_reconcile_vector_index_isolates_document_and_note_failures(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """A failure enumerating/scheduling documents must not skip notes, and must not propagate.
+
+        Regression test for the final whole-plan review's Important #1: before the fix, a raise
+        from `_reconcile_documents` (e.g. a corrupt catalogue row) skipped `_reconcile_notes`
+        entirely and re-raised out of `reconcile_vector_index()` itself.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        calls: list[str] = []
+
+        async def _failing_reconcile_documents():
+            calls.append("documents")
+            raise RuntimeError("boom - corrupt catalogue row")
+
+        async def _fake_reconcile_notes():
+            calls.append("notes")
+
+        monkeypatch.setattr(mcp_obj, "_reconcile_documents", _failing_reconcile_documents)
+        monkeypatch.setattr(mcp_obj, "_reconcile_notes", _fake_reconcile_notes)
+
+        asyncio.run(mcp_obj.reconcile_vector_index())  # must not raise
+
+        assert calls == ["documents", "notes"]  # notes still ran despite documents failing
+
+    def test_reconcile_vector_index_a_notes_failure_does_not_raise(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Mirror of the documents-failure test, isolating the notes except-branch specifically."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        calls: list[str] = []
+
+        async def _fake_reconcile_documents():
+            calls.append("documents")
+
+        async def _failing_reconcile_notes():
+            calls.append("notes")
+            raise RuntimeError("boom - corrupt note record")
+
+        monkeypatch.setattr(mcp_obj, "_reconcile_documents", _fake_reconcile_documents)
+        monkeypatch.setattr(mcp_obj, "_reconcile_notes", _failing_reconcile_notes)
+
+        asyncio.run(mcp_obj.reconcile_vector_index())  # must not raise
+
+        assert calls == ["documents", "notes"]
+
+    def test_lifespan_shutdown_does_not_crash_when_reconciliation_already_failed(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Reproduces the review's exact crash scenario at shutdown.
+
+        If the background reconciliation task were to complete with a real (non-CancelledError)
+        exception before shutdown runs, `task.cancel()` on an already-done task is a no-op and a
+        naive `await task` would re-raise that original exception straight through
+        `contextlib.suppress(asyncio.CancelledError)`, which doesn't catch it, crashing server
+        shutdown. `reconcile_vector_index()`'s own documents/notes isolation must prevent this by
+        never letting a sub-call's exception reach the task at all - proven here by monkeypatching
+        a sub-call (not `reconcile_vector_index` itself) to raise, so the real, fixed top-level
+        method runs.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def _fake_force_reconnect():
+            return None
+
+        async def _failing_reconcile_documents():
+            raise RuntimeError("boom - corrupt catalogue row")
+
+        async def _fake_reconcile_notes():
+            return None
+
+        monkeypatch.setattr(mcp_obj, "_force_vector_reconnect", _fake_force_reconnect)
+        monkeypatch.setattr(mcp_obj, "_reconcile_documents", _failing_reconcile_documents)
+        monkeypatch.setattr(mcp_obj, "_reconcile_notes", _fake_reconcile_notes)
+
+        lifespan = _vector_reconciliation_lifespan(mcp_obj)
+
+        async def scenario():
+            async with lifespan(None):
+                # Wait for the background task to actually finish (with the sub-call's exception
+                # already isolated/logged) *before* the `async with` block exits - reproduces the
+                # review's exact "already-done, non-cancelled" scenario at shutdown time, not a
+                # still-pending task that shutdown's own cancel() would legitimately cancel.
+                task = cast("asyncio.Task", mcp_obj._reconciliation_task)
+                for _ in range(50):
+                    if task.done():
+                        break
+                    await asyncio.sleep(0.05)
+                assert task.done()
+                assert task.exception() is None  # isolated internally, never propagated to the task
+
+        asyncio.run(asyncio.wait_for(scenario(), timeout=5))  # must not raise
+
     def test_rebuild_status_resource_reports_zero_on_a_fresh_corpus(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
     ):
@@ -3445,7 +3572,11 @@ class TestVectorReconciliation:
 
         Original bug: index one document, reopen the same database at a different embedding
         dimension, call search() immediately - count() went from 1 to 0, search() returned [],
-        with no path back. This must now self-heal automatically via app()'s lifespan.
+        with no path back. This must now self-heal automatically via app()'s lifespan: the
+        corpus-wide drop still happens (deliberately, during startup's synchronous force-reconnect
+        phase - count genuinely goes to 0), but the background reconciliation then re-embeds it
+        back to ready under the real configured model, unlike the original bug where there was no
+        path back at all.
         """
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
@@ -3458,25 +3589,48 @@ class TestVectorReconciliation:
         asyncio.run(
             manifest.replace_chunk_rows("pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1")
         )
+        # Index directly against the raw db file under a stub with both a different model name AND
+        # a different (fake, fixed) dimension from the real configured model used by app() below -
+        # genuinely exercises the dimension-changing half of the original repro, not just a
+        # same-dimension name change (already covered by the sibling renamed-model test).
+        old_backend = SqliteVecDocumentBackend(
+            tmp_path / "vectors" / "vectors.sqlite3", _DifferentDimensionStub("old-model", 4)
+        )
         asyncio.run(
-            mcp_obj_a._document_vector_backend.index_entries(
-                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "Body text."}]
+            old_backend.index_entries(
+                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "old text"}]
             )
         )
-        assert asyncio.run(mcp_obj_a._document_vector_backend.count()) == 1
+        assert asyncio.run(old_backend.count()) == 1
 
         mcp_app = app()
 
         async def run_and_check():
             async with Client(transport=mcp_app, timeout=60):
-                pass  # lifespan's synchronous force-reconnect phase has fully run by this point
-            check_backend = SqliteVecDocumentBackend(
-                tmp_path / "vectors" / "vectors.sqlite3", FastEmbedBackend("BAAI/bge-small-en-v1.5")
-            )
-            return await check_backend.count()
+                # lifespan's synchronous force-reconnect phase has fully run by this point - the
+                # dimension mismatch is deliberately dropped here, not left to blow up on the next
+                # ordinary request the way the original bug did.
+                check_backend = SqliteVecDocumentBackend(
+                    tmp_path / "vectors" / "vectors.sqlite3", FastEmbedBackend("BAAI/bge-small-en-v1.5")
+                )
+                count_immediately_after_reconnect = await check_backend.count()
 
-        count_after_startup = asyncio.run(run_and_check())
-        assert count_after_startup == 1  # not silently emptied by server startup
+                # Background reconciliation re-embeds it under the real model - poll status until
+                # it settles rather than assuming it's already done the instant the force-reconnect
+                # phase finished.
+                status = None
+                for _ in range(50):
+                    status = await check_backend.status("arxiv", "2106.09685v2", "pdf")
+                    if status == "ready":
+                        break
+                    await asyncio.sleep(0.05)
+                final_count = await check_backend.count()
+            return count_immediately_after_reconnect, status, final_count
+
+        count_immediately_after_reconnect, final_status, final_count = asyncio.run(run_and_check())
+        assert count_immediately_after_reconnect == 0  # deliberately dropped by the dimension mismatch
+        assert final_status == "ready"  # self-healed by background reconciliation
+        assert final_count == 1
 
     def test_full_server_startup_reconciles_a_same_dimension_renamed_model(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"

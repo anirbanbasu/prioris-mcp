@@ -895,7 +895,7 @@ class PriorisMCP(MCPMixin):
                 matches=matches, offset=offset, limit=limit, total=total, has_more=offset + len(matches) < total
             )
 
-        index_status: dict[str, str] | None = None
+        index_status: dict[str, IndexStatus] | None = None
         if vector_result is not None:
             statuses = [await self._note_index_status(match.note_id) for match in vector_result.matches]
             if not statuses:
@@ -947,9 +947,19 @@ class PriorisMCP(MCPMixin):
         uses, so a bulk-scheduled item is visible as "building" the same way a freshly-fetched
         document already is - see
         docs/superpowers/specs/2026-08-15-vector-index-reconciliation-design.md.
+
+        Document and note reconciliation are isolated from each other - a failure enumerating or
+        scheduling one mechanism's corpus is logged and does not prevent the other mechanism's
+        reconciliation from running, and never propagates out of this background task.
         """
-        await self._reconcile_documents()
-        await self._reconcile_notes()
+        try:
+            await self._reconcile_documents()
+        except Exception:
+            logger.exception("Document vector-index reconciliation failed")
+        try:
+            await self._reconcile_notes()
+        except Exception:
+            logger.exception("Note vector-index reconciliation failed")
 
     async def _reconcile_documents(self) -> None:
         model_name = self._embedding_backend.model_name
