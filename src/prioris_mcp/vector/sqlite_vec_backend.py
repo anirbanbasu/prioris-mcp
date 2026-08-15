@@ -80,9 +80,9 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
             # wrap in try/except to treat duplicate column as benign (another connection already added it).
             try:
                 conn.execute("ALTER TABLE document_vectors_meta ADD COLUMN model_name TEXT")
-            except sqlite3.OperationalError as exc:  # pragma: no cover
-                if "duplicate column name" not in str(exc):  # pragma: no cover
-                    raise  # pragma: no cover
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc):
+                    raise
         meta_row = conn.execute("SELECT model_name FROM document_vectors_meta WHERE id = 1").fetchone()
         if meta_row is not None and meta_row["model_name"] != self._embedding_backend.model_name:
             conn.execute("DROP TABLE IF EXISTS document_vectors")
@@ -344,9 +344,9 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
             # wrap in try/except to treat duplicate column as benign (another connection already added it).
             try:
                 conn.execute("ALTER TABLE note_vectors_meta ADD COLUMN model_name TEXT")
-            except sqlite3.OperationalError as exc:  # pragma: no cover
-                if "duplicate column name" not in str(exc):  # pragma: no cover
-                    raise  # pragma: no cover
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc):
+                    raise
         meta_row = conn.execute("SELECT model_name FROM note_vectors_meta WHERE id = 1").fetchone()
         if meta_row is not None and meta_row["model_name"] != self._embedding_backend.model_name:
             conn.execute("DROP TABLE IF EXISTS note_vectors")

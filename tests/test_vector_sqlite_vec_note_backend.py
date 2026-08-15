@@ -1,4 +1,7 @@
 import asyncio
+import sqlite3
+
+import pytest
 
 from prioris_mcp.vector.embedding import EmbeddingBackend, FastEmbedBackend
 from prioris_mcp.vector.sqlite_vec_backend import SqliteVecNoteBackend
@@ -322,3 +325,45 @@ class TestConcurrentConnectionRace:
 
         # All should succeed and return empty set (no notes indexed yet on fresh db)
         assert all(r == set() for r in results)
+
+    def test_reraises_non_duplicate_column_errors(self, tmp_path, monkeypatch):
+        """Ensure non-duplicate-column OperationalErrors are re-raised, not swallowed."""
+        from prioris_mcp.vector import sqlite_vec_backend as vec_backend
+
+        backend = _backend(tmp_path)
+        original_connect_with_vec = vec_backend._connect_with_vec
+
+        class ConnectionWrapper:
+            """Wrapper that intercepts execute calls."""
+
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, *args, **kwargs):
+                # Raise a synthetic non-duplicate error on ALTER TABLE for model_name column
+                if "ALTER TABLE note_vectors_meta ADD COLUMN model_name" in str(sql):
+                    raise sqlite3.OperationalError("disk I/O error")
+                if args:
+                    return self._conn.execute(sql, *args, **kwargs)
+                else:
+                    return self._conn.execute(sql)
+
+            def __enter__(self):
+                self._conn.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self._conn.__exit__(*args)
+
+            def __getattr__(self, name):
+                return getattr(self._conn, name)
+
+        def mocked_connect_with_vec(path):
+            conn = original_connect_with_vec(path)
+            return ConnectionWrapper(conn)
+
+        monkeypatch.setattr(vec_backend, "_connect_with_vec", mocked_connect_with_vec)
+
+        # Attempting to use the backend should re-raise the non-duplicate error
+        with pytest.raises(sqlite3.OperationalError, match="disk I/O error"):
+            asyncio.run(backend.indexed_under(backend._embedding_backend.model_name))
