@@ -1,9 +1,12 @@
 import asyncio
+import contextlib
 import logging
 import re
 import sqlite3
 import sys
 import uuid
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib.metadata import version
 from typing import Annotated, ClassVar, Literal, cast
 
@@ -1166,15 +1169,45 @@ class PriorisMCP(MCPMixin):
         ).model_dump_json()
 
 
+def _vector_reconciliation_lifespan(
+    mcp_obj: "PriorisMCP",
+) -> Callable[[FastMCP], AbstractAsyncContextManager[None]]:
+    """Build the lifespan callable that runs vector-index reconciliation before serving requests.
+
+    Split out of app() so it's directly testable without going through FastMCP's own lifespan
+    machinery, since app()/main() stay '# pragma: no cover' by existing convention. Only
+    mcp_obj._force_vector_reconnect() blocks this context manager's __aenter__; corpus
+    enumeration/scheduling (reconcile_vector_index()) runs as a background task so server startup
+    never waits on corpus size - see
+    docs/superpowers/specs/2026-08-15-vector-index-reconciliation-design.md.
+    """
+
+    @asynccontextmanager
+    async def _lifespan(server: FastMCP) -> AsyncIterator[None]:
+        await mcp_obj._force_vector_reconnect()
+        mcp_obj._reconciliation_task = asyncio.create_task(mcp_obj.reconcile_vector_index())
+        try:
+            yield
+        finally:
+            task = mcp_obj._reconciliation_task
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+    return _lifespan
+
+
 def app() -> FastMCP:  # pragma: no cover
     """Create and configure the FastMCP application instance."""
+    mcp_obj = PriorisMCP()
     app = FastMCP(
         name=PACKAGE_NAME,
         version=package_version,
         instructions="A simple MCP server for testing purposes.",
         on_duplicate="error",
+        lifespan=_vector_reconciliation_lifespan(mcp_obj),
     )
-    mcp_obj = PriorisMCP()
     app_with_features = mcp_obj.register_features(app)
     app_with_features.add_middleware(StripUnknownArgumentsMiddleware())
     # NotesCacheBypassMiddleware runs before the Encode/Decode sandwich below and fully bypasses

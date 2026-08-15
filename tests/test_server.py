@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import ssl
@@ -18,7 +19,7 @@ from prioris_mcp.errors import InvalidRequestError
 from prioris_mcp.models.arxiv import ArxivCategoriesResult, ArxivCategory
 from prioris_mcp.models.common import ArxivResolvedIdentifierResult, MarkdownPage
 from prioris_mcp.models.discovery import OpenAlexWorkType, OpenAlexWorkTypesResult
-from prioris_mcp.server import PriorisMCP
+from prioris_mcp.server import PriorisMCP, _vector_reconciliation_lifespan, app
 from prioris_mcp.vector.embedding import EmbeddingBackend
 from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
@@ -3336,3 +3337,103 @@ class TestVectorReconciliation:
         mid_payload, done_payload = asyncio.run(scenario())
         assert mid_payload["documents"] == {"total": 1, "remaining": 1}
         assert done_payload["documents"] == {"total": 1, "remaining": 0}
+
+    def test_lifespan_force_reconnects_before_yielding(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        calls: list[str] = []
+
+        async def _fake_force_reconnect():
+            calls.append("force_reconnect")
+
+        async def _fake_reconcile():
+            calls.append("reconcile")
+
+        monkeypatch.setattr(mcp_obj, "_force_vector_reconnect", _fake_force_reconnect)
+        monkeypatch.setattr(mcp_obj, "reconcile_vector_index", _fake_reconcile)
+
+        lifespan = _vector_reconciliation_lifespan(mcp_obj)
+
+        async def scenario():
+            async with lifespan(None):
+                pass
+            # lifespan's own __aexit__ already cancelled+awaited (and suppressed) this task while
+            # exiting the `async with` block above, since the fake reconcile never got a chance to
+            # run before shutdown - re-awaiting an already-cancelled task always re-raises
+            # CancelledError, so tolerate it here too; this is cleanup, not the assertion.
+            with contextlib.suppress(asyncio.CancelledError):
+                await cast("asyncio.Task", mcp_obj._reconciliation_task)
+
+        asyncio.run(scenario())
+        assert calls[0] == "force_reconnect"
+
+    def test_lifespan_does_not_block_on_reconciliation_completing(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """The core non-blocking guarantee: __aenter__ must return before reconcile_vector_index finishes."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        never_set = asyncio.Event()
+
+        async def _fake_force_reconnect():
+            return None
+
+        async def _fake_reconcile():
+            await never_set.wait()  # would hang forever if awaited synchronously by the lifespan
+
+        monkeypatch.setattr(mcp_obj, "_force_vector_reconnect", _fake_force_reconnect)
+        monkeypatch.setattr(mcp_obj, "reconcile_vector_index", _fake_reconcile)
+
+        lifespan = _vector_reconciliation_lifespan(mcp_obj)
+
+        async def scenario():
+            async with lifespan(None):
+                still_pending = not cast("asyncio.Task", mcp_obj._reconciliation_task).done()
+            # By the time `async with` exits, lifespan's own __aexit__ has already
+            # cancelled+awaited (and suppressed) this task, so setting the event here is too late
+            # to let it finish normally - re-awaiting an already-cancelled task always re-raises
+            # CancelledError, so tolerate it; the guarantee this test proves is `still_pending`
+            # above, captured before shutdown ran.
+            never_set.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cast("asyncio.Task", mcp_obj._reconciliation_task)
+            return still_pending
+
+        still_pending = asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+        assert still_pending is True
+
+    def test_lifespan_cancels_the_background_task_on_shutdown(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        never_set = asyncio.Event()
+
+        async def _fake_force_reconnect():
+            return None
+
+        async def _fake_reconcile():
+            await never_set.wait()
+
+        monkeypatch.setattr(mcp_obj, "_force_vector_reconnect", _fake_force_reconnect)
+        monkeypatch.setattr(mcp_obj, "reconcile_vector_index", _fake_reconcile)
+
+        lifespan = _vector_reconciliation_lifespan(mcp_obj)
+
+        async def scenario():
+            async with lifespan(None):
+                pass
+            return cast("asyncio.Task", mcp_obj._reconciliation_task).cancelled()
+
+        cancelled = asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+        assert cancelled is True
+
+    def test_app_wires_the_reconciliation_lifespan(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """Integration check that app() actually passes lifespan= through, not just that the factory works standalone."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_app = app()
+
+        async def scenario():
+            async with Client(transport=mcp_app, timeout=60):
+                pass
+
+        asyncio.run(scenario())  # must not raise - confirms the lifespan context manager is entered cleanly
