@@ -12,6 +12,7 @@ this plan's sketch.
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from pathlib import Path
 
 import sqlite_vec
@@ -28,6 +29,17 @@ _DEFAULT_MAX_CHUNK_CHARS = 2000
 # from any formal bound on sub-split count per chunk - just a multiplier found adequate in
 # practice.
 _CHUNK_COLLAPSE_OVERFETCH_FACTOR = 4
+
+# SQLite's bound-variable limit (SQLITE_MAX_VARIABLE_NUMBER) is 999 on older builds, 32766 on
+# modern default builds - a note_id IN (...) list built from an unbounded corpus-wide id set
+# (see SqliteVecNoteBackend.search/count/statuses_for) can exceed either. Kept safely under the
+# lower, older bound.
+_MAX_BOUND_NOTE_IDS = 896
+
+
+def _chunked(items: list[str], size: int) -> Iterator[list[str]]:
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
 
 
 def _connect_with_vec(path: Path) -> sqlite3.Connection:
@@ -413,19 +425,33 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
     ) -> list[dict]:
         """Cosine-similarity KNN search over notes, ranked most-similar first.
 
-        `note_ids`, when given, scopes the search to that id set (e.g. notes on one document).
+        `note_ids`, when given, scopes the search to that id set (e.g. notes on one document) and
+        is chunked into batches of `_MAX_BOUND_NOTE_IDS` to stay under SQLite's bound-variable
+        limit. Each batch is queried for its own top `offset + limit` matches and the batches are
+        merged and re-sorted by distance before slicing - a note's rank within its own batch can
+        only be <= its rank across the full `note_ids` scope (a subset can't rank it worse), so the
+        true global top `offset + limit` is always contained in the union of per-batch top sets.
         """
 
-        def _search() -> list[dict]:
+        def _query(conn: sqlite3.Connection, ids_batch: list[str] | None) -> list[sqlite3.Row]:
             sql = "SELECT note_id, text, distance FROM note_vectors WHERE embedding MATCH ? AND k = ?"
             params: list[object] = [json.dumps(query_embedding), offset + limit]
-            if note_ids is not None:
-                placeholders = ", ".join("?" for _ in note_ids)
+            if ids_batch is not None:
+                placeholders = ", ".join("?" for _ in ids_batch)
                 sql += f" AND note_id IN ({placeholders})"
-                params.extend(note_ids)
+                params.extend(ids_batch)
             sql += " ORDER BY distance"
+            return conn.execute(sql, params).fetchall()
+
+        def _search() -> list[dict]:
             with self._connect() as conn:
-                rows = conn.execute(sql, params).fetchall()
+                if note_ids is None:
+                    rows = _query(conn, None)
+                else:
+                    rows = []
+                    for batch in _chunked(note_ids, _MAX_BOUND_NOTE_IDS):
+                        rows.extend(_query(conn, batch))
+                    rows.sort(key=lambda row: row["distance"])
             ordered = rows[offset : offset + limit]
             return [
                 {
@@ -441,18 +467,23 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
         return await to_thread.run_sync(_search)
 
     async def count(self, *, note_ids: list[str] | None = None) -> int:
-        """Count of indexed notes, optionally scoped to `note_ids`."""
+        """Count of indexed notes, optionally scoped to `note_ids`.
+
+        `note_ids` is chunked into batches of `_MAX_BOUND_NOTE_IDS` to stay under SQLite's
+        bound-variable limit; per-batch counts are summed since the batches partition `note_ids`
+        with no overlap.
+        """
 
         def _count() -> int:
-            sql = "SELECT COUNT(*) AS n FROM note_vectors WHERE 1=1"
-            params: list[str] = []
-            if note_ids is not None:
-                placeholders = ", ".join("?" for _ in note_ids)
-                sql += f" AND note_id IN ({placeholders})"
-                params.extend(note_ids)
             with self._connect() as conn:
-                row = conn.execute(sql, params).fetchone()
-                return row["n"]
+                if note_ids is None:
+                    return conn.execute("SELECT COUNT(*) AS n FROM note_vectors").fetchone()["n"]
+                total = 0
+                for batch in _chunked(note_ids, _MAX_BOUND_NOTE_IDS):
+                    placeholders = ", ".join("?" for _ in batch)
+                    sql = f"SELECT COUNT(*) AS n FROM note_vectors WHERE note_id IN ({placeholders})"
+                    total += conn.execute(sql, batch).fetchone()["n"]
+                return total
 
         return await to_thread.run_sync(_count)
 
@@ -471,21 +502,33 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
         return await to_thread.run_sync(_status)
 
     async def statuses_for(self, note_ids: list[str]) -> dict[str, IndexStatus]:
-        """Every given note_id's persisted status in one batched query, keyed by note_id."""
+        """Every given note_id's persisted status, keyed by note_id.
+
+        `note_ids` is chunked into batches of `_MAX_BOUND_NOTE_IDS` (one batched query per chunk)
+        to stay under SQLite's bound-variable limit; results are merged since the batches partition
+        `note_ids` with no overlap.
+        """
         if not note_ids:
             return {}
 
         def _statuses() -> dict[str, IndexStatus]:
-            placeholders = ", ".join("?" for _ in note_ids)
+            result: dict[str, IndexStatus] = {}
             with self._connect() as conn:
-                rows = conn.execute(
-                    f"SELECT note_id, embedded_model FROM note_vectors_status WHERE note_id IN ({placeholders})",
-                    note_ids,
-                ).fetchall()
-            return {
-                row["note_id"]: ("ready" if row["embedded_model"] == self._embedding_backend.model_name else "stale")
-                for row in rows
-            }
+                for batch in _chunked(note_ids, _MAX_BOUND_NOTE_IDS):
+                    placeholders = ", ".join("?" for _ in batch)
+                    rows = conn.execute(
+                        f"SELECT note_id, embedded_model FROM note_vectors_status WHERE note_id IN ({placeholders})",
+                        batch,
+                    ).fetchall()
+                    result.update(
+                        {
+                            row["note_id"]: (
+                                "ready" if row["embedded_model"] == self._embedding_backend.model_name else "stale"
+                            )
+                            for row in rows
+                        }
+                    )
+            return result
 
         return await to_thread.run_sync(_statuses)
 

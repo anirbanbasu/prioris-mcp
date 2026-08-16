@@ -1,4 +1,5 @@
 import asyncio
+import math
 import sqlite3
 
 import pytest
@@ -221,6 +222,19 @@ class TestStatusesFor:
         assert statuses["note-will-be-stale"] == "stale"
         assert "note-absent" not in statuses  # absent key -> caller treats as "not_built"
 
+    def test_note_ids_spanning_multiple_chunks_are_all_resolved(self, tmp_path, monkeypatch):
+        """Regression: note_id IN (...) is chunked to stay under SQLite's bound-variable limit."""
+        from prioris_mcp.vector import sqlite_vec_backend as vec_backend
+
+        monkeypatch.setattr(vec_backend, "_MAX_BOUND_NOTE_IDS", 2)
+        backend = _backend(tmp_path)
+        note_ids = [f"note-{i}" for i in range(5)]
+        for note_id in note_ids:
+            asyncio.run(backend.index_note(note_id, "x"))
+
+        statuses = asyncio.run(backend.statuses_for(note_ids))
+        assert all(statuses[note_id] == "ready" for note_id in note_ids)
+
 
 class TestHasAnyIndexed:
     """Test the corpus-wide has_any_indexed existence check (D6)."""
@@ -290,6 +304,48 @@ class TestPagination:
         assert all_ids <= {"note-a", "note-b"}
 
 
+class _AngleEmbedding(EmbeddingBackend):
+    """Deterministic 2-D embedding: `text` is an angle (radians), placed at (cos, sin) on the unit circle.
+
+    Gives a fully controlled, strictly-increasing cosine distance ordering as the angle grows away
+    from a zero-angle query - real semantic embeddings don't offer that guarantee, which matters
+    here since the chunked-search test asserts an exact global ordering across chunk boundaries.
+    """
+
+    model_name = "angle-stub"
+    dimension = 2
+    max_chunk_chars = 2000
+
+    async def embed(self, text: str) -> list[float]:
+        angle = float(text)
+        return [math.cos(angle), math.sin(angle)]
+
+
+class TestChunkedSearch:
+    """Regression: note_id IN (...) chunking must preserve global KNN ordering across chunks."""
+
+    def test_search_scoped_to_note_ids_spanning_multiple_chunks_preserves_global_order(self, tmp_path, monkeypatch):
+        from prioris_mcp.vector import sqlite_vec_backend as vec_backend
+
+        monkeypatch.setattr(vec_backend, "_MAX_BOUND_NOTE_IDS", 2)
+        backend = SqliteVecNoteBackend(tmp_path / "notes-vectors.sqlite3", _AngleEmbedding())
+        # Strictly increasing angle -> strictly increasing cosine distance from the angle=0 query
+        # below. 5 note_ids with a chunk size of 2 forces 3 chunks (2, 2, 1).
+        note_ids = [f"note-{i}" for i in range(5)]
+        for i, note_id in enumerate(note_ids):
+            asyncio.run(backend.index_note(note_id, str(0.01 * (i + 1))))
+
+        query = asyncio.run(backend._embedding_backend.embed("0.0"))
+
+        full_page = asyncio.run(backend.search(query, note_ids=note_ids, offset=0, limit=5))
+        assert [r["note_id"] for r in full_page] == note_ids
+
+        # Pagination straddling a chunk boundary (chunk 2 is note-3/note-4) must still slice the
+        # globally-merged, re-sorted order, not one chunk's local order.
+        straddling_page = asyncio.run(backend.search(query, note_ids=note_ids, offset=2, limit=2))
+        assert [r["note_id"] for r in straddling_page] == ["note-2", "note-3"]
+
+
 class TestCount:
     """Test count() method for corpus-wide and scoped counts."""
 
@@ -334,6 +390,19 @@ class TestCount:
         asyncio.run(backend.index_note("note-1", "x"))
         # Count with note_ids that don't match anything.
         assert asyncio.run(backend.count(note_ids=["note-999", "note-1000"])) == 0
+
+    def test_count_scoped_to_note_ids_spanning_multiple_chunks(self, tmp_path, monkeypatch):
+        """Regression: per-chunk counts must be summed, not just the last chunk's."""
+        from prioris_mcp.vector import sqlite_vec_backend as vec_backend
+
+        monkeypatch.setattr(vec_backend, "_MAX_BOUND_NOTE_IDS", 2)
+        backend = _backend(tmp_path)
+        note_ids = [f"note-{i}" for i in range(5)]
+        for note_id in note_ids:
+            asyncio.run(backend.index_note(note_id, "x"))
+
+        assert asyncio.run(backend.count(note_ids=note_ids)) == 5
+        assert asyncio.run(backend.count(note_ids=note_ids[:3])) == 3
 
 
 class TestIndexedUnder:
