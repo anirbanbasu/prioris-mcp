@@ -98,7 +98,7 @@ Neither tool is subject to a rate limit or a serialised outbound queue (see [Arc
 
 ## Resources
 
-Five resource templates expose read-only content, as an alternative to re-invoking a tool:
+Six resource templates expose read-only content, as an alternative to re-invoking a tool:
 
 | Resource template | Returns |
 |---|---|
@@ -107,6 +107,7 @@ Five resource templates expose read-only content, as an alternative to re-invoki
 | `research://arxiv/categories` | arXiv's queryable category codes and names (e.g. `cs.LG` → "Machine Learning"), sourced from arXiv's OAI-PMH `ListSets` endpoint — see [Interface specification](06-interface-specification.md#arxiv-category-list-resource). |
 | `research://openalex/work-types` | OpenAlex's work `type` vocabulary (code, display name, one-line description; 25 entries as of writing), sourced from OpenAlex's `/work-types` endpoint — see [Discovery → Paging, filters, and the work-type reference resource](02-discovery.md#paging-filters-and-the-work-type-reference-resource) and [Interface specification](06-interface-specification.md#openalex-work-types-resource). |
 | `notes://{note_id}/export` | **v2.** One note's file representation (`suggested_filename`, `frontmatter`, `markdown_body`) for the caller to write to disk itself — see [Notes storage → Export](storage/02-notes-storage.md#export) and [Security → Notes export does not write files](05-security.md#notes-export-does-not-write-files) for why this is a resource rather than a tool, and why the server never writes it to disk itself. Fails with "not found" if the note doesn't exist. |
+| `research://vector-index/rebuild-status` | **v3.** Corpus-wide vector-index reconciliation's live progress — see [Search → Vector search](search/02-vector-search.md#reconciliation-runs-automatically-at-server-startup) and [Resources](../04-resources.md). Never served from the response cache, since it's live, in-process progress rather than write-once content. |
 
 The first two are read-only and never trigger a fetch or a parse — reading one that doesn't exist yet is a normal "not found," not an error the caller needs special handling for beyond "go call the tool first." `research_*_fetch_full_text` and `research_*_parse_full_text` return the corresponding resource URI in their output specifically so a caller can re-read the same content later without re-invoking the tool.
 

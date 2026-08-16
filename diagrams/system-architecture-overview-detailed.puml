@@ -24,7 +24,7 @@ actor "MCP client\ne.g. Claude, an IDE" as Client
 rectangle "PriorisMCP server" as PriorisMCP {
     rectangle "Middleware chain" as MW {
         component "StripUnknown-\nArgumentsMiddleware" as MW1
-        component "NotesCacheBypass-\nMiddleware" as MW2
+        component "LiveResourceCacheBypass-\nMiddleware" as MW2
         component "DecodeBinaryResource-\nContentMiddleware" as MW3
         component "ResponseCaching-\nMiddleware" as MW4
         component "EncodeBinaryResource-\nContentMiddleware" as MW5
@@ -63,9 +63,23 @@ rectangle "PriorisMCP server" as PriorisMCP {
         database "SqliteFts5NotesSearchIndex\nnotes-search.sqlite3" as NotesSearch
     }
 
+    rectangle "Discovery" as Discovery {
+        component "OpenAlexClient\nsearch.semantic" as OpenAlexClient
+        component "Fetch ladder\n(known-provider route /\nOA link / manual upload)" as FetchLadder
+    }
+
+    rectangle "Vector search" as Vector {
+        component "EmbeddingScheduler\n(background, fire-and-forget)" as Sched
+        component "EmbeddingBackend\n(FastEmbedBackend, fastembed)" as Embed
+        database "SqliteVecDocumentBackend\nvectors.sqlite3" as VecDocs
+        database "SqliteVecNoteBackend\nnotes-vectors.sqlite3" as VecNotes
+    }
+
     MW --> Core
     Core --> Router
     Core --> NotesDb : research_notes_* /\nnotes://{note_id}/export
+    Core --> OpenAlexClient : research_discovery
+    Core --> Sched : reconcile_vector_index()\nat startup, and on every\nparse / note write
     Router --> Arxiv
     Router --> EuropePmc
     Router --> LocalFile
@@ -80,15 +94,24 @@ rectangle "PriorisMCP server" as PriorisMCP {
     FS --> Catalogue
     FS --> Search
     NotesDb --> NotesSearch : index_note / remove_note\non create / update / delete
+    OpenAlexClient --> FetchLadder : hits without arXiv /\nEurope PMC identifiers
+    FetchLadder --> Router : known-provider route
+    Sched --> Embed : embed(text)
+    Sched --> VecDocs : index_entries\n(document chunks)
+    Sched --> VecNotes : index_entries\n(notes)
+    Catalogue ..> Sched : chunk text
+    NotesDb ..> Sched : note text
 }
 
 database "arXiv API" as ArxivApi
 database "Europe PMC API" as EuropePmcApi
+database "OpenAlex API" as OpenAlexApi
 database "External OCR server\noptional remote delegation" as OcrServer
 
 Client <--> MW1 : MCP: stdio /\nstreamable-http
 Arxiv <--> ArxivApi
 EuropePmc <--> EuropePmcApi
+OpenAlexClient <--> OpenAlexApi
 Pdf ..> OcrServer : if OCR_SERVER_URL set
 
 @enduml
