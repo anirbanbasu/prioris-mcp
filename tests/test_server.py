@@ -1,22 +1,82 @@
 import asyncio
 import base64
+import contextlib
+import json
 import logging
 import ssl
 from pathlib import Path
+from typing import cast
 
 import httpx
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.shared.exceptions import McpError
+from mcp.types import TextResourceContents
 
 from prioris_mcp import EnvVars
 from prioris_mcp.errors import InvalidRequestError
 from prioris_mcp.models.arxiv import ArxivCategoriesResult, ArxivCategory
 from prioris_mcp.models.common import ArxivResolvedIdentifierResult, MarkdownPage
-from prioris_mcp.server import PriorisMCP
+from prioris_mcp.models.discovery import OpenAlexWorkType, OpenAlexWorkTypesResult
+from prioris_mcp.server import PriorisMCP, _vector_reconciliation_lifespan, app
+from prioris_mcp.vector.embedding import EmbeddingBackend, FastEmbedBackend
+from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, SqliteVecNoteBackend
 
 logger = logging.getLogger(__name__)
+
+
+class _RenamedStub(EmbeddingBackend):
+    """A same-dimension, differently-named EmbeddingBackend wrapping a real one - for simulating a model rename."""
+
+    def __init__(self, real: EmbeddingBackend, model_name: str) -> None:
+        self._real = real
+        self._model_name = model_name
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def dimension(self) -> int:
+        return self._real.dimension
+
+    @property
+    def max_chunk_chars(self) -> int:
+        return self._real.max_chunk_chars
+
+    async def embed(self, text: str) -> list[float]:
+        return await self._real.embed(text)
+
+
+class _DifferentDimensionStub(EmbeddingBackend):
+    """A differently-named, differently-dimensioned EmbeddingBackend - for simulating a genuine dimension-changing model swap.
+
+    Deliberately does not wrap a real backend (unlike `_RenamedStub`, which is for the
+    same-dimension rename case): `embed()` only needs to produce a fixed-length vector matching
+    `self._dim`, mirroring test_vector_sqlite_vec_document_backend.py's `_StubEmbedding` pattern
+    used for the same purpose - avoids spinning up two real fastembed models just to exercise a
+    dimension change.
+    """
+
+    def __init__(self, model_name: str, dimension: int) -> None:
+        self._model_name = model_name
+        self._dim = dimension
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+    @property
+    def max_chunk_chars(self) -> int:
+        return 2000
+
+    async def embed(self, text: str) -> list[float]:
+        return [0.1] * self._dim
 
 
 class TestMCPServer:
@@ -1319,6 +1379,102 @@ class TestStorageManagementTools:
         result = asyncio.run(scenario())
         assert result.structured_content["entries"] == []
 
+    def test_list_fetched_paging_metadata_with_default_offset_and_limit(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+        payload = base64.b64encode(b"%PDF-1.4 fake content").decode("ascii")
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_localfile_fetch_full_text", arguments={"content_base64": payload})
+                return await client.call_tool("research_list_fetched", arguments={})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["offset"] == 0
+        assert result.structured_content["limit"] == 50
+        assert result.structured_content["total"] == 1
+        assert result.structured_content["has_more"] is False
+
+    def test_list_fetched_offset_equal_to_total_returns_empty_page_with_has_more_false(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+        payload = base64.b64encode(b"%PDF-1.4 fake content").decode("ascii")
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_localfile_fetch_full_text", arguments={"content_base64": payload})
+                return await client.call_tool("research_list_fetched", arguments={"offset": 1})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["entries"] == []
+        assert result.structured_content["total"] == 1
+        assert result.structured_content["has_more"] is False
+
+    def test_list_fetched_offset_beyond_total_returns_empty_page(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+        payload = base64.b64encode(b"%PDF-1.4 fake content").decode("ascii")
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_localfile_fetch_full_text", arguments={"content_base64": payload})
+                return await client.call_tool("research_list_fetched", arguments={"offset": 100})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["entries"] == []
+        assert result.structured_content["total"] == 1
+        assert result.structured_content["has_more"] is False
+
+    def test_list_fetched_limit_smaller_than_total_reports_has_more(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                for index in range(3):
+                    payload = base64.b64encode(f"%PDF-1.4 fake content {index}".encode()).decode("ascii")
+                    await client.call_tool("research_localfile_fetch_full_text", arguments={"content_base64": payload})
+                return await client.call_tool("research_list_fetched", arguments={"offset": 0, "limit": 2})
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["entries"]) == 2
+        assert result.structured_content["total"] == 3
+        assert result.structured_content["has_more"] is True
+
+    def test_list_fetched_negative_offset_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_list_fetched", arguments={"offset": -1})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_list_fetched_zero_limit_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_list_fetched", arguments={"limit": 0})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_list_fetched_negative_limit_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_list_fetched", arguments={"limit": -5})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
     def test_delete_fetched_removes_entry_and_reports_it(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         client = self._server_and_client(tmp_path, monkeypatch)
         payload = base64.b64encode(b"%PDF-1.4 fake content").decode("ascii")
@@ -1503,6 +1659,282 @@ class TestDeleteFetchedArtefactField:
         assert matches_after == []
 
 
+class TestResearchDiscovery:
+    """End-to-end MCP tool tests for research_discovery."""
+
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch", handler, *, api_key="test-key"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        mock_transport = httpx.MockTransport(handler)
+        mcp_obj = PriorisMCP()
+        mcp_obj._http_client = httpx.AsyncClient(transport=mock_transport)
+        mcp_obj._openalex_client = mcp_obj._openalex_client.__class__(mcp_obj._http_client, api_key=api_key)
+        server = FastMCP()
+        return mcp_obj, Client(transport=mcp_obj.register_features(server), timeout=60)
+
+    def test_research_discovery_is_registered(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []})
+        )
+
+        async def scenario():
+            async with client:
+                tools = await client.list_tools()
+                return [tool.name for tool in tools]
+
+        assert "research_discovery" in asyncio.run(scenario())
+
+    def test_research_discovery_returns_hits(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        work = {
+            "id": "https://openalex.org/W2741809807",
+            "doi": None,
+            "title": "A Paper",
+            "publication_year": 2020,
+            "relevance_score": 0.5,
+            "authorships": [],
+            "abstract_inverted_index": None,
+            "ids": {},
+            "locations": [],
+        }
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": [work]})
+        )
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_discovery", arguments={"query": "graph neural networks"})
+
+        hits = asyncio.run(scenario()).structured_content["hits"]
+        assert len(hits) == 1
+        assert hits[0]["openalex_id"] == "W2741809807"
+        assert hits[0]["fetch_route"]["kind"] == "manual_upload"
+
+    def test_research_discovery_defaults_max_results_from_env_var(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_DISCOVERY_MAX_RESULTS", 7)
+        seen_params = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_params.append(request.url.params)
+            return httpx.Response(200, json={"results": []})
+
+        _, client = self._server_and_client(tmp_path, monkeypatch, handler)
+
+        async def scenario():
+            async with client:
+                await client.call_tool("research_discovery", arguments={"query": "quantum computing"})
+
+        asyncio.run(scenario())
+        assert seen_params[0]["per-page"] == "7"
+
+    def test_research_discovery_rejects_invalid_requests(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []})
+        )
+
+        async def scenario(arguments: dict):
+            async with client:
+                return await client.call_tool("research_discovery", arguments=arguments)
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario({"query": "x" * 2001}))
+        with pytest.raises(ToolError):
+            asyncio.run(scenario({"query": "valid", "max_results": 51}))
+
+    def test_research_discovery_fails_with_actionable_error_when_api_key_missing(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []}), api_key=None
+        )
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_discovery", arguments={"query": "graph neural networks"})
+
+        with pytest.raises(ToolError, match="PRIORIS_MCP_OPENALEX_API_KEY"):
+            asyncio.run(scenario())
+
+    def test_research_discovery_passes_through_paging_and_filters(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        seen_params = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_params.append(request.url.params)
+            return httpx.Response(200, json={"results": [], "meta": {"count": 0}})
+
+        _, client = self._server_and_client(tmp_path, monkeypatch, handler)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_discovery",
+                    arguments={
+                        "query": "graph neural networks",
+                        "page": 2,
+                        "from_year": 2020,
+                        "to_year": 2023,
+                        "open_access_only": True,
+                    },
+                )
+
+        result = asyncio.run(scenario())
+        assert seen_params[0]["page"] == "2"
+        assert seen_params[0]["filter"] == "publication_year:>=2020,publication_year:<=2023,is_oa:true"
+        structured = result.structured_content
+        assert structured["page"] == 2
+        assert structured["total"] == 0
+        assert structured["has_more"] is False
+
+    def test_research_discovery_excludes_fetched_known_provider_hits(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        works = [
+            {
+                "id": "https://openalex.org/W1",
+                "doi": "https://doi.org/10.48550/arxiv.1706.03762",
+                "title": "Fetched arXiv Paper",
+                "publication_year": 2017,
+                "relevance_score": 0.9,
+                "authorships": [],
+                "abstract_inverted_index": None,
+                "ids": {},
+                "locations": [],
+            },
+            {
+                "id": "https://openalex.org/W2",
+                "doi": None,
+                "title": "Unfetched Paper",
+                "publication_year": 2018,
+                "relevance_score": 0.8,
+                "authorships": [],
+                "abstract_inverted_index": None,
+                "ids": {},
+                "locations": [],
+            },
+        ]
+        mcp_obj, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": works})
+        )
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "1706.03762v2", "pdf", b"%PDF")
+            async with client:
+                return await client.call_tool("research_discovery", arguments={"query": "transformers"})
+
+        hits = asyncio.run(scenario()).structured_content["hits"]
+        assert [hit["openalex_id"] for hit in hits] == ["W2"]
+
+    def test_research_discovery_excludes_fetched_europepmc_hit(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        work = {
+            "id": "https://openalex.org/W1",
+            "doi": None,
+            "title": "Fetched Europe PMC Paper",
+            "publication_year": 2017,
+            "relevance_score": 0.9,
+            "authorships": [],
+            "abstract_inverted_index": None,
+            "ids": {"pmcid": "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4767193"},
+            "locations": [],
+        }
+        mcp_obj, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": [work]})
+        )
+
+        async def scenario():
+            await mcp_obj._storage.write("europepmc", "PMC:4767193", "xml", b"<article/>")
+            async with client:
+                return await client.call_tool("research_discovery", arguments={"query": "biology"})
+
+        assert asyncio.run(scenario()).structured_content["hits"] == []
+
+    def test_fetched_discovery_identifiers_paginates_and_stops_on_empty_page(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        mcp_obj, _ = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []})
+        )
+        pages = [
+            ([{"identifier": "1706.03762v2"}], 2),
+            ([{"identifier": "2401.00001"}], 2),
+            ([], 3),
+        ]
+
+        async def list_entries(provider: str, *, offset: int, limit: int):
+            assert provider == "arxiv"
+            assert limit == 200
+            return pages.pop(0)
+
+        monkeypatch.setattr(mcp_obj._storage, "list", list_entries)
+        assert asyncio.run(mcp_obj._fetched_discovery_identifiers("arxiv")) == {"1706.03762", "2401.00001"}
+
+    def test_normalise_discovery_identifier_leaves_unknown_provider_unchanged(self):
+        assert PriorisMCP._normalise_discovery_identifier("localfile", "id-1") == "id-1"
+
+    def test_openalex_work_types_resource_is_registered(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []})
+        )
+
+        async def scenario():
+            async with client:
+                resources = await client.list_resources()
+                return [str(resource.uri) for resource in resources]
+
+        assert "research://openalex/work-types" in asyncio.run(scenario())
+
+    def test_openalex_work_types_resource_fails_with_actionable_error_when_api_key_missing(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        _, client = self._server_and_client(
+            tmp_path, monkeypatch, lambda request: httpx.Response(200, json={"results": []}), api_key=None
+        )
+
+        async def scenario():
+            async with client:
+                return await client.read_resource("research://openalex/work-types")
+
+        with pytest.raises(McpError):
+            asyncio.run(scenario())
+
+    def test_openalex_work_types_resource_returns_sorted_types(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        work_types = {
+            "results": [
+                {
+                    "id": "https://openalex.org/types/preprint",
+                    "display_name": "preprint",
+                    "description": "An article whose primary location is a preprint repository.",
+                },
+                {
+                    "id": "https://openalex.org/types/article",
+                    "display_name": "article",
+                    "description": "Original, citable research usually in a journal.",
+                },
+            ]
+        }
+        _, client = self._server_and_client(tmp_path, monkeypatch, lambda request: httpx.Response(200, json=work_types))
+
+        async def scenario():
+            async with client:
+                return await client.read_resource("research://openalex/work-types")
+
+        result = asyncio.run(scenario())
+        parsed = OpenAlexWorkTypesResult.model_validate_json(result[0].text)
+        assert parsed == OpenAlexWorkTypesResult(
+            types=[
+                OpenAlexWorkType(
+                    code="article", name="article", description="Original, citable research usually in a journal."
+                ),
+                OpenAlexWorkType(
+                    code="preprint",
+                    name="preprint",
+                    description="An article whose primary location is a preprint repository.",
+                ),
+            ]
+        )
+
+
 class TestResearchSearchFetched:
     """End-to-end MCP tool tests for research_search_fetched."""
 
@@ -1523,7 +1955,9 @@ class TestResearchSearchFetched:
                 return await client.call_tool("research_search_fetched", arguments={"query": "quantum"})
 
         result = asyncio.run(scenario())
-        assert result.structured_content["matches"] == []
+        assert result.structured_content["fts"]["matches"] == []
+        assert result.structured_content["fts"]["total"] == 0
+        assert result.structured_content["fts"]["has_more"] is False
 
     def test_identifier_without_provider_raises_invalid_request(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -1556,7 +1990,7 @@ class TestResearchSearchFetched:
                 return caller_facing_id, search_result
 
         caller_facing_id, search_result = asyncio.run(scenario())
-        matches = search_result.structured_content["matches"]
+        matches = search_result.structured_content["fts"]["matches"]
         assert len(matches) >= 1
         assert matches[0]["provider"] == "localfile"
         assert matches[0]["identifier"] == caller_facing_id
@@ -1568,6 +2002,318 @@ class TestResearchSearchFetched:
         async def scenario():
             async with client:
                 return await client.call_tool("research_search_fetched", arguments={"query": "C++"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_mode_vector_returns_vector_results(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention"}]
+                )
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector"},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["fts"] is None
+        assert len(result.structured_content["vector"]["matches"]) == 1
+
+    def test_mode_hybrid_returns_both_mechanisms(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_search_fetched", arguments={"query": "anything", "mode": "hybrid"}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["fts"]["matches"] == []
+        assert result.structured_content["vector"]["matches"] == []
+
+    def test_unrecognised_mode_raises_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_search_fetched", arguments={"query": "x", "mode": "graph"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_identifier_and_provider_populates_per_mechanism_index_status(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "quantum", "provider": "arxiv", "identifier": "A", "format": "pdf"},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"] == {"fts": "not_built", "vector": "not_built"}
+
+    def test_index_status_is_empty_when_format_is_omitted(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "Hello", "provider": "localfile", "identifier": caller_facing_id},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"] == {}
+
+    def test_index_status_reports_ready_when_format_is_given(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={
+                        "query": "Hello",
+                        "provider": "localfile",
+                        "identifier": caller_facing_id,
+                        "format": "pdf",
+                    },
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"]["fts"] == "ready"
+
+    def test_index_status_reports_building_while_a_reembed_task_is_in_flight(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """A poll during a live (re-)embed must see "building", not the backend's persisted status.
+
+        See docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                gate = asyncio.Event()
+                mcp_obj._embedding_scheduler.schedule(("arxiv", "A", "pdf"), gate.wait)
+                try:
+                    return await client.call_tool(
+                        "research_search_fetched",
+                        arguments={"query": "quantum", "provider": "arxiv", "identifier": "A", "format": "pdf"},
+                    )
+                finally:
+                    gate.set()
+                    await mcp_obj._embedding_scheduler.wait_all()
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"] == {"fts": "not_built", "vector": "building"}
+
+    def test_limit_defaults_from_env_var(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT", 1)
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv",
+                    "A",
+                    "pdf",
+                    [
+                        {"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention mechanism"},
+                        {"chunk_id": "c2", "start": 5, "length": 5, "text": "attention mechanism transformer"},
+                    ],
+                )
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector"},
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]["matches"]) == 1
+
+    def test_limit_param_overrides_the_default(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT", 1)
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv",
+                    "A",
+                    "pdf",
+                    [
+                        {"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention mechanism"},
+                        {"chunk_id": "c2", "start": 5, "length": 5, "text": "attention mechanism transformer"},
+                    ],
+                )
+                return await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 2},
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]["matches"]) == 2
+
+    def test_offset_pages_through_fts_results_without_repeats(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                fetch_result = await client.call_tool(
+                    "research_localfile_fetch_full_text",
+                    arguments={"content_base64": TestLocalFileTools._PDF_BASE64, "filename": "paper.pdf"},
+                )
+                caller_facing_id = fetch_result.structured_content["id"]
+                await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
+
+                page1 = await client.call_tool(
+                    "research_search_fetched", arguments={"query": "Hello", "limit": 1, "offset": 0}
+                )
+                page2 = await client.call_tool(
+                    "research_search_fetched", arguments={"query": "Hello", "limit": 1, "offset": 1}
+                )
+                return page1, page2
+
+        page1, page2 = asyncio.run(scenario())
+        matches1 = page1.structured_content["fts"]["matches"]
+        matches2 = page2.structured_content["fts"]["matches"]
+        assert len(matches1) == 1
+        if matches2:
+            assert matches1[0]["offset"] != matches2[0]["offset"] or matches1[0]["snippet"] != matches2[0]["snippet"]
+        assert page1.structured_content["fts"]["offset"] == 0
+        assert page2.structured_content["fts"]["offset"] == 1
+
+    def test_offset_pages_through_vector_results_without_repeats(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv",
+                    "A",
+                    "pdf",
+                    [
+                        {"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention mechanism"},
+                        {"chunk_id": "c2", "start": 5, "length": 5, "text": "attention mechanism transformer"},
+                    ],
+                )
+                page1 = await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 1, "offset": 0},
+                )
+                page2 = await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 1, "offset": 1},
+                )
+                return page1, page2
+
+        page1, page2 = asyncio.run(scenario())
+        matches1 = page1.structured_content["vector"]["matches"]
+        matches2 = page2.structured_content["vector"]["matches"]
+        assert len(matches1) == 1
+        assert len(matches2) == 1
+        assert matches1[0]["chunk_id"] != matches2[0]["chunk_id"]
+        assert page1.structured_content["vector"]["total"] == 2
+        assert page2.structured_content["vector"]["total"] == 2
+
+    def test_total_and_has_more_boundary_cases(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await mcp_obj._document_vector_backend.index_entries(
+                    "arxiv",
+                    "A",
+                    "pdf",
+                    [
+                        {"chunk_id": "c1", "start": 0, "length": 5, "text": "transformer attention mechanism"},
+                        {"chunk_id": "c2", "start": 5, "length": 5, "text": "attention mechanism transformer"},
+                    ],
+                )
+                not_exhausted = await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 1, "offset": 0},
+                )
+                exhausted = await client.call_tool(
+                    "research_search_fetched",
+                    arguments={"query": "attention mechanism", "mode": "vector", "limit": 1, "offset": 1},
+                )
+                return not_exhausted, exhausted
+
+        not_exhausted, exhausted = asyncio.run(scenario())
+        assert not_exhausted.structured_content["vector"]["total"] == 2
+        assert not_exhausted.structured_content["vector"]["has_more"] is True
+        assert exhausted.structured_content["vector"]["total"] == 2
+        assert exhausted.structured_content["vector"]["has_more"] is False
+
+    def test_negative_offset_raises_invalid_request(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_search_fetched", arguments={"query": "quantum", "offset": -1})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_non_positive_limit_raises_invalid_request(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_search_fetched", arguments={"query": "quantum", "limit": 0})
 
         with pytest.raises(ToolError):
             asyncio.run(scenario())
@@ -1624,6 +2370,25 @@ class TestResearchNotesCreate:
 
         with pytest.raises(ToolError, match="location or selectors"):
             asyncio.run(scenario())
+
+    def test_notes_create_schedules_vector_indexing(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        client = Client(transport=server_with_features, timeout=60)
+
+        async def scenario():
+            async with client:
+                result = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "2106.09685v2", "text": "a note"},
+                )
+                note_id = result.structured_content["id"]  # ty: ignore[not-subscriptable]
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await mcp_obj._note_vector_backend.status(note_id)
+
+        assert asyncio.run(scenario()) == "ready"
 
 
 class TestResearchNotesRead:
@@ -1766,6 +2531,62 @@ class TestResearchNotesDelete:
         result = asyncio.run(scenario())
         assert result.structured_content["result"] is False
 
+    def test_notes_delete_removes_vector_entry(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        client = Client(transport=server_with_features, timeout=60)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "2106.09685v2", "text": "a note"},
+                )
+                note_id = created.structured_content["id"]  # ty: ignore[not-subscriptable]
+                await mcp_obj._embedding_scheduler.wait_all()
+                await client.call_tool("research_notes_delete", arguments={"note_id": note_id})
+                return await mcp_obj._note_vector_backend.status(note_id)
+
+        assert asyncio.run(scenario()) == "not_built"
+
+    def test_delete_racing_in_flight_schedule_does_not_resurrect_vector_row(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        server = FastMCP()
+        server_with_features = mcp_obj.register_features(server)
+        client = Client(transport=server_with_features, timeout=60)
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        real_index_note = mcp_obj._note_vector_backend.index_note
+
+        async def slow_index_note(note_id: str, text: str) -> None:
+            started.set()
+            await release.wait()
+            await real_index_note(note_id, text)
+
+        async def scenario():
+            async with client:
+                monkeypatch.setattr(mcp_obj._note_vector_backend, "index_note", slow_index_note)
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "2106.09685v2", "text": "a note"},
+                )
+                note_id = created.structured_content["id"]  # ty: ignore[not-subscriptable]
+                await started.wait()  # embed is in flight, blocked on release
+                await client.call_tool("research_notes_delete", arguments={"note_id": note_id})
+                release.set()  # let the (now-cancelled) embed task try to proceed, if it still can
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await mcp_obj._note_vector_backend.status(note_id)
+
+        assert asyncio.run(scenario()) == "not_built"
+
 
 class TestResearchNotesSearch:
     """End-to-end MCP tool tests for research_notes_search."""
@@ -1806,7 +2627,7 @@ class TestResearchNotesSearch:
                 return await client.call_tool("research_notes_search", arguments={})
 
         result = asyncio.run(scenario())
-        assert result.structured_content["total"] == 2
+        assert result.structured_content["fts"]["total"] == 2
 
     def test_keyword_filters_by_text(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         client = self._server_and_client(tmp_path, monkeypatch)
@@ -1825,7 +2646,7 @@ class TestResearchNotesSearch:
                 return await client.call_tool("research_notes_search", arguments={"keyword": "latency"})
 
         result = asyncio.run(scenario())
-        assert result.structured_content["total"] >= 1
+        assert result.structured_content["fts"]["total"] >= 1
 
     def test_author_filter_named_without_author_name_is_a_tool_error(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -1835,6 +2656,28 @@ class TestResearchNotesSearch:
         async def scenario():
             async with client:
                 return await client.call_tool("research_notes_search", arguments={"author_filter": "named"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_mode_vector_author_name_without_named_filter_is_a_tool_error(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """D4: author_name misuse must raise consistently in mode='vector' too, not be silently dropped.
+
+        author_filter is left at its default (ANY) while author_name is given - the fts/hybrid
+        path already raises for this (see test_author_filter_named_without_author_name_is_a_tool_error
+        for the mirror-image misuse), but mode='vector' never called self._notes_backend.search
+        (where that validation used to live), so it silently dropped author_name instead.
+        """
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "attention", "mode": "vector", "author_name": "Smith"},
+                )
 
         with pytest.raises(ToolError):
             asyncio.run(scenario())
@@ -1867,6 +2710,625 @@ class TestResearchNotesSearch:
         async def scenario():
             async with client:
                 return await client.call_tool("research_notes_search", arguments={"date_from": "not-a-date"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_mode_vector_canonical_identifier_without_provider_is_a_tool_error(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """The vector-only branch's matching_ids() call must translate ValueError the same way the fts branch does.
+
+        Mirrors test_canonical_identifier_without_provider_is_a_tool_error, but for mode='vector' where
+        matching_ids() (not self._notes_backend.search) is the one raising.
+        """
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "attention", "mode": "vector", "canonical_identifier": "id-1"},
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_mode_vector_invalid_date_from_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """Mirrors test_invalid_date_from_is_a_tool_error, but for mode='vector' via matching_ids()."""
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "attention", "mode": "vector", "date_from": "not-a-date"},
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_mode_vector_returns_note_vector_results(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                created = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                ), created
+
+        result, created = asyncio.run(scenario())
+        assert result.structured_content["fts"] is None
+        assert len(result.structured_content["vector"]["matches"]) == 1
+        assert result.structured_content["vector"]["matches"][0]["note_id"] == created.structured_content["id"]
+
+    def test_mode_vector_structural_filter_excludes_other_provider_match(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                created_arxiv = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "notes about feline companions"},
+                )
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "europepmc", "identifier": "B", "text": "notes about feline companions"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                result = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "feline companions", "mode": "vector", "provider": "arxiv"},
+                )
+                return result, created_arxiv
+
+        result, created_arxiv = asyncio.run(scenario())
+        vector_matches = result.structured_content["vector"]["matches"]
+        assert len(vector_matches) == 1
+        assert vector_matches[0]["note_id"] == created_arxiv.structured_content["id"]
+
+    def test_mode_vector_offset_pages_without_repeat_or_skip(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "arxiv",
+                        "identifier": "A",
+                        "text": "feline companions and their behaviour",
+                    },
+                )
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "arxiv",
+                        "identifier": "B",
+                        "text": "canine companions and their behaviour",
+                    },
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                first = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "pet companion behaviour", "mode": "vector", "offset": 0, "limit": 1},
+                )
+                second = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "pet companion behaviour", "mode": "vector", "offset": 1, "limit": 1},
+                )
+                return first, second
+
+        first, second = asyncio.run(scenario())
+        first_ids = [m["note_id"] for m in first.structured_content["vector"]["matches"]]
+        second_ids = [m["note_id"] for m in second.structured_content["vector"]["matches"]]
+        assert len(first_ids) == 1
+        assert len(second_ids) == 1
+        assert first_ids != second_ids
+
+    def test_mode_vector_reports_total_and_has_more_across_pages(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """`total`/`has_more` must reflect the corpus-wide match count, not just this page's size.
+
+        Mirrors test_mode_vector_offset_pages_without_repeat_or_skip's two-note setup, but asserts
+        the paging metadata itself (introduced by PagedNoteVectorMatches) rather than which note IDs
+        land on which page.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "arxiv",
+                        "identifier": "A",
+                        "text": "feline companions and their behaviour",
+                    },
+                )
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={
+                        "provider": "arxiv",
+                        "identifier": "B",
+                        "text": "canine companions and their behaviour",
+                    },
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                first = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "pet companion behaviour", "mode": "vector", "offset": 0, "limit": 1},
+                )
+                second = await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "pet companion behaviour", "mode": "vector", "offset": 1, "limit": 1},
+                )
+                return first, second
+
+        first, second = asyncio.run(scenario())
+        first_vector = first.structured_content["vector"]
+        second_vector = second.structured_content["vector"]
+        assert first_vector["offset"] == 0
+        assert first_vector["limit"] == 1
+        assert first_vector["total"] == 2
+        assert first_vector["has_more"] is True
+        assert second_vector["offset"] == 1
+        assert second_vector["limit"] == 1
+        assert second_vector["total"] == 2
+        assert second_vector["has_more"] is False
+
+    def test_mode_fts_leaves_index_status_none(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"mode": "fts"})
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["index_status"] is None
+
+    def test_mode_vector_reports_ready_index_status(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]["matches"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "ready"}
+
+    def test_mode_vector_reports_building_while_a_reembed_task_is_in_flight(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """A poll during a live re-embed must see "building", not whatever the backend's last completed write left behind.
+
+        Here, that would still be "ready" from the initial embed - see
+        docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                create_result = await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                note_id = create_result.structured_content["id"]  # ty: ignore[not-subscriptable]
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                gate = asyncio.Event()
+                mcp_obj._embedding_scheduler.schedule(("note", note_id), gate.wait)
+                try:
+                    return await client.call_tool(
+                        "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                    )
+                finally:
+                    gate.set()
+                    await mcp_obj._embedding_scheduler.wait_all()
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]["matches"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "building"}
+
+    def test_mode_vector_reports_not_built_when_a_matched_note_has_no_status_row(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Covers the non-empty-statuses "not_built" branch (distinct from the D6 empty-page one).
+
+        A match's own batched statuses_for() lookup, not the corpus-wide has_any_indexed() check,
+        drives this - simulated here (rather than via a real dangling row, since index_note always
+        writes both tables together) by stubbing statuses_for() directly, the same technique
+        test_mode_vector_reports_not_built_after_a_renamed_model_swap uses to simulate a status
+        mismatch without hand-rolling raw SQL against the backend.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                async def _always_not_built(note_ids: list[str]) -> dict[str, str]:
+                    return {}  # absent key -> "not_built", per statuses_for()'s documented contract
+
+                monkeypatch.setattr(mcp_obj._note_vector_backend, "statuses_for", _always_not_built)
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]["matches"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
+
+    def test_mode_vector_reports_not_built_after_a_renamed_model_swap(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """`stale` is not observable through the public API (Fix 1).
+
+        The first status() connect under a renamed model wipes the prior status row in the same
+        step that drops the mismatched vec0 table.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                # Simulate a model-name change: the mechanism keeps its own reference to the
+                # original backend (so search still finds the already-indexed vector), but
+                # research_notes_search's own status check goes through mcp_obj._note_vector_backend,
+                # which we swap for a same-file, same-dimension, differently-named view.
+                real_embedding = mcp_obj._embedding_backend
+
+                class _RenamedStub(EmbeddingBackend):
+                    model_name = "a-different-model"
+                    dimension = real_embedding.dimension
+                    max_chunk_chars = real_embedding.max_chunk_chars
+
+                    async def embed(self, text):
+                        return await real_embedding.embed(text)
+
+                mcp_obj._note_vector_backend = SqliteVecNoteBackend(
+                    tmp_path / "vectors" / "notes-vectors.sqlite3", _RenamedStub()
+                )
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]["matches"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
+
+    def test_mode_vector_aggregates_a_stale_status_row_if_one_is_ever_reported(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Exercises the aggregation's `stale` branch directly, by stubbing statuses_for().
+
+        The real backend can no longer produce `stale` in practice (Fix 1 deletes a differently-
+        named status row rather than letting it survive to be read - see
+        test_mode_vector_reports_not_built_after_a_renamed_model_swap), but `stale` remains a
+        legal `IndexStatus` value the aggregation must still rank correctly if a future backend
+        (or the generation-token design vector-search.md documents as a rejected alternative) ever
+        produces it - the same technique
+        test_mode_vector_reports_not_built_when_a_matched_note_has_no_status_row uses for
+        `not_built`.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                async def _always_stale(note_ids: list[str]) -> dict[str, str]:
+                    return dict.fromkeys(note_ids, "stale")
+
+                monkeypatch.setattr(mcp_obj._note_vector_backend, "statuses_for", _always_stale)
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]["matches"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "stale"}
+
+    def test_mode_vector_with_no_matches_reports_not_built(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "nothing indexed yet", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["vector"]["matches"] == []
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
+
+    def test_mode_vector_filtered_empty_scope_reports_not_built_despite_ready_corpus_elsewhere(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """A structural filter matching no notes at all must not borrow an unrelated ready corpus's status.
+
+        Previously (the review's Medium finding) an empty vector.matches page fell back to a
+        corpus-wide has_any_indexed() check that ignored the caller's filters entirely - a filter
+        matching zero notes reported "ready" merely because *some* unrelated note elsewhere was
+        ready. The requested scope here (provider="europepmc") has nothing to build, so it must
+        report "not_built", matching test_mode_vector_with_no_matches_reports_not_built's
+        genuinely-empty-corpus case rather than the corpus-wide ready note under "arxiv".
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                # A structural filter matching no notes (the only note is under "arxiv") narrows
+                # the scope to [] before the vector search runs.
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "attention-based models", "mode": "vector", "provider": "europepmc"},
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["vector"]["matches"] == []
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
+
+    def test_mode_vector_empty_page_past_total_still_reports_ready(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """D6: zero matches on this particular *page* must report "ready", not "not_built".
+
+        Distinct from an empty *scope* (see the sibling "not_built" test above): here the note is
+        in scope and ready, but `offset` pages past the only match, so `vector.matches` is empty
+        for a page-size reason unrelated to build state.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={
+                        "keyword": "attention-based models",
+                        "mode": "vector",
+                        "provider": "arxiv",
+                        "offset": 5,
+                    },
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["vector"]["matches"] == []
+        assert result.structured_content["index_status"] == {"vector": "ready"}
+
+    def test_mode_vector_reports_building_for_a_filtered_in_scope_note_with_no_vector_row_yet(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression for the review's exact repro: an out-of-filter ready note must not mask an in-scope building one.
+
+        Before this fix, an empty vector.matches page for the in-scope note (it has no vector row
+        yet, so it can never be a KNN match) fell back to a corpus-wide has_any_indexed() check,
+        which only saw the *other*, outside-filter note's ready status and reported "ready" - even
+        though the caller's requested scope (provider="europepmc") had nothing searchable yet.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "ready note outside the filter"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                # Create the in-scope note directly against the notes backend, bypassing
+                # research_notes_create's own embedding-scheduler trigger, so it genuinely has no
+                # vector row at all - then fake a live building task for it, the same gate
+                # technique test_mode_vector_reports_building_while_a_reembed_task_is_in_flight uses.
+                in_scope_note = await mcp_obj._notes_backend.create(
+                    "europepmc", "B", None, "in-scope note still building", anchors=[], tags=[]
+                )
+                gate = asyncio.Event()
+                mcp_obj._embedding_scheduler.schedule(("note", in_scope_note.id), gate.wait)
+                try:
+                    return await client.call_tool(
+                        "research_notes_search",
+                        arguments={"keyword": "attention-based models", "mode": "vector", "provider": "europepmc"},
+                    )
+                finally:
+                    gate.set()
+                    await mcp_obj._embedding_scheduler.wait_all()
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["vector"]["matches"] == []
+        assert result.structured_content["index_status"] == {"vector": "building"}
+
+    def test_note_search_status_aggregation_batches_one_query_instead_of_per_note(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression for Fix 2: N in-scope notes must resolve via one statuses_for() call, not N status() calls.
+
+        Mixes ready and not_built notes across a scope of 5 - large enough that a per-note query
+        loop would be obviously wrong, while the outcome (which IndexStatus value comes back) must
+        stay exactly what the existing per-note-status tests above already assert: the aggregation
+        semantics are unchanged, only the query mechanism.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        call_count = 0
+        real_status = SqliteVecNoteBackend.status
+
+        async def _counting_status(self, note_id):
+            nonlocal call_count
+            call_count += 1
+            return await real_status(self, note_id)
+
+        async def scenario():
+            async with client:
+                # Three notes embedded (ready) via the normal create-time trigger.
+                for i in range(3):
+                    await client.call_tool(
+                        "research_notes_create",
+                        arguments={
+                            "provider": "arxiv",
+                            "identifier": f"A{i}",
+                            "text": "transformer attention mechanisms",
+                        },
+                    )
+                await mcp_obj._embedding_scheduler.wait_all()
+                # Two more created directly against the backend, bypassing research_notes_create's
+                # own embedding-scheduler trigger, so they genuinely have no vector row (not_built).
+                await mcp_obj._notes_backend.create("arxiv", "B0", None, "unindexed note", anchors=[], tags=[])
+                await mcp_obj._notes_backend.create("arxiv", "B1", None, "another unindexed note", anchors=[], tags=[])
+
+                monkeypatch.setattr(SqliteVecNoteBackend, "status", _counting_status)
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert call_count == 0
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
+
+    def test_negative_offset_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """D7: a negative offset must raise, not silently fall into Python's from-the-end slicing."""
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"offset": -1})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_zero_limit_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """D7: limit=0 must raise, not silently produce a zero-width page."""
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"limit": 0})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_negative_limit_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """D7: a negative limit must raise, not flow into a negative KNN limit downstream."""
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"limit": -5})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_mode_vector_without_keyword_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"mode": "vector"})
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_unrecognised_mode_raises_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool("research_notes_search", arguments={"mode": "graph"})
 
         with pytest.raises(ToolError):
             asyncio.run(scenario())
@@ -1921,3 +3383,794 @@ class TestNotesExportResource:
 
         with pytest.raises(McpError):
             asyncio.run(scenario())
+
+
+class TestVectorSearchWiring:
+    """Tests for the EmbeddingBackend/VectorSearchBackend/SearchMechanism wiring in `PriorisMCP.__init__`."""
+
+    def test_embedding_backend_uses_configured_model(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+        mcp_obj = PriorisMCP()
+        assert mcp_obj._embedding_backend.model_name == "BAAI/bge-small-en-v1.5"
+
+    def test_search_mechanisms_registered(self):
+        mcp_obj = PriorisMCP()
+        assert set(mcp_obj._search_mechanisms.keys()) == {"fts", "vector"}
+
+    def test_vector_dir_respects_grouping_seam(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        assert mcp_obj._document_vector_backend._path.parent == tmp_path / "vectors"
+
+
+class TestVectorReconciliation:
+    """Tests for PriorisMCP's corpus-wide vector-index reconciliation (Task 7)."""
+
+    def test_force_vector_reconnect_does_not_raise_on_a_fresh_corpus(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        asyncio.run(mcp_obj._force_vector_reconnect())  # must not raise
+
+    def test_reconcile_schedules_a_not_built_document(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """A document written+chunked but never embedded.
+
+        Mirrors persist_parsed_markdown's own entries shape, built directly against
+        storage/manifest rather than through a provider - matching how
+        test_vector_sqlite_vec_document_backend.py builds fixtures directly against backends.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            assert await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf") == "not_built"
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+
+            return await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf")
+
+        status = asyncio.run(scenario())
+        assert status == "ready"
+
+    def test_reconcile_skips_a_document_already_ready_under_the_current_model(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            await mcp_obj._document_vector_backend.index_entries(
+                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "Body text."}]
+            )
+            await mcp_obj.reconcile_vector_index()
+            return mcp_obj._rebuild_progress.documents.total
+
+        total = asyncio.run(scenario())
+        assert total == 0  # already ready - nothing scheduled
+
+    def test_reconcile_reindexes_a_document_not_built_under_a_renamed_model(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """The document was indexed under a since-renamed model.
+
+        `stale` isn't observable (Fix 1), so the first connect under the real model already
+        reports `not_built`; reconciliation still restores it to `ready`.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            # Index under a stand-in "old" model name directly against the same file, then point
+            # the real mcp_obj (a differently-named model) at it - mirrors the existing
+            # test_status_not_built_after_a_model_change_wipes_the_prior_status_row pattern.
+            old_backend = SqliteVecDocumentBackend(
+                tmp_path / "vectors" / "vectors.sqlite3", _RenamedStub(mcp_obj._embedding_backend, "old-model")
+            )
+            await old_backend.index_entries(
+                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "old text"}]
+            )
+            assert await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf") == "not_built"
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+            return await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf")
+
+        status = asyncio.run(scenario())
+        assert status == "ready"
+
+    def test_reconcile_schedules_a_not_built_note(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            note = await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note about attention")
+            # Cancel the create-triggered live embed so this note starts genuinely not_built -
+            # isolates reconciliation's own scheduling from the create-time trigger already
+            # covered by existing tests.
+            await mcp_obj._embedding_scheduler.cancel(("note", note.id))
+            assert await mcp_obj._note_vector_backend.status(note.id) == "not_built"
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+            return await mcp_obj._note_vector_backend.status(note.id)
+
+        status = asyncio.run(scenario())
+        assert status == "ready"
+
+    def test_reconcile_updates_progress_counters(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            note = await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note")
+            await mcp_obj._embedding_scheduler.cancel(("note", note.id))
+
+            await mcp_obj.reconcile_vector_index()
+            before = (mcp_obj._rebuild_progress.documents.total, mcp_obj._rebuild_progress.notes.total)
+            before_pending = (
+                mcp_obj._rebuild_progress.documents.pending,
+                mcp_obj._rebuild_progress.notes.pending,
+            )
+            await mcp_obj._embedding_scheduler.wait_all()
+            after_pending = (mcp_obj._rebuild_progress.documents.pending, mcp_obj._rebuild_progress.notes.pending)
+            after_succeeded = (
+                mcp_obj._rebuild_progress.documents.succeeded,
+                mcp_obj._rebuild_progress.notes.succeeded,
+            )
+            return before, before_pending, after_pending, after_succeeded
+
+        before, before_pending, after_pending, after_succeeded = asyncio.run(scenario())
+        assert before == (1, 1)
+        assert before_pending == (1, 1)
+        assert after_pending == (0, 0)
+        assert after_succeeded == (1, 1)
+
+    def test_reconcile_document_reembed_failure_reports_failed_not_perpetually_pending(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression for ADR-00031: a failed document re-embed must not leave `pending` stuck forever.
+
+        Before this fix, `EmbeddingScheduler` caught and only logged the failure, with no callback
+        to `VectorRebuildProgress` - the resource would report `remaining=1` (now `pending=1`)
+        forever, indistinguishable from a task genuinely still running.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def _failing_index_entries(*args, **kwargs):
+            raise RuntimeError("boom - embedding backend unreachable")
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            monkeypatch.setattr(mcp_obj._document_vector_backend, "index_entries", _failing_index_entries)
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+            async with client:
+                result = await client.read_resource("research://vector-index/rebuild-status")
+            return json.loads(cast(TextResourceContents, result[0]).text)
+
+        payload = asyncio.run(scenario())
+        assert payload["documents"] == {
+            "total": 1,
+            "pending": 0,
+            "succeeded": 0,
+            "failed": 1,
+            "cancelled": 0,
+            "active": False,
+        }
+
+    def test_reconcile_note_reembed_failure_reports_failed_not_perpetually_pending(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Mirror of the document failure test, isolating the note re-embed wrapper's except-branch."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def _failing_index_note(*args, **kwargs):
+            raise RuntimeError("boom - embedding backend unreachable")
+
+        async def scenario():
+            await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note")
+            monkeypatch.setattr(mcp_obj._note_vector_backend, "index_note", _failing_index_note)
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+            async with client:
+                result = await client.read_resource("research://vector-index/rebuild-status")
+            return json.loads(cast(TextResourceContents, result[0]).text)
+
+        payload = asyncio.run(scenario())
+        assert payload["notes"] == {
+            "total": 1,
+            "pending": 0,
+            "succeeded": 0,
+            "failed": 1,
+            "cancelled": 0,
+            "active": False,
+        }
+
+    def test_reconcile_document_reembed_cancellation_counts_as_neither_success_nor_failure(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """A cancelled (e.g. shutdown, or deleted mid-flight) document re-embed is not a failure."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        gate = asyncio.Event()
+
+        async def _hanging_index_entries(*args, **kwargs):
+            await gate.wait()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            monkeypatch.setattr(mcp_obj._document_vector_backend, "index_entries", _hanging_index_entries)
+
+            await mcp_obj.reconcile_vector_index()
+            assert mcp_obj._embedding_scheduler.is_building(("arxiv", "2106.09685v2", "pdf"))
+            # Let the freshly-created task actually run at least once and reach the `gate.wait()`
+            # suspension point before cancelling it - cancelling a task that has never been
+            # stepped at all bypasses its own try/except entirely (nothing has executed yet),
+            # which would make this test pass for the wrong reason (no code ran, not "cancellation
+            # handled correctly").
+            for _ in range(10):
+                await asyncio.sleep(0)
+            # cancel() awaits the task to actually stop before returning - Task.cancel() delivers
+            # CancelledError at the suspended `await gate.wait()`, so the gate itself never needs
+            # to be set for this to unblock.
+            await mcp_obj._embedding_scheduler.cancel(("arxiv", "2106.09685v2", "pdf"))
+            return mcp_obj._rebuild_progress.documents
+
+        documents = asyncio.run(scenario())
+        assert documents.pending == 0
+        assert documents.succeeded == 0
+        assert documents.failed == 0
+        assert documents.cancelled == 1
+
+    def test_reconcile_note_reembed_cancellation_counts_as_neither_success_nor_failure(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Mirror of the document cancellation test, isolating the note re-embed wrapper's cancel-branch."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        gate = asyncio.Event()
+
+        async def _hanging_index_note(*args, **kwargs):
+            await gate.wait()
+
+        async def scenario():
+            note = await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note")
+            monkeypatch.setattr(mcp_obj._note_vector_backend, "index_note", _hanging_index_note)
+
+            await mcp_obj.reconcile_vector_index()
+            assert mcp_obj._embedding_scheduler.is_building(("note", note.id))
+            # Let the freshly-created task actually run at least once and reach the `gate.wait()`
+            # suspension point before cancelling it - see the matching comment in the document
+            # cancellation test above for why.
+            for _ in range(10):
+                await asyncio.sleep(0)
+            # cancel() awaits the task to actually stop before returning - Task.cancel() delivers
+            # CancelledError at the suspended `await gate.wait()`, so the gate itself never needs
+            # to be set for this to unblock.
+            await mcp_obj._embedding_scheduler.cancel(("note", note.id))
+            return mcp_obj._rebuild_progress.notes
+
+        notes = asyncio.run(scenario())
+        assert notes.pending == 0
+        assert notes.succeeded == 0
+        assert notes.failed == 0
+        assert notes.cancelled == 1
+
+    def test_delete_fetched_cancelling_a_pending_reconciliation_factory_clears_pending(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression for the review's Fix 1: a reconciliation re-embed discarded straight out of `_pending` must still be accounted for.
+
+        Before this fix, `EmbeddingScheduler.cancel()` silently dropped a still-pending factory
+        with no notification. Here, an ordinary (non-reconciliation) embed is already in flight for
+        a key when reconciliation runs - its own re-embed wrapper for that same key queues in
+        `_pending` behind the still-running ordinary task, never getting a chance to run. Deleting
+        the document through the real production cancellation path (`research_delete_fetched` ->
+        `_delete_fetched` -> `EmbeddingScheduler.cancel`) must still decrement `pending` to 0,
+        rather than leaving this item permanently reported as still pending/active.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+        gate = asyncio.Event()
+        key = ("arxiv", "2106.09685v2", "pdf")
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+
+            # An ordinary (non-reconciliation) embed already in flight for this key - never itself
+            # tracked by VectorRebuildProgress, mirroring the two schedule() call sites this fix
+            # deliberately leaves untouched.
+            mcp_obj._embedding_scheduler.schedule(key, gate.wait)
+            assert mcp_obj._embedding_scheduler.is_building(key)
+
+            await mcp_obj.reconcile_vector_index()
+            # The reconciliation wrapper for this same key went into _pending (key already in
+            # _tasks) rather than running - `pending` was already incremented via
+            # set_documents_total, ahead of the wrapper itself ever executing.
+            assert mcp_obj._rebuild_progress.documents.total == 1
+            assert mcp_obj._rebuild_progress.documents.pending == 1
+
+            async with client:
+                await client.call_tool(
+                    "research_delete_fetched",
+                    arguments={
+                        "entries": [
+                            {"provider": "arxiv", "identifier": "2106.09685v2", "format": "pdf", "artefact": "all"}
+                        ]
+                    },
+                )
+            return mcp_obj._rebuild_progress.documents
+
+        documents = asyncio.run(scenario())
+        assert documents.pending == 0
+        assert documents.active is False
+        assert documents.succeeded == 0
+        assert documents.failed == 0
+        assert documents.cancelled == 1
+
+    def test_notes_delete_cancelling_a_pending_reconciliation_factory_clears_pending(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Mirror of the document test above, isolating the note re-embed wrapper's `_pending`-discard accounting."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+        gate = asyncio.Event()
+
+        async def scenario():
+            note = await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note")
+            key = ("note", note.id)
+
+            # An ordinary (non-reconciliation) embed already in flight for this key.
+            mcp_obj._embedding_scheduler.schedule(key, gate.wait)
+            assert mcp_obj._embedding_scheduler.is_building(key)
+
+            await mcp_obj.reconcile_vector_index()
+            assert mcp_obj._rebuild_progress.notes.total == 1
+            assert mcp_obj._rebuild_progress.notes.pending == 1
+
+            async with client:
+                await client.call_tool("research_notes_delete", arguments={"note_id": note.id})
+            return mcp_obj._rebuild_progress.notes
+
+        notes = asyncio.run(scenario())
+        assert notes.pending == 0
+        assert notes.active is False
+        assert notes.succeeded == 0
+        assert notes.failed == 0
+        assert notes.cancelled == 1
+
+    def test_reconcile_vector_index_isolates_document_and_note_failures(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """A failure enumerating/scheduling documents must not skip notes, and must not propagate.
+
+        Regression test for the final whole-plan review's Important #1: before the fix, a raise
+        from `_reconcile_documents` (e.g. a corrupt catalogue row) skipped `_reconcile_notes`
+        entirely and re-raised out of `reconcile_vector_index()` itself.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        calls: list[str] = []
+
+        async def _failing_reconcile_documents():
+            calls.append("documents")
+            raise RuntimeError("boom - corrupt catalogue row")
+
+        async def _fake_reconcile_notes():
+            calls.append("notes")
+
+        monkeypatch.setattr(mcp_obj, "_reconcile_documents", _failing_reconcile_documents)
+        monkeypatch.setattr(mcp_obj, "_reconcile_notes", _fake_reconcile_notes)
+
+        asyncio.run(mcp_obj.reconcile_vector_index())  # must not raise
+
+        assert calls == ["documents", "notes"]  # notes still ran despite documents failing
+
+    def test_reconcile_vector_index_a_notes_failure_does_not_raise(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Mirror of the documents-failure test, isolating the notes except-branch specifically."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        calls: list[str] = []
+
+        async def _fake_reconcile_documents():
+            calls.append("documents")
+
+        async def _failing_reconcile_notes():
+            calls.append("notes")
+            raise RuntimeError("boom - corrupt note record")
+
+        monkeypatch.setattr(mcp_obj, "_reconcile_documents", _fake_reconcile_documents)
+        monkeypatch.setattr(mcp_obj, "_reconcile_notes", _failing_reconcile_notes)
+
+        asyncio.run(mcp_obj.reconcile_vector_index())  # must not raise
+
+        assert calls == ["documents", "notes"]
+
+    def test_lifespan_shutdown_does_not_crash_when_reconciliation_already_failed(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Reproduces the review's exact crash scenario at shutdown.
+
+        If the background reconciliation task were to complete with a real (non-CancelledError)
+        exception before shutdown runs, `task.cancel()` on an already-done task is a no-op and a
+        naive `await task` would re-raise that original exception straight through
+        `contextlib.suppress(asyncio.CancelledError)`, which doesn't catch it, crashing server
+        shutdown. `reconcile_vector_index()`'s own documents/notes isolation must prevent this by
+        never letting a sub-call's exception reach the task at all - proven here by monkeypatching
+        a sub-call (not `reconcile_vector_index` itself) to raise, so the real, fixed top-level
+        method runs.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+
+        async def _fake_force_reconnect():
+            return None
+
+        async def _failing_reconcile_documents():
+            raise RuntimeError("boom - corrupt catalogue row")
+
+        async def _fake_reconcile_notes():
+            return None
+
+        monkeypatch.setattr(mcp_obj, "_force_vector_reconnect", _fake_force_reconnect)
+        monkeypatch.setattr(mcp_obj, "_reconcile_documents", _failing_reconcile_documents)
+        monkeypatch.setattr(mcp_obj, "_reconcile_notes", _fake_reconcile_notes)
+
+        lifespan = _vector_reconciliation_lifespan(mcp_obj)
+
+        async def scenario():
+            async with lifespan(None):
+                # Wait for the background task to actually finish (with the sub-call's exception
+                # already isolated/logged) *before* the `async with` block exits - reproduces the
+                # review's exact "already-done, non-cancelled" scenario at shutdown time, not a
+                # still-pending task that shutdown's own cancel() would legitimately cancel.
+                task = cast("asyncio.Task", mcp_obj._reconciliation_task)
+                for _ in range(50):
+                    if task.done():
+                        break
+                    await asyncio.sleep(0.05)
+                assert task.done()
+                assert task.exception() is None  # isolated internally, never propagated to the task
+
+        asyncio.run(asyncio.wait_for(scenario(), timeout=5))  # must not raise
+
+    def test_rebuild_status_resource_reports_zero_on_a_fresh_corpus(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                return await client.read_resource("research://vector-index/rebuild-status")
+
+        result = asyncio.run(scenario())
+        payload = json.loads(cast(TextResourceContents, result[0]).text)
+        zero_mechanism = {"total": 0, "pending": 0, "succeeded": 0, "failed": 0, "cancelled": 0, "active": False}
+        assert payload == {"documents": zero_mechanism, "notes": zero_mechanism}
+
+    def test_rebuild_status_resource_reflects_progress_mid_reconciliation(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            # Real embedding speed isn't a reliable clock to race against - blocking it behind an
+            # event guarantees the mid-reconciliation snapshot below observes the job still
+            # pending, instead of depending on fastembed's actual model-load/inference time
+            # finishing after (rather than before) the resource read on any given machine.
+            release_embed = asyncio.Event()
+            real_embed = mcp_obj._embedding_backend.embed
+
+            async def _blocked_embed(text: str) -> list[float]:
+                await release_embed.wait()
+                return await real_embed(text)
+
+            monkeypatch.setattr(mcp_obj._embedding_backend, "embed", _blocked_embed)
+
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            await mcp_obj.reconcile_vector_index()
+            async with client:
+                mid_result = await client.read_resource("research://vector-index/rebuild-status")
+                mid_payload = json.loads(cast(TextResourceContents, mid_result[0]).text)
+                release_embed.set()
+                await mcp_obj._embedding_scheduler.wait_all()
+                done_result = await client.read_resource("research://vector-index/rebuild-status")
+                done_payload = json.loads(cast(TextResourceContents, done_result[0]).text)
+            return mid_payload, done_payload
+
+        mid_payload, done_payload = asyncio.run(scenario())
+        assert mid_payload["documents"] == {
+            "total": 1,
+            "pending": 1,
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "active": True,
+        }
+        assert done_payload["documents"] == {
+            "total": 1,
+            "pending": 0,
+            "succeeded": 1,
+            "failed": 0,
+            "cancelled": 0,
+            "active": False,
+        }
+
+    def test_lifespan_force_reconnects_before_yielding(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        calls: list[str] = []
+
+        async def _fake_force_reconnect():
+            calls.append("force_reconnect")
+
+        async def _fake_reconcile():
+            calls.append("reconcile")
+
+        monkeypatch.setattr(mcp_obj, "_force_vector_reconnect", _fake_force_reconnect)
+        monkeypatch.setattr(mcp_obj, "reconcile_vector_index", _fake_reconcile)
+
+        lifespan = _vector_reconciliation_lifespan(mcp_obj)
+
+        async def scenario():
+            async with lifespan(None):
+                pass
+            # lifespan's own __aexit__ already cancelled+awaited (and suppressed) this task while
+            # exiting the `async with` block above, since the fake reconcile never got a chance to
+            # run before shutdown - re-awaiting an already-cancelled task always re-raises
+            # CancelledError, so tolerate it here too; this is cleanup, not the assertion.
+            with contextlib.suppress(asyncio.CancelledError):
+                await cast("asyncio.Task", mcp_obj._reconciliation_task)
+
+        asyncio.run(scenario())
+        assert calls[0] == "force_reconnect"
+
+    def test_lifespan_does_not_block_on_reconciliation_completing(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """The core non-blocking guarantee: __aenter__ must return before reconcile_vector_index finishes."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        never_set = asyncio.Event()
+
+        async def _fake_force_reconnect():
+            return None
+
+        async def _fake_reconcile():
+            await never_set.wait()  # would hang forever if awaited synchronously by the lifespan
+
+        monkeypatch.setattr(mcp_obj, "_force_vector_reconnect", _fake_force_reconnect)
+        monkeypatch.setattr(mcp_obj, "reconcile_vector_index", _fake_reconcile)
+
+        lifespan = _vector_reconciliation_lifespan(mcp_obj)
+
+        async def scenario():
+            async with lifespan(None):
+                still_pending = not cast("asyncio.Task", mcp_obj._reconciliation_task).done()
+            # By the time `async with` exits, lifespan's own __aexit__ has already
+            # cancelled+awaited (and suppressed) this task, so setting the event here is too late
+            # to let it finish normally - re-awaiting an already-cancelled task always re-raises
+            # CancelledError, so tolerate it; the guarantee this test proves is `still_pending`
+            # above, captured before shutdown ran.
+            never_set.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cast("asyncio.Task", mcp_obj._reconciliation_task)
+            return still_pending
+
+        still_pending = asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+        assert still_pending is True
+
+    def test_lifespan_cancels_the_background_task_on_shutdown(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        never_set = asyncio.Event()
+
+        async def _fake_force_reconnect():
+            return None
+
+        async def _fake_reconcile():
+            await never_set.wait()
+
+        monkeypatch.setattr(mcp_obj, "_force_vector_reconnect", _fake_force_reconnect)
+        monkeypatch.setattr(mcp_obj, "reconcile_vector_index", _fake_reconcile)
+
+        lifespan = _vector_reconciliation_lifespan(mcp_obj)
+
+        async def scenario():
+            async with lifespan(None):
+                pass
+            return cast("asyncio.Task", mcp_obj._reconciliation_task).cancelled()
+
+        cancelled = asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+        assert cancelled is True
+
+    def test_app_wires_the_reconciliation_lifespan(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """Integration check that app() actually passes lifespan= through, not just that the factory works standalone."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_app = app()
+
+        async def scenario():
+            async with Client(transport=mcp_app, timeout=60):
+                pass
+
+        asyncio.run(scenario())  # must not raise - confirms the lifespan context manager is entered cleanly
+
+    def test_full_server_startup_reconciles_a_dimension_changing_model_swap(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression test for the review's exact repro, through the full server + lifespan.
+
+        Original bug: index one document, reopen the same database at a different embedding
+        dimension, call search() immediately - count() went from 1 to 0, search() returned [],
+        with no path back. This must now self-heal automatically via app()'s lifespan: the
+        corpus-wide drop still happens (deliberately, during startup's synchronous force-reconnect
+        phase - count genuinely goes to 0), but the background reconciliation then re-embeds it
+        back to ready under the real configured model, unlike the original bug where there was no
+        path back at all.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+
+        mcp_obj_a = PriorisMCP()
+        asyncio.run(
+            mcp_obj_a._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+        )
+        manifest = mcp_obj_a._storage.manifest_for("arxiv", "2106.09685v2")
+        asyncio.run(
+            manifest.replace_chunk_rows("pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1")
+        )
+        # Index directly against the raw db file under a stub with both a different model name AND
+        # a different (fake, fixed) dimension from the real configured model used by app() below -
+        # genuinely exercises the dimension-changing half of the original repro, not just a
+        # same-dimension name change (already covered by the sibling renamed-model test).
+        old_backend = SqliteVecDocumentBackend(
+            tmp_path / "vectors" / "vectors.sqlite3", _DifferentDimensionStub("old-model", 4)
+        )
+        asyncio.run(
+            old_backend.index_entries(
+                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "old text"}]
+            )
+        )
+        assert asyncio.run(old_backend.count()) == 1
+
+        mcp_app = app()
+
+        async def run_and_check():
+            async with Client(transport=mcp_app, timeout=60):
+                # lifespan's synchronous force-reconnect phase has fully run by this point - the
+                # dimension mismatch is deliberately dropped here, not left to blow up on the next
+                # ordinary request the way the original bug did.
+                check_backend = SqliteVecDocumentBackend(
+                    tmp_path / "vectors" / "vectors.sqlite3", FastEmbedBackend("BAAI/bge-small-en-v1.5")
+                )
+                count_immediately_after_reconnect = await check_backend.count()
+
+                # Background reconciliation re-embeds it under the real model - poll status until
+                # it settles rather than assuming it's already done the instant the force-reconnect
+                # phase finished.
+                status = None
+                for _ in range(50):
+                    status = await check_backend.status("arxiv", "2106.09685v2", "pdf")
+                    if status == "ready":
+                        break
+                    await asyncio.sleep(0.05)
+                final_count = await check_backend.count()
+            return count_immediately_after_reconnect, status, final_count
+
+        count_immediately_after_reconnect, final_status, final_count = asyncio.run(run_and_check())
+        assert count_immediately_after_reconnect == 0  # deliberately dropped by the dimension mismatch
+        assert final_status == "ready"  # self-healed by background reconciliation
+        assert final_count == 1
+
+    def test_full_server_startup_reconciles_a_same_dimension_renamed_model(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """The Low-finding half of the repro: same dimension, renamed model, must not go undetected."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+
+        mcp_obj_a = PriorisMCP()
+        asyncio.run(
+            mcp_obj_a._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+        )
+        manifest = mcp_obj_a._storage.manifest_for("arxiv", "2106.09685v2")
+        asyncio.run(
+            manifest.replace_chunk_rows("pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1")
+        )
+        old_backend = SqliteVecDocumentBackend(
+            tmp_path / "vectors" / "vectors.sqlite3", _RenamedStub(mcp_obj_a._embedding_backend, "old-model")
+        )
+        asyncio.run(
+            old_backend.index_entries(
+                "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "old text"}]
+            )
+        )
+
+        mcp_app = app()
+
+        async def run_and_wait():
+            async with Client(transport=mcp_app, timeout=60):
+                check_backend = SqliteVecDocumentBackend(
+                    tmp_path / "vectors" / "vectors.sqlite3", FastEmbedBackend("BAAI/bge-small-en-v1.5")
+                )
+                # Reconciliation's own re-embed runs in the background - poll status until it settles
+                # rather than assuming it's already done the instant the client connection closes.
+                for _ in range(50):
+                    status = await check_backend.status("arxiv", "2106.09685v2", "pdf")
+                    if status == "ready":
+                        return status
+                    await asyncio.sleep(0.05)
+                return status
+
+        final_status = asyncio.run(run_and_wait())
+        assert final_status == "ready"

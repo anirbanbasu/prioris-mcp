@@ -4,14 +4,16 @@ icon: lucide/folder-open
 
 # Resources
 
-Alongside its tools, PriorisMCP exposes four read-only MCP resources.
+Alongside its tools, PriorisMCP exposes six read-only MCP resources.
 
 | Resource | Returns |
 |---|---|
 | `research://{provider}/{identifier}/{format}/fulltext` | The persisted full text for that item/format, if present — backed by [`StorageBackend`](requirement-specification/storage/01-document-storage.md). |
 | `research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}` | One paginated page of the persisted parsed Markdown for that item/format, if present — also backed by `StorageBackend`. |
 | `research://arxiv/categories` | arXiv's queryable category codes and names (e.g. `cs.LG` → "Machine Learning"), sourced live from arXiv's OAI-PMH `ListSets` endpoint and covered by the standard response-cache TTL rather than `StorageBackend`. |
+| `research://openalex/work-types` | OpenAlex's work `type` vocabulary (code, display name, one-line description; 25 entries as of writing), sourced live from OpenAlex's `/work-types` endpoint and covered by the standard response-cache TTL, same as `research://arxiv/categories` — reference data for interpreting a [`research_discovery`](03-tools.md#discovery-tool) hit's own metadata, not a filter parameter that tool accepts. |
 | `notes://{note_id}/export` | That note's file representation — a `NoteExport` (JSON, not YAML frontmatter) with `suggested_filename`, `frontmatter` (every `Note` field except `text`), and `markdown_body` (exactly the note's own `text`) — backed by [`NotesBackend`](requirement-specification/storage/02-notes-storage.md). |
+| `research://vector-index/rebuild-status` | Corpus-wide vector-index reconciliation's live progress — a `VectorRebuildStatus` with `documents`/`notes`, each `{"total", "pending", "succeeded", "failed", "cancelled", "active"}` (`total == pending + succeeded + failed + cancelled`) counting only items the most recent reconciliation run decided needed rebuilding — see [Tools → Vector index reconciliation](03-tools.md#vector-index-reconciliation), [ADR-00030](requirement-specification/ADR/00030-vector-index-reconciliation.md), and [ADR-00031](requirement-specification/ADR/00031-rebuild-progress-failure-visibility.md) (why `failed`/`cancelled` exist and why there's no in-process retry). Process-local and in-memory (`VectorRebuildProgress`), not backed by any persisted storage — resets to a fresh count on every server restart. |
 
 `{provider}` is `arxiv` or `europepmc`; `{identifier}` is the *canonical* identifier (version-pinned for arXiv, `PMC:{pmcid}` for Europe PMC) that the corresponding `fetch_full_text`/`parse_full_text` call resolved to — not necessarily the identifier originally passed to that call; `{format}` is the source format (`pdf`, `html`, `xml`).
 
@@ -21,13 +23,14 @@ The markdown resource's optional `offset`/`limit` query parameters mirror `parse
 
 `research_*_fetch_full_text` and `research_*_parse_full_text` both return the exact `resource_uri` for their result, so a caller doesn't need to construct these URIs by hand.
 
-`research://arxiv/categories` has no corresponding tool: it's read-only reference data an LLM caller can consult to pick a valid category code for `research_arxiv_list_top_n`'s `include_categories`/`exclude_categories` or `research_arxiv_search`'s `cat:` query terms, not an action with inputs to invoke.
+`research://arxiv/categories` has no corresponding tool: it's read-only reference data an LLM caller can consult to pick a valid category code for `research_arxiv_list_top_n`'s `include_categories`/`exclude_categories` or `research_arxiv_search`'s `cat:` query terms, not an action with inputs to invoke. `research://openalex/work-types` is the same shape of thing, one level removed: it's reference data for interpreting a `research_discovery` hit's own metadata after the fact, not something `research_discovery` itself takes as an input.
 
 ## Behaviour
 
 - Reading `fulltext` or `markdown` **never** triggers a fetch or a parse — reading one that doesn't exist yet is a plain not-found, not an error requiring special handling. Call the corresponding tool (see [Tools](03-tools.md)) first.
-- `research://arxiv/categories` always attempts a live call to arXiv's OAI-PMH endpoint on a cache miss (there's no persisted-content precondition the way there is for `fulltext`/`markdown`) — repeat reads within `PRIORIS_MCP_RESPONSE_CACHE_TTL` are served from the response cache, not re-fetched.
+- `research://arxiv/categories` and `research://openalex/work-types` both always attempt a live call to their respective upstream endpoint on a cache miss (there's no persisted-content precondition the way there is for `fulltext`/`markdown`) — repeat reads within `PRIORIS_MCP_RESPONSE_CACHE_TTL` are served from the response cache, not re-fetched.
 - There is no per-item metadata resource: metadata is only ever response-cached (see [Tools → Caching and rate limiting](03-tools.md#caching-and-rate-limiting)), never written to `StorageBackend`, so there's no stable location for it the way there is for full text and Markdown.
-- `notes://{note_id}/export` never writes anything to disk itself — it hands the caller a `NoteExport`, and the caller is responsible for writing `frontmatter`/`markdown_body` to a file if it wants one; see [Security → Notes export does not write files](requirement-specification/05-security.md#notes-export-does-not-write-files). Unlike the other three resources above, it is **never** served from the response cache, because notes are mutable (create/update/delete) — see [Tools → Caching and rate limiting](03-tools.md#caching-and-rate-limiting) for why, and `NotesCacheBypassMiddleware` for the mechanism.
+- `notes://{note_id}/export` never writes anything to disk itself — it hands the caller a `NoteExport`, and the caller is responsible for writing `frontmatter`/`markdown_body` to a file if it wants one; see [Security → Notes export does not write files](requirement-specification/05-security.md#notes-export-does-not-write-files). Unlike the arxiv/openalex resources above, it is **never** served from the response cache, because notes are mutable (create/update/delete) — see [Tools → Caching and rate limiting](03-tools.md#caching-and-rate-limiting) for why, and `LiveResourceCacheBypassMiddleware` for the mechanism.
+- `research://vector-index/rebuild-status` is likewise **never** served from the response cache, for the same reason via the same middleware: it's live, in-process progress a caller polls while reconciliation runs, not write-once or static reference data — a cached read could otherwise repeat a stale snapshot for up to `PRIORIS_MCP_RESPONSE_CACHE_TTL` even after the corpus finishes rebuilding.
 
 See [Storage](requirement-specification/storage/01-document-storage.md) for how `fulltext`/`markdown` content is persisted and keyed, and [Functional requirements → Resources](requirement-specification/03-functional-requirements.md#resources) for the behavioural requirements these implement.

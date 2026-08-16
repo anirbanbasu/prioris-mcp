@@ -1,7 +1,15 @@
 import pytest
 from pydantic import ValidationError
 
-from prioris_mcp.models.notes import Anchor, AnchorLocation, AnchorSelectors, AuthorFilter, Note, PagedNotes
+from prioris_mcp.models.notes import (
+    Anchor,
+    AnchorLocation,
+    AnchorSelectors,
+    AuthorFilter,
+    Note,
+    NotesSearchResult,
+    PagedNotes,
+)
 
 
 class TestAnchor:
@@ -81,3 +89,15 @@ class TestPagedNotes:
         paged = PagedNotes(notes=[], offset=0, limit=50, total=0, has_more=False)
         assert paged.notes == []
         assert paged.has_more is False
+
+
+class TestNotesSearchResult:
+    """Tests for NotesSearchResult model."""
+
+    def test_index_status_defaults_to_none(self) -> None:
+        result = NotesSearchResult(fts=None, vector=None)
+        assert result.index_status is None
+
+    def test_index_status_accepts_explicit_value(self) -> None:
+        result = NotesSearchResult(fts=None, vector=None, index_status={"vector": "ready"})
+        assert result.index_status == {"vector": "ready"}

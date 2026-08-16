@@ -4,8 +4,9 @@ See docs/requirement-specification/01-architecture.md#researchpublicationprovide
 source means implementing this interface, not changing it.
 """
 
+import uuid
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -15,6 +16,10 @@ from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.storage.backend import StorageBackend
 from prioris_mcp.storage.chunking import detect_chunks
 from prioris_mcp.storage.search_index import SearchIndex
+
+if TYPE_CHECKING:
+    from prioris_mcp.vector.backend import DocumentVectorSearchBackend
+    from prioris_mcp.vector.scheduler import EmbeddingScheduler
 
 
 class CapabilityNotSupportedError(Exception):
@@ -106,6 +111,8 @@ async def persist_parsed_markdown(
     limit: int,
     page: int | None,
     page_aware: bool,
+    vector_backend: "DocumentVectorSearchBackend | None" = None,
+    embedding_scheduler: "EmbeddingScheduler | None" = None,
 ) -> dict:
     """Parse (on cache miss), persist markdown + manifest structure, sync search, paginate.
 
@@ -163,6 +170,7 @@ async def persist_parsed_markdown(
         entries = [
             {
                 "key": row["key"],
+                "chunk_id": str(uuid.uuid4()),
                 "start": row["start"],
                 "length": row["length"],
                 "text": markdown[row["start"] : row["start"] + row["length"]],
@@ -170,6 +178,12 @@ async def persist_parsed_markdown(
             for row in search_rows
         ]
         await search_index.index_entries(provider, external_identifier, source_format, entries)
+
+        if vector_backend is not None and embedding_scheduler is not None:
+            embedding_scheduler.schedule(
+                (provider, external_identifier, source_format),
+                lambda: vector_backend.index_entries(provider, external_identifier, source_format, entries),
+            )
 
     base_offset = offset
     if page is not None:

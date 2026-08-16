@@ -1,7 +1,7 @@
 [project]
 name = "prioris-mcp"
-version = "0.1.1"
-description = "A model context protocol (MCP) server to facilitate looking up prior art."
+version = "0.2.0"
+description = "A model context protocol (MCP) server to facilitate looking up and discussing prior art."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
@@ -22,11 +22,13 @@ dependencies = [
     "anyio>=4.14.2",
     "defusedxml>=0.7.1",
     "environs>=15.0.1",
+    "fastembed>=0.8.0",
     "fastmcp>=3.4.4",
     "html-to-markdown>=3.10.6",
     "httpx>=0.28.1",
     "liteparse>=2.9.0",
     "lxml>=6.1.1",
+    "sqlite-vec>=0.1.9",
 ]
 
 [project.scripts]
@@ -38,7 +40,7 @@ Issues = "https://github.com/anirbanbasu/prioris-mcp/issues"
 Download = "https://pypi.org/project/prioris-mcp/"
 
 [build-system]
-requires = ["uv_build>=0.11.29,<0.12.0"]
+requires = ["uv_build>=0.11.29,<0.13.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
@@ -104,6 +106,11 @@ convention = "google"
 # don't format python in docstrings, pytest-examples takes care of it
 docstring-code-format = false
 # quote-style = "single"
+
+[tool.pytest.ini_options]
+markers = [
+    "live_openalex: hits the real OpenAlex API; skipped unless PRIORIS_MCP_RUN_LIVE_TESTS=1 is set",
+]
 
 [tool.coverage.run]
 omit = [

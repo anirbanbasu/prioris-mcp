@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +14,44 @@ from rich.logging import RichHandler
 PACKAGE_NAME = "prioris-mcp"
 env = Env()
 env.read_env()
+
+
+class RedactingFilter(logging.Filter):
+    """Redact common credentials and personally identifiable data from rendered log messages."""
+
+    _DEFAULT_PATTERNS: tuple[tuple[str, str], ...] = (
+        # Covers query strings (``api_key=value``), JSON, and Python dict representations while
+        # retaining a recognisable field name in the resulting diagnostic.
+        (
+            r"(?P<name>\b(?:api[_-]?keys?|passwords?|secrets?)\b)(?:[\"']?\s*(?:=|:)\s*[\"']?)[^&\s\"',}\]]+",
+            r"\g<name>=[REDACTED]",
+        ),
+        # Both spellings are common in HTTP clients and proxy logs.  Accept quoted Python-dict
+        # forms as well as ordinary HTTP header syntax.
+        (
+            r"(?P<scheme>\b(?:authorization|authorisation)\b(?:[\"']?\s*:\s*[\"']?)Bearer\s+)[^&\s\"',}\]]+",
+            r"\g<scheme>[REDACTED]",
+        ),
+        (r"[\w.-]+@[\w.-]+\.\w+", "[REDACTED]"),
+        (r"\b(?:\d[ -]*?){13,16}\b", "[REDACTED]"),
+    )
+
+    def __init__(self, patterns: Sequence[tuple[str, str]] | None = None) -> None:
+        super().__init__()
+        self._patterns = [
+            (re.compile(pattern, re.IGNORECASE), replacement)
+            for pattern, replacement in (patterns or self._DEFAULT_PATTERNS)
+        ]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        sanitized_msg = record.getMessage()
+        for pattern, replacement in self._patterns:
+            sanitized_msg = pattern.sub(replacement, sanitized_msg)
+
+        # Overwrite the rendered message and clear args so formatters do not re-merge them.
+        record.msg = sanitized_msg
+        record.args = ()
+        return True
 
 
 def _validate_str_dict(value: object) -> None:
@@ -97,6 +137,40 @@ class EnvVars:
         default=_default_data_home / "prioris-mcp" / "notes",
     )
 
+    PRIORIS_MCP_EMBEDDING_MODEL = env.str(
+        "PRIORIS_MCP_EMBEDDING_MODEL",
+        # fastembed's own default model - see ADR-00023. Left as an open string, not
+        # OneOf-validated: fastembed already errors on an unrecognised model name, so this
+        # project doesn't duplicate that validation. Changing this changes the vector table's
+        # dimension, which is why index_status compares each stored row's own recorded model
+        # against this value rather than assuming it never changes.
+        default="BAAI/bge-small-en-v1.5",
+    )
+
+    PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT = env.int(
+        "PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT",
+        default=10,
+        validate=Range(min=1, max=200),
+    )
+
+    PRIORIS_MCP_VECTOR_DIR = env.path(
+        "PRIORIS_MCP_VECTOR_DIR",
+        # Sibling of PRIORIS_MCP_STORAGE_DIR, its own root - see
+        # docs/requirement-specification/search/02-vector-search.md#storage-layout-one-file-per-corpus-separate-from-every-other-backends-files.
+        default=_default_data_home / "prioris-mcp" / "vectors",
+    )
+
+    PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY: int = env.int(
+        "PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY",
+        # Bounds concurrently-running background embedding tasks - both a live per-document
+        # trigger and a corpus-wide reconciliation run at startup (see
+        # docs/requirement-specification/search/02-vector-search.md) share this one bound via
+        # EmbeddingScheduler(max_concurrent=...), so a large corpus reconciliation can't storm the
+        # process with unbounded concurrent embedding tasks.
+        default=4,
+        validate=Range(min=1),
+    )
+
     PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS = env.float(
         "PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS",
         # Total time a single tool call's rate-limit backoff may spend retrying before giving up
@@ -153,6 +227,25 @@ class EnvVars:
         validate=Range(min=1),
     )
 
+    PRIORIS_MCP_OPENALEX_API_KEY: str | None = env.str(
+        "PRIORIS_MCP_OPENALEX_API_KEY",
+        # OpenAlex has required an API key on every request since 2026-02-13, replacing the
+        # mailto polite-pool parameter (removed, not just deprecated) - see
+        # https://help.openalex.org/api/authentication. Left optional here (default=None), rather
+        # than failing startup, so an unconfigured key doesn't break tools unrelated to discovery;
+        # OpenAlexClient.search_semantic/list_work_types raise ConfigurationError with an
+        # actionable message the first time discovery is actually used without one.
+        default=None,
+    )
+
+    PRIORIS_MCP_DISCOVERY_MAX_RESULTS: int = env.int(
+        "PRIORIS_MCP_DISCOVERY_MAX_RESULTS",
+        # OpenAlex's search.semantic caps /works results at 50 per query, not the ordinary
+        # /works per-page cap of 200 - see https://help.openalex.org/api/semantic-search/.
+        default=25,
+        validate=Range(min=1, max=50),
+    )
+
     PRIORIS_MCP_PDF_OCR_ENABLED: bool = env.bool(
         "PRIORIS_MCP_PDF_OCR_ENABLED",
         # liteparse's own default (True) silently falls back to its bundled Tesseract engine,
@@ -185,12 +278,20 @@ class EnvVars:
     )
 
 
+rich_logging_handler = RichHandler(
+    # stdout is reserved for the JSON-RPC stream under stdio transport; logs must not share it.
+    rich_tracebacks=False,
+    markup=True,
+    show_path=False,
+    show_time=False,
+    console=Console(stderr=True),
+)
+
+rich_logging_handler.addFilter(RedactingFilter())
+
 logging.basicConfig(
     level=EnvVars.PRIORIS_MCP_LOG_LEVEL,
     format="%(message)s",
     datefmt="[%X]",
-    # stdout is reserved for the JSON-RPC stream under stdio transport; logs must not share it.
-    handlers=[
-        RichHandler(rich_tracebacks=False, markup=True, show_path=False, show_time=False, console=Console(stderr=True))
-    ],
+    handlers=[rich_logging_handler],
 )

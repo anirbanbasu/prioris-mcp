@@ -8,6 +8,9 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from prioris_mcp.models.vector import PagedVectorSearchMatches
+from prioris_mcp.vector.backend import IndexStatus
+
 
 class FullTextFetchResult(BaseModel):
     """Output of `fetch_full_text`, identical across both v1 providers.
@@ -135,6 +138,10 @@ class ListFetchedResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     entries: Annotated[list[StorageEntry], Field(..., strict=True, description="The matching persisted entries.")]
+    offset: Annotated[int, Field(..., strict=True)]
+    limit: Annotated[int, Field(..., strict=True)]
+    total: Annotated[int, Field(..., strict=True)]
+    has_more: Annotated[bool, Field(..., strict=True)]
 
 
 class DeleteEntryRef(BaseModel):
@@ -172,9 +179,63 @@ class SearchMatch(BaseModel):
     score: Annotated[float, Field(..., strict=True)]
 
 
-class SearchFetchedResult(BaseModel):
-    """Output of `research_search_fetched`."""
+class PagedSearchMatches(BaseModel):
+    """One page of FTS search results, with paging metadata."""
 
     model_config = ConfigDict(extra="forbid")
 
     matches: Annotated[list[SearchMatch], Field(..., strict=True)]
+    offset: Annotated[int, Field(..., strict=True)]
+    limit: Annotated[int, Field(..., strict=True)]
+    total: Annotated[int, Field(..., strict=True)]
+    has_more: Annotated[bool, Field(..., strict=True)]
+
+
+class SearchFetchedResult(BaseModel):
+    """Output of `research_search_fetched`.
+
+    See docs/requirement-specification/search/02-vector-search.md#composition-a-mode-parameter-not-a-new-opaque-smart-search.
+    `fts`/`vector` are each populated only when that mechanism was requested (mode == that name,
+    or mode == "hybrid"); `index_status` reports every mechanism that's a capability of the
+    running server, regardless of which single mode was requested.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fts: Annotated[PagedSearchMatches | None, Field(default=None)] = None
+    vector: Annotated[PagedVectorSearchMatches | None, Field(default=None)] = None
+    index_status: Annotated[dict[str, IndexStatus], Field(default_factory=dict)]
+
+
+class VectorRebuildMechanismStatus(BaseModel):
+    """One mechanism's (documents or notes) corpus-wide rebuild progress.
+
+    See docs/requirement-specification/ADR/00031-rebuild-progress-failure-visibility.md.
+    `total`/`pending`/`succeeded`/`failed`/`cancelled` count only items reconciliation decided
+    needed rebuilding this run, not the whole corpus - a corpus already fully ready reports all
+    zeros. `total == pending + succeeded + failed + cancelled` always holds, so a caller can fully
+    account for every item this run started with. `active` (`pending > 0`) is a convenience field
+    so a caller doesn't have to derive it itself.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: Annotated[int, Field(..., strict=True, ge=0)]
+    pending: Annotated[int, Field(..., strict=True, ge=0)]
+    succeeded: Annotated[int, Field(..., strict=True, ge=0)]
+    failed: Annotated[int, Field(..., strict=True, ge=0)]
+    cancelled: Annotated[int, Field(..., strict=True, ge=0)]
+    active: Annotated[bool, Field(...)]
+
+
+class VectorRebuildStatus(BaseModel):
+    """Output of the `research://vector-index/rebuild-status` resource.
+
+    Process-local, in-memory, not persisted - answers "is the rebuild that started when this
+    process started still going," not a durable job log.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    documents: Annotated[VectorRebuildMechanismStatus, Field(...)]
+    notes: Annotated[VectorRebuildMechanismStatus, Field(...)]

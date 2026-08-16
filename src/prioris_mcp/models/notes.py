@@ -8,6 +8,9 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from prioris_mcp.models.vector import PagedNoteVectorMatches
+from prioris_mcp.vector.backend import IndexStatus
+
 
 class AnchorLocation(BaseModel):
     """Coarse, unvalidated positional hint - never resolved against manifest.sqlite."""
@@ -116,3 +119,40 @@ class PagedNotes(BaseModel):
     limit: Annotated[int, Field(..., strict=True)]
     total: Annotated[int, Field(..., strict=True)]
     has_more: Annotated[bool, Field(..., strict=True)]
+
+
+class NotesSearchResult(BaseModel):
+    """Output of `research_notes_search`.
+
+    See docs/requirement-specification/search/02-vector-search.md#composition-a-mode-parameter-not-a-new-opaque-smart-search.
+    `fts`/`vector` are each populated only when that mechanism was requested (mode == that name,
+    or mode == "hybrid" with a keyword given to embed).
+
+    Unlike documents (naturally scoped by provider+identifier+format), a notes-search request has
+    no single-object scope a corpus-wide `index_status` could describe - a structural-filter query
+    can span many documents' notes at once. `index_status` is therefore populated only when a
+    vector search actually ran this call (mode in ("vector", "hybrid") with a keyword given) - but
+    its scope is the caller's full structural-filter match set (every note_id `NotesBackend.
+    matching_ids()` returns for the given provider/identifier/format/date/author/tags filters),
+    not just the notes that happened to land on this page's `vector` results. A query with no
+    structural filters at all falls back to the whole corpus (`matching_ids()` with no filters) for
+    this purpose, even though the KNN query itself stays unscoped - this is deliberate: an in-scope
+    note that hasn't been embedded yet has no vector row, so it can never appear in `vector`, but a
+    caller still needs to see `not_built`/`building` for it rather than a stale/unrelated corpus-
+    wide `ready`. Pagination must never narrow this scope, since that would let a caller who pages
+    past a not-yet-ready note see a falsely optimistic status.
+
+    If the scope is empty (no note matches the structural filters, or the corpus is genuinely
+    empty), `index_status` is `{"vector": "not_built"}` - there is nothing in scope to build.
+    Otherwise every in-scope note's status is computed (the in-memory scheduler's `is_building`
+    overriding the persisted status, same as documents), and one value is picked by priority -
+    `building` first, then `not_built`, then `stale`, then `ready` only if every in-scope note is
+    ready - so the aggregate always reflects the least-settled status present in scope. There is no
+    `fts` key - notes-FTS has no per-request scope to check existence against, unlike documents'.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    fts: Annotated[PagedNotes | None, Field(default=None)] = None
+    vector: Annotated[PagedNoteVectorMatches | None, Field(default=None)] = None
+    index_status: Annotated[dict[str, IndexStatus] | None, Field(default=None)] = None

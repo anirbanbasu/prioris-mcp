@@ -1,8 +1,11 @@
 import importlib
+import logging
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+from environs import Env, EnvValidationError
 
 import prioris_mcp
 
@@ -17,6 +20,59 @@ def _restore_module_after_reload():
 def _reload_prioris_mcp():
     """Reload prioris_mcp module and return it."""
     return importlib.reload(prioris_mcp)
+
+
+class TestRedactingFilter:
+    """The application handler must never render sensitive values into logs."""
+
+    @pytest.mark.parametrize(
+        ("message", "secret", "expected"),
+        [
+            (
+                "HTTP Request: GET https://api.openalex.org/works?api_key=test-api-key.123%2Fvalue&per-page=5",
+                "test-api-key.123%2Fvalue",
+                "api_key=[REDACTED]",
+            ),
+            (
+                'provider payload {"password": "correct-horse-battery-staple"}',
+                "correct-horse-battery-staple",
+                "password=[REDACTED]",
+            ),
+            ("provider payload {'secret': 'token.with/punctuation'}", "token.with/punctuation", "secret=[REDACTED]"),
+            (
+                "Authorisation: Bearer bearer-token.with/punctuation",
+                "bearer-token.with/punctuation",
+                "Authorisation: Bearer [REDACTED]",
+            ),
+            ("Authorization: Bearer another-token", "another-token", "Authorization: Bearer [REDACTED]"),
+        ],
+    )
+    def test_redacts_sensitive_values(self, message: str, secret: str, expected: str):
+        record = logging.LogRecord("test", logging.INFO, "", 0, message, (), None)
+
+        assert prioris_mcp.RedactingFilter().filter(record) is True
+        assert secret not in record.getMessage()
+        assert expected in record.getMessage()
+
+    def test_configured_handler_redacts_rendered_output(self):
+        assert any(
+            isinstance(log_filter, prioris_mcp.RedactingFilter)
+            for log_filter in prioris_mcp.rich_logging_handler.filters
+        )
+        record = logging.LogRecord(
+            "httpx",
+            logging.INFO,
+            "",
+            0,
+            "HTTP Request: GET https://api.openalex.org/work-types?api_key=real-key",
+            (),
+            None,
+        )
+
+        with prioris_mcp.rich_logging_handler.console.capture() as captured:
+            prioris_mcp.rich_logging_handler.handle(record)
+
+        assert "real-key" not in captured.get()
 
 
 class TestStorageDirDefault:
@@ -75,6 +131,34 @@ class TestRateLimitBackoffBudgetDefault:
         monkeypatch.setenv("PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS", "12.5")
         reloaded = importlib.reload(prioris_mcp)
         assert reloaded.EnvVars.PRIORIS_MCP_RATE_LIMIT_BACKOFF_BUDGET_SECONDS == 12.5
+
+
+class TestDiscoveryEnvVars:
+    """OpenAlex discovery environment-variable defaults and validation."""
+
+    def test_openalex_api_key_defaults_to_none(self, monkeypatch: "pytest.MonkeyPatch"):
+        # A developer's own .env may legitimately set PRIORIS_MCP_OPENALEX_API_KEY; module reload
+        # re-runs env.read_env(), which would silently restore it from .env and defeat delenv()
+        # below. Stub read_env() for just this reload so the default is checked in isolation.
+        monkeypatch.delenv("PRIORIS_MCP_OPENALEX_API_KEY", raising=False)
+        with patch.object(Env, "read_env", lambda self, *args, **kwargs: None):
+            reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_OPENALEX_API_KEY is None
+
+    def test_openalex_api_key_reads_from_env(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_OPENALEX_API_KEY", "test-api-key-123")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_OPENALEX_API_KEY == "test-api-key-123"
+
+    def test_discovery_max_results_defaults_to_25(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_DISCOVERY_MAX_RESULTS", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_DISCOVERY_MAX_RESULTS == 25
+
+    def test_discovery_max_results_rejects_above_50(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_DISCOVERY_MAX_RESULTS", "51")
+        with pytest.raises(EnvValidationError):
+            importlib.reload(prioris_mcp)
 
 
 class TestHttpTimeoutSecondsDefault:
@@ -214,3 +298,42 @@ class TestPdfOcrConfigDefaults:
         monkeypatch.setenv("PRIORIS_MCP_PDF_OCR_SERVER_HEADERS", '{"X-Retries": 3}')
         with pytest.raises(EnvValidationError):
             importlib.reload(prioris_mcp)
+
+
+class TestVectorSearchEnvVarsDefaults:
+    """EnvVars.PRIORIS_MCP_EMBEDDING_MODEL, PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT, and PRIORIS_MCP_VECTOR_DIR defaults and overrides."""
+
+    def test_embedding_model_defaults_to_bge_small(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_EMBEDDING_MODEL", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_EMBEDDING_MODEL == "BAAI/bge-small-en-v1.5"
+
+    def test_embedding_model_reads_from_env(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_EMBEDDING_MODEL == "intfloat/multilingual-e5-large"
+
+    def test_vector_search_default_limit_defaults_to_10(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT == 10
+
+    def test_vector_dir_defaults_next_to_storage_dir(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_VECTOR_DIR", raising=False)
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_VECTOR_DIR.name == "vectors"
+
+
+class TestEmbeddingMaxConcurrencyDefault:
+    """EnvVars.PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY default and override."""
+
+    def test_defaults_to_4(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY", raising=False)
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY == 4
+
+    def test_explicit_override_wins(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY", "8")
+        reloaded = importlib.reload(prioris_mcp)
+        assert reloaded.EnvVars.PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY == 8

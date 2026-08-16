@@ -1,0 +1,1 @@
+"""OpenAlex-backed research discovery."""

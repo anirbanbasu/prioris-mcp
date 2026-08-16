@@ -8,10 +8,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
+- None documented yet.
+
+### Changed
+
+- None documented yet.
+
+### Deprecated
+
+- None documented yet.
+
+### Removed
+
+- None documented yet.
+
+### Fixed
+
+- None documented yet.
+
+### Security
+
+- None documented yet.
+
+## [0.2.0] - 2026-08-16
+
+### Added
+
 - `research_notes_create`/`research_notes_read`/`research_notes_update`/`research_notes_delete`: CRUD for user-authored notes against a document, or against a bare identifier predating any fetch, backed by a pluggable `NotesBackend` (SQLite in v1).
-- `research_notes_search`: structured filtering (provider, canonical identifier, format, date range, author, tags) plus optional FTS5 keyword search over note text, paged and returned newest first.
+- `research_notes_search`: structured filtering (provider, canonical identifier, format, date range, author, tags) plus optional full-text or semantic-vector search over note text (`mode`: `fts`\|`vector`\|`hybrid`), paged and returned newest first.
 - `notes://{note_id}/export`: a read-only resource returning a note's file representation (`suggested_filename`, `frontmatter`, `markdown_body`) for the caller to write to disk itself; never served from the response cache, since notes are mutable.
-- `PRIORIS_MCP_NOTES_DIR`: environment variable controlling where the notes SQLite databases are persisted, a sibling of `PRIORIS_MCP_STORAGE_DIR`'s `downloads`.
+- Semantic-vector search over previously-persisted documents and notes, alongside the existing FTS5 keyword search: `research_search_fetched` and `research_notes_search` both gain a `mode` parameter (`"fts"` (default) \| `"vector"` \| `"hybrid"`), backed by a pluggable `EmbeddingBackend`/`VectorSearchBackend` (fastembed + sqlite-vec in v1). Every response carries `index_status`, reporting each mechanism's `"ready"`/`"stale"`/`"not_built"`/`"building"` state.
+- Corpus-wide vector-index reconciliation: an embedding-model change (`PRIORIS_MCP_EMBEDDING_MODEL`) triggers an automatic background rebuild of every stale document/note vector at server startup, with live progress readable via the new `research://vector-index/rebuild-status` resource.
+- `research_discovery`: discover external research candidates not already in the local corpus, ranked by OpenAlex's embedding-based semantic search, with pagination and `from_year`/`to_year`/`open_access_only` filters. Each hit includes a `fetch_route` describing how to actually retrieve full text for it.
+- `research://openalex/work-types`: a read-only resource listing OpenAlex's work `type` vocabulary, for interpreting a `research_discovery` hit's own metadata.
+- Offset/limit pagination (`offset`/`limit`/`total`/`has_more`) added to `research_list_fetched` and `research_search_fetched`, matching the paging shape already used by `parse_full_text`.
+- New environment variables: `PRIORIS_MCP_NOTES_DIR`, `PRIORIS_MCP_VECTOR_DIR`, `PRIORIS_MCP_EMBEDDING_MODEL`, `PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY`, `PRIORIS_MCP_VECTOR_SEARCH_DEFAULT_LIMIT`, `PRIORIS_MCP_OPENALEX_API_KEY`, `PRIORIS_MCP_DISCOVERY_MAX_RESULTS`.
+
+### Changed
+
+- **Breaking:** `research_search_fetched`'s output is restructured to support `mode` composition — matches now come back as `fts`/`vector` (each independently paged), not a single flat `matches` list.
+
+### Fixed
+
+- Log output no longer leaks credentials (e.g. API keys in outbound HTTP request URLs/headers) — a redaction filter now scrubs common credential/PII patterns from rendered log messages before they reach the log handler.
 
 ## [0.1.1] - 2026-08-07
 
@@ -110,7 +149,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Concurrently *executing* (not just concurrently *awaited*) JATS-to-HTML transforms are capped by `PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS` (default `min(4, os.cpu_count())`), closing an unbounded-thread-accumulation risk under sustained malicious input.
 - The Europe PMC provider only ever follows its own same-domain `fullTextXML` endpoint for full-text retrieval, never the publisher- or third-party-hosted full-text URLs surfaced in search results.
 
-[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.1...HEAD
+[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0.post2...v0.1.1
 [0.1.0.post2]: https://github.com/anirbanbasu/prioris-mcp/compare/v.0.1.0...v0.1.0.post2
 [0.1.0]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.0.1...v.0.1.0

@@ -38,3 +38,10 @@ class FileTooLargeError(Exception):
 
     Maps to the `file_too_large` error code.
     """
+
+
+class ConfigurationError(Exception):
+    """A required server-side configuration value is missing or invalid.
+
+    Maps to the `configuration_error` error code.
+    """

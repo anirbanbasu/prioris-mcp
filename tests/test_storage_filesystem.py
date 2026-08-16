@@ -118,7 +118,9 @@ class TestList:
 
     def test_list_empty_store(self, tmp_path: Path):
         backend = FilesystemStorageBackend(tmp_path)
-        assert asyncio.run(backend.list()) == []
+        entries, total = asyncio.run(backend.list())
+        assert entries == []
+        assert total == 0
 
     def test_list_reports_public_identifier_when_set(self, tmp_path: Path):
         backend = FilesystemStorageBackend(tmp_path)
@@ -127,7 +129,7 @@ class TestList:
             await backend.write("localfile", "abc123hash", "pdf", b"raw", public_identifier="20260729-1430-a3f2")
             return await backend.list(provider="localfile")
 
-        entries = asyncio.run(scenario())
+        entries, _total = asyncio.run(scenario())
         assert entries[0]["identifier"] == "20260729-1430-a3f2"
 
     def test_list_reports_canonical_identifier_when_no_public_identifier(self, tmp_path: Path):
@@ -137,7 +139,7 @@ class TestList:
             await backend.write("arxiv", "2106.09685v2", "pdf", b"raw")
             return await backend.list(provider="arxiv")
 
-        entries = asyncio.run(scenario())
+        entries, _total = asyncio.run(scenario())
         assert entries[0]["identifier"] == "2106.09685v2"
 
     def test_list_includes_artefact_field(self, tmp_path: Path):
@@ -148,7 +150,7 @@ class TestList:
             await backend.write("arxiv", "2106.09685v2", "pdf", b"# md", artefact="markdown")
             return await backend.list(provider="arxiv")
 
-        entries = asyncio.run(scenario())
+        entries, _total = asyncio.run(scenario())
         assert {e["artefact"] for e in entries} == {"document", "markdown"}
 
     def test_list_filters_by_provider_and_format(self, tmp_path: Path):
@@ -164,9 +166,25 @@ class TestList:
             return all_entries, arxiv_entries, arxiv_pdf_entries
 
         all_entries, arxiv_entries, arxiv_pdf_entries = asyncio.run(scenario())
-        assert len(all_entries) == 3
-        assert len(arxiv_entries) == 2
-        assert len(arxiv_pdf_entries) == 1
+        assert len(all_entries[0]) == 3
+        assert all_entries[1] == 3
+        assert len(arxiv_entries[0]) == 2
+        assert arxiv_entries[1] == 2
+        assert len(arxiv_pdf_entries[0]) == 1
+        assert arxiv_pdf_entries[1] == 1
+
+    def test_list_offset_and_limit_thread_through_to_catalogue(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write("arxiv", "A", "pdf", b"1")
+            await backend.write("arxiv", "B", "pdf", b"2")
+            await backend.write("arxiv", "C", "pdf", b"3")
+            return await backend.list(provider="arxiv", offset=1, limit=1)
+
+        entries, total = asyncio.run(scenario())
+        assert total == 3
+        assert len(entries) == 1
 
 
 class TestDeleteSingleArtefact:
@@ -212,12 +230,13 @@ class TestDeleteAllCascades:
             await backend.write("arxiv", "2106.09685v2", "pdf", b"raw", artefact="document")
             await backend.write("arxiv", "2106.09685v2", "pdf", b"# md", artefact="markdown")
             deleted = await backend.delete("arxiv", "2106.09685v2", "pdf", "all")
-            entries = await backend.list(provider="arxiv")
-            return deleted, entries
+            entries, total = await backend.list(provider="arxiv")
+            return deleted, entries, total
 
-        deleted, entries = asyncio.run(scenario())
+        deleted, entries, total = asyncio.run(scenario())
         assert deleted is True
         assert entries == []
+        assert total == 0
         format_dir = backend._document_dir("arxiv", "2106.09685v2") / "pdf"
         assert not format_dir.exists()
 
@@ -357,3 +376,62 @@ class TestManifestForIntegration:
             return await backend.manifest_for("arxiv", "2106.09685v2").total_pages("pdf")
 
         assert asyncio.run(scenario()) == 1
+
+
+class TestListMarkdownEntries:
+    """list_markdown_entries() - the corpus-enumeration primitive reconciliation uses (Task 4)."""
+
+    def test_empty_store_returns_nothing(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+        entries, total = asyncio.run(backend.list_markdown_entries())
+        assert entries == []
+        assert total == 0
+
+    def test_only_includes_markdown_artefacts(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"raw", artefact="document")
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"# md", artefact="markdown")
+            return await backend.list_markdown_entries()
+
+        entries, total = asyncio.run(scenario())
+        assert total == 1
+        assert entries[0]["format"] == "pdf"
+
+    def test_entry_carries_both_canonical_and_external_identifier(self, tmp_path: Path):
+        """Localfile's canonical (storage-key/hash) identifier differs from its public one."""
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write(
+                "localfile", "abc123hash", "pdf", b"# md", artefact="markdown", public_identifier="20260729-1430-a3f2"
+            )
+            return await backend.list_markdown_entries()
+
+        entries, _total = asyncio.run(scenario())
+        assert entries[0]["canonical_identifier"] == "abc123hash"
+        assert entries[0]["identifier"] == "20260729-1430-a3f2"
+
+    def test_entry_identifier_falls_back_to_canonical_when_no_public_identifier(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            await backend.write("arxiv", "2106.09685v2", "pdf", b"# md", artefact="markdown")
+            return await backend.list_markdown_entries()
+
+        entries, _total = asyncio.run(scenario())
+        assert entries[0]["canonical_identifier"] == "2106.09685v2"
+        assert entries[0]["identifier"] == "2106.09685v2"
+
+    def test_offset_and_limit_thread_through(self, tmp_path: Path):
+        backend = FilesystemStorageBackend(tmp_path)
+
+        async def scenario():
+            for i in range(3):
+                await backend.write("arxiv", f"doc-{i}", "pdf", b"# md", artefact="markdown")
+            return await backend.list_markdown_entries(offset=1, limit=1)
+
+        entries, total = asyncio.run(scenario())
+        assert total == 3
+        assert len(entries) == 1

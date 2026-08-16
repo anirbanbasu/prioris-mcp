@@ -13,10 +13,11 @@ from prioris_mcp import EnvVars
 from prioris_mcp.middleware import (
     DecodeBinaryResourceContentMiddleware,
     EncodeBinaryResourceContentMiddleware,
-    NotesCacheBypassMiddleware,
+    LiveResourceCacheBypassMiddleware,
     ResponseMetadataMiddleware,
     StripUnknownArgumentsMiddleware,
 )
+from prioris_mcp.models.arxiv import ArxivCategoriesResult, ArxivCategory
 from prioris_mcp.server import PriorisMCP
 
 logger = logging.getLogger(__name__)
@@ -303,27 +304,28 @@ startxref
         assert first_read[0].text == second_read[0].text
 
 
-class TestNotesCacheBypassMiddleware:
-    """Dedicated test class for NotesCacheBypassMiddleware.
+class TestLiveResourceCacheBypassMiddleware:
+    """Dedicated test class for LiveResourceCacheBypassMiddleware.
 
     Needs an isolated notes/storage directory (unlike `_stubbed_mcp_obj()`'s bare `PriorisMCP()`,
     which would hit the real default `~/.local/share/prioris-mcp/`), so this mirrors
     `TestResearchNotesCreate._server_and_client` in test_server.py, additionally wiring up the
-    middleware chain under test: NotesCacheBypassMiddleware before a real (enabled)
+    middleware chain under test: LiveResourceCacheBypassMiddleware before a real (enabled)
     ResponseCachingMiddleware, matching server.py's app() ordering.
     """
 
-    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+    def _server_and_client(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch") -> tuple[PriorisMCP, Client]:
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
         mcp_obj = PriorisMCP()
         server = FastMCP()
         server_with_features = mcp_obj.register_features(server)
-        server_with_features.add_middleware(NotesCacheBypassMiddleware())
+        server_with_features.add_middleware(LiveResourceCacheBypassMiddleware())
         server_with_features.add_middleware(
             ResponseCachingMiddleware(read_resource_settings=ReadResourceSettings(ttl=3600, enabled=True))
         )
-        return Client(transport=server_with_features, timeout=60)
+        return mcp_obj, Client(transport=server_with_features, timeout=60)
 
     def test_notes_export_resource_is_never_served_from_cache(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         """Create -> read export -> update -> read export again must reflect the update.
@@ -331,7 +333,7 @@ class TestNotesCacheBypassMiddleware:
         Without the bypass, ResponseCachingMiddleware would serve the second read from its cache,
         returning the pre-update `markdown_body` instead of the current one.
         """
-        client = self._server_and_client(tmp_path, monkeypatch)
+        _mcp_obj, client = self._server_and_client(tmp_path, monkeypatch)
 
         async def scenario():
             async with client:
@@ -344,7 +346,7 @@ class TestNotesCacheBypassMiddleware:
                         "text": "original text",
                     },
                 )
-                note_id = created.structured_content["id"]
+                note_id = created.structured_content["id"]  # ty: ignore[not-subscriptable]
                 uri = f"notes://{note_id}/export"
                 first_read = await client.read_resource(uri)
                 await client.call_tool("research_notes_update", arguments={"note_id": note_id, "text": "updated text"})
@@ -357,14 +359,85 @@ class TestNotesCacheBypassMiddleware:
         assert first_payload["markdown_body"] == "original text"
         assert second_payload["markdown_body"] == "updated text"
 
-    def test_on_read_resource_passes_non_notes_uris_through_to_call_next(self):
-        """The bypass is scoped to notes:// - every other URI must still reach call_next unchanged.
+    def test_rebuild_status_resource_is_never_served_from_cache(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Read at remaining=1, mutate progress in-memory, read again - must reflect the mutation.
+
+        Without the bypass, ResponseCachingMiddleware would serve the second read from its cache
+        for up to the configured TTL (5 minutes by default in production), even though the
+        resource is documented as live reconciliation progress a caller polls.
+        """
+        mcp_obj, client = self._server_and_client(tmp_path, monkeypatch)
+        uri = "research://vector-index/rebuild-status"
+
+        async def scenario():
+            async with client:
+                mcp_obj._rebuild_progress.set_documents_total(1)
+                first_read = await client.read_resource(uri)
+                mcp_obj._rebuild_progress.document_succeeded()
+                second_read = await client.read_resource(uri)
+                return first_read, second_read
+
+        first_read, second_read = asyncio.run(scenario())
+        first_payload = json.loads(first_read[0].text)
+        second_payload = json.loads(second_read[0].text)
+        assert first_payload["documents"] == {
+            "total": 1,
+            "pending": 1,
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "active": True,
+        }
+        assert second_payload["documents"] == {
+            "total": 1,
+            "pending": 0,
+            "succeeded": 1,
+            "failed": 0,
+            "cancelled": 0,
+            "active": False,
+        }
+
+    def test_an_ordinary_resource_is_still_served_from_cache(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """A companion check that the bypass is scoped, not a blanket cache disable.
+
+        Stubs `research://arxiv/categories`'s underlying provider call to return a different
+        payload each call, then asserts the second read still equals the first - proving it was
+        actually served from the cache (a fresh, non-cached call would observe the changed value).
+        """
+        mcp_obj, client = self._server_and_client(tmp_path, monkeypatch)
+        uri = "research://arxiv/categories"
+        responses = iter(
+            [
+                ArxivCategoriesResult(categories=[ArxivCategory(code="cs.CL", name="first call")]),
+                ArxivCategoriesResult(categories=[ArxivCategory(code="cs.CL", name="second call")]),
+            ]
+        )
+
+        async def _fake_list_categories():
+            return next(responses)
+
+        monkeypatch.setattr(mcp_obj._arxiv_provider, "list_categories", _fake_list_categories)
+
+        async def scenario():
+            async with client:
+                first_read = await client.read_resource(uri)
+                second_read = await client.read_resource(uri)
+                return first_read, second_read
+
+        first_read, second_read = asyncio.run(scenario())
+        assert first_read[0].text == second_read[0].text
+        assert "first call" in first_read[0].text
+
+    def test_on_read_resource_passes_non_bypassed_uris_through_to_call_next(self):
+        """The bypass is scoped to notes:// and the rebuild-status URI - everything else passes through.
 
         Inspects the middleware's on_read_resource logic directly, rather than round-tripping
-        through a second live resource type, since a non-notes resource isn't available in this
+        through a second live resource type, since a non-bypassed resource isn't available in this
         minimal, notes-only harness without overcomplicating the setup.
         """
-        middleware = NotesCacheBypassMiddleware()
+        middleware = LiveResourceCacheBypassMiddleware()
         calls: list[object] = []
 
         class _StubMessage:

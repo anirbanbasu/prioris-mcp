@@ -5,6 +5,7 @@ must already be canonical/version-pinned by the time it reaches this class - res
 current" is `resolve_identifier`'s job, not storage's.
 """
 
+import builtins
 from abc import ABC, abstractmethod
 from asyncio import Lock
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -71,10 +72,27 @@ class StorageBackend(ABC):
         """
 
     @abstractmethod
-    async def list(self, provider: str | None = None, format: str | None = None) -> list[dict]:
+    async def list(
+        self, provider: str | None = None, format: str | None = None, *, offset: int = 0, limit: int = 50
+    ) -> tuple[list[dict], int]:
         """Enumerate persisted catalogue entries, optionally filtered by provider/format.
 
         Each entry: {"provider", "identifier", "format", "artefact", "fetched_at_or_parsed_at", "size_bytes"}.
+        Newest-first (by recorded_at). Returns (entries, total) — total is the unpaged count
+        matching the given filters.
+        """
+
+    @abstractmethod
+    async def list_markdown_entries(self, *, offset: int = 0, limit: int = 50) -> tuple[builtins.list[dict], int]:
+        """Enumerate every persisted markdown artefact, for vector-index reconciliation.
+
+        Each entry: {"provider", "canonical_identifier", "identifier", "format"} - "identifier" is
+        the external/public-facing identifier (matching what index_entries/index_status key
+        vectors by), "canonical_identifier" is the storage-key identifier read()/manifest_for()
+        need (only differs from "identifier" for the local filesystem source). Deliberately
+        separate from list(): list()'s entries feed StorageEntry (extra="forbid", no
+        canonical_identifier field) for research_list_fetched's public contract, which this
+        internal enumeration must not touch. Returns (entries, total) like list().
         """
 
     @abstractmethod

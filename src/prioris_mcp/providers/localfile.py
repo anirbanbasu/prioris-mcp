@@ -12,6 +12,7 @@ import string
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from anyio import to_thread
@@ -23,6 +24,10 @@ from prioris_mcp.parsers.base import ParserBackend
 from prioris_mcp.providers.base import ResearchPublicationProvider, persist_parsed_markdown
 from prioris_mcp.storage import KeyedAsyncLockManager, StorageBackend
 from prioris_mcp.storage.search_index import SearchIndex
+
+if TYPE_CHECKING:
+    from prioris_mcp.vector.backend import DocumentVectorSearchBackend
+    from prioris_mcp.vector.scheduler import EmbeddingScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +181,8 @@ class LocalFileProvider(ResearchPublicationProvider):
         upload_session_manager: UploadSessionManager,
         search_index: SearchIndex,
         default_inline_char_limit: int = 20000,
+        vector_backend: "DocumentVectorSearchBackend | None" = None,
+        embedding_scheduler: "EmbeddingScheduler | None" = None,
     ) -> None:
         self._storage = storage
         self._pdf_backend = pdf_backend
@@ -183,6 +190,8 @@ class LocalFileProvider(ResearchPublicationProvider):
         self._default_inline_char_limit = default_inline_char_limit
         self._upload_sessions = upload_session_manager
         self._search_index = search_index
+        self._vector_backend = vector_backend
+        self._embedding_scheduler = embedding_scheduler
         # Guards the check-existing-hash-then-mint-then-write sequence in fetch_full_text so two
         # concurrent calls for the same content never both mint a caller-facing ID or both write -
         # see docs/requirement-specification/07-test-specification.md#cross-cutting-concurrency.
@@ -323,6 +332,8 @@ class LocalFileProvider(ResearchPublicationProvider):
             limit=limit if limit is not None else self._default_inline_char_limit,
             page=page,
             page_aware=True,
+            vector_backend=self._vector_backend,
+            embedding_scheduler=self._embedding_scheduler,
         )
         return ParsedFullText(**result, resource_uri=f"research://localfile/{quote(identifier, safe='')}/pdf/markdown")
 

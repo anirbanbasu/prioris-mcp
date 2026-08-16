@@ -6,6 +6,8 @@ skinparam dpi 250
 
 title Container diagram for PriorisMCP
 
+LAYOUT_TOP_DOWN()
+
 Person(researcher, "Researcher", "Uses an MCP client to look up prior art")
 
 System_Boundary(c1, "PriorisMCP") {
@@ -13,24 +15,37 @@ System_Boundary(c1, "PriorisMCP") {
     ContainerDb(storage, "Storage", "SQLite catalogue and manifest, filesystem", "Persists fetched documents and Markdown")
     ContainerDb(search, "Search index", "SQLite FTS5", "Full-text search over persisted content")
     ContainerDb(notes, "Notes storage", "SQLite (notes.sqlite + FTS5 notes-search.sqlite3)", "Persists user-authored notes, independent of fetched content")
+    ContainerDb(vectors, "Vector index", "SQLite (sqlite-vec), fastembed", "Embedding-based similarity search over document chunks and notes")
+    Lay_D(server, storage)
+    Lay_D(storage, search)
+    Lay_D(search, notes)
+    Lay_D(notes, vectors)
 }
 
 System_Ext(arxiv, "arXiv", "Research publication API")
 System_Ext(europepmc, "Europe PMC", "Research publication API")
+System_Ext(openalex, "OpenAlex", "Cross-source work discovery API (search.semantic)")
 System_Ext(ocr, "External OCR server", "Optional remote OCR delegation")
+Lay_D(arxiv, europepmc)
+Lay_D(europepmc, openalex)
+Lay_D(openalex, ocr)
 
 Rel(researcher, server, "Calls research_* tools", "MCP: stdio / streamable-http")
 Rel(server, arxiv, "Fetches metadata and full text", "HTTPS")
 Rel(server, europepmc, "Fetches metadata and full text", "HTTPS")
+Rel(server, openalex, "Discovers candidate works", "HTTPS")
 Rel(server, ocr, "Delegates PDF OCR", "HTTPS, if OCR_SERVER_URL set")
 Rel(server, storage, "Persists and reads")
 Rel(server, search, "Indexes and queries")
 Rel(server, notes, "Persists and reads")
+Rel(server, vectors, "Embeds, indexes and queries")
 
 note right of server
   PDF OCR defaults to local, air-gapped
   Tesseract (tessdata_path) - the external
-  OCR server is opt-in only.
+  OCR server is opt-in only. Vector-index
+  reconciliation runs automatically at
+  startup as a background task.
 end note
 
 SHOW_LEGEND()
