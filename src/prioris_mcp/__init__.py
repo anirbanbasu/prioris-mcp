@@ -1,5 +1,7 @@
 import logging
 import os
+import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
@@ -12,6 +14,44 @@ from rich.logging import RichHandler
 PACKAGE_NAME = "prioris-mcp"
 env = Env()
 env.read_env()
+
+
+class RedactingFilter(logging.Filter):
+    """Redact common credentials and personally identifiable data from rendered log messages."""
+
+    _DEFAULT_PATTERNS: tuple[tuple[str, str], ...] = (
+        # Covers query strings (``api_key=value``), JSON, and Python dict representations while
+        # retaining a recognisable field name in the resulting diagnostic.
+        (
+            r"(?P<name>\b(?:api[_-]?keys?|passwords?|secrets?)\b)(?:[\"']?\s*(?:=|:)\s*[\"']?)[^&\s\"',}\]]+",
+            r"\g<name>=[REDACTED]",
+        ),
+        # Both spellings are common in HTTP clients and proxy logs.  Accept quoted Python-dict
+        # forms as well as ordinary HTTP header syntax.
+        (
+            r"(?P<scheme>\b(?:authorization|authorisation)\b(?:[\"']?\s*:\s*[\"']?)Bearer\s+)[^&\s\"',}\]]+",
+            r"\g<scheme>[REDACTED]",
+        ),
+        (r"[\w.-]+@[\w.-]+\.\w+", "[REDACTED]"),
+        (r"\b(?:\d[ -]*?){13,16}\b", "[REDACTED]"),
+    )
+
+    def __init__(self, patterns: Sequence[tuple[str, str]] | None = None) -> None:
+        super().__init__()
+        self._patterns = [
+            (re.compile(pattern, re.IGNORECASE), replacement)
+            for pattern, replacement in (patterns or self._DEFAULT_PATTERNS)
+        ]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        sanitized_msg = record.getMessage()
+        for pattern, replacement in self._patterns:
+            sanitized_msg = pattern.sub(replacement, sanitized_msg)
+
+        # Overwrite the rendered message and clear args so formatters do not re-merge them.
+        record.msg = sanitized_msg
+        record.args = ()
+        return True
 
 
 def _validate_str_dict(value: object) -> None:
@@ -238,12 +278,20 @@ class EnvVars:
     )
 
 
+rich_logging_handler = RichHandler(
+    # stdout is reserved for the JSON-RPC stream under stdio transport; logs must not share it.
+    rich_tracebacks=False,
+    markup=True,
+    show_path=False,
+    show_time=False,
+    console=Console(stderr=True),
+)
+
+rich_logging_handler.addFilter(RedactingFilter())
+
 logging.basicConfig(
     level=EnvVars.PRIORIS_MCP_LOG_LEVEL,
     format="%(message)s",
     datefmt="[%X]",
-    # stdout is reserved for the JSON-RPC stream under stdio transport; logs must not share it.
-    handlers=[
-        RichHandler(rich_tracebacks=False, markup=True, show_path=False, show_time=False, console=Console(stderr=True))
-    ],
+    handlers=[rich_logging_handler],
 )

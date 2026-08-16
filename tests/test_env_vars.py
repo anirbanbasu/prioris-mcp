@@ -1,4 +1,5 @@
 import importlib
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +20,59 @@ def _restore_module_after_reload():
 def _reload_prioris_mcp():
     """Reload prioris_mcp module and return it."""
     return importlib.reload(prioris_mcp)
+
+
+class TestRedactingFilter:
+    """The application handler must never render sensitive values into logs."""
+
+    @pytest.mark.parametrize(
+        ("message", "secret", "expected"),
+        [
+            (
+                "HTTP Request: GET https://api.openalex.org/works?api_key=test-api-key.123%2Fvalue&per-page=5",
+                "test-api-key.123%2Fvalue",
+                "api_key=[REDACTED]",
+            ),
+            (
+                'provider payload {"password": "correct-horse-battery-staple"}',
+                "correct-horse-battery-staple",
+                "password=[REDACTED]",
+            ),
+            ("provider payload {'secret': 'token.with/punctuation'}", "token.with/punctuation", "secret=[REDACTED]"),
+            (
+                "Authorisation: Bearer bearer-token.with/punctuation",
+                "bearer-token.with/punctuation",
+                "Authorisation: Bearer [REDACTED]",
+            ),
+            ("Authorization: Bearer another-token", "another-token", "Authorization: Bearer [REDACTED]"),
+        ],
+    )
+    def test_redacts_sensitive_values(self, message: str, secret: str, expected: str):
+        record = logging.LogRecord("test", logging.INFO, "", 0, message, (), None)
+
+        assert prioris_mcp.RedactingFilter().filter(record) is True
+        assert secret not in record.getMessage()
+        assert expected in record.getMessage()
+
+    def test_configured_handler_redacts_rendered_output(self):
+        assert any(
+            isinstance(log_filter, prioris_mcp.RedactingFilter)
+            for log_filter in prioris_mcp.rich_logging_handler.filters
+        )
+        record = logging.LogRecord(
+            "httpx",
+            logging.INFO,
+            "",
+            0,
+            "HTTP Request: GET https://api.openalex.org/work-types?api_key=real-key",
+            (),
+            None,
+        )
+
+        with prioris_mcp.rich_logging_handler.console.capture() as captured:
+            prioris_mcp.rich_logging_handler.handle(record)
+
+        assert "real-key" not in captured.get()
 
 
 class TestStorageDirDefault:
