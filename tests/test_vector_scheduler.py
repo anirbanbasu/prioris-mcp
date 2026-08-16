@@ -282,7 +282,7 @@ class TestOnDiscarded:
         assert discarded_count == 1
         assert pending_ran is False
 
-    def test_on_discarded_not_called_when_pending_factory_is_superseded_by_a_later_schedule(self):
+    def test_on_discarded_called_when_pending_factory_is_superseded_by_a_later_schedule(self):
         scheduler = EmbeddingScheduler()
         started = asyncio.Event()
         release = asyncio.Event()
@@ -311,14 +311,14 @@ class TestOnDiscarded:
             scheduler.schedule(("k",), live_factory)
             await started.wait()
             scheduler.schedule(("k",), first_pending_factory, on_discarded=on_first_discarded)
-            # Supersedes the first pending factory before the live task ever finishes - a newer
-            # update winning, not a cancellation, so the first factory's on_discarded must not fire.
+            # Supersedes the first pending factory before the live task ever finishes - it will
+            # now never run, so its on_discarded fires immediately here, same as cancel() would.
             scheduler.schedule(("k",), second_pending_factory, on_discarded=on_second_discarded)
             release.set()
-            await scheduler.cancel(("k",))
+            await scheduler.cancel(("k",))  # discards the now-pending second factory in turn
 
         asyncio.run(scenario())
-        assert first_discarded == 0
+        assert first_discarded == 1
         assert second_discarded == 1
 
     def test_cancel_with_only_a_live_task_does_not_call_on_discarded(self):

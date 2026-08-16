@@ -39,12 +39,21 @@ class EmbeddingScheduler:
         re-triggers with this (possibly newer) factory instead of the update being dropped.
 
         `on_discarded`, if given, is called (synchronously, never awaited) if and only if this
-        exact pending factory is later discarded by `cancel()` without ever running. It is not
-        called if a later `schedule()` call for the same key supersedes it first - superseding is
-        a newer update winning, not a cancellation - nor if `coro_factory` becomes the live task
-        directly (i.e. `key` wasn't already in flight when this call was made).
+        exact pending factory is later discarded without ever running - whether by `cancel()` or
+        by a later `schedule()` call for the same key superseding it first. It is never called if
+        `coro_factory` becomes the live task directly (i.e. `key` wasn't already in flight when
+        this call was made).
         """
         if key in self._tasks:
+            # A pending factory already queued behind the live task is about to be replaced by
+            # this one and will now never run - fire its own on_discarded (if any) here, same as
+            # cancel() does, so a caller tracking settlement (e.g. reconciliation's progress
+            # counter) isn't left waiting forever for a factory that silently vanished.
+            previous_pending = self._pending.get(key)
+            if previous_pending is not None:
+                _, previous_on_discarded = previous_pending
+                if previous_on_discarded is not None:
+                    previous_on_discarded()
             self._pending[key] = (coro_factory, on_discarded)
             return
         task = asyncio.ensure_future(self._run(key, coro_factory))
