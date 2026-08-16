@@ -3919,6 +3919,19 @@ class TestVectorReconciliation:
         client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
 
         async def scenario():
+            # Real embedding speed isn't a reliable clock to race against - blocking it behind an
+            # event guarantees the mid-reconciliation snapshot below observes the job still
+            # pending, instead of depending on fastembed's actual model-load/inference time
+            # finishing after (rather than before) the resource read on any given machine.
+            release_embed = asyncio.Event()
+            real_embed = mcp_obj._embedding_backend.embed
+
+            async def _blocked_embed(text: str) -> list[float]:
+                await release_embed.wait()
+                return await real_embed(text)
+
+            monkeypatch.setattr(mcp_obj._embedding_backend, "embed", _blocked_embed)
+
             await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
             manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
             await manifest.replace_chunk_rows(
@@ -3928,6 +3941,7 @@ class TestVectorReconciliation:
             async with client:
                 mid_result = await client.read_resource("research://vector-index/rebuild-status")
                 mid_payload = json.loads(cast(TextResourceContents, mid_result[0]).text)
+                release_embed.set()
                 await mcp_obj._embedding_scheduler.wait_all()
                 done_result = await client.read_resource("research://vector-index/rebuild-status")
                 done_payload = json.loads(cast(TextResourceContents, done_result[0]).text)
