@@ -1,7 +1,7 @@
 [project]
 name = "prioris-mcp"
-version = "0.1.1"
-description = "A model context protocol (MCP) server to facilitate looking up prior art."
+version = "0.2.0"
+description = "A model context protocol (MCP) server to facilitate looking up and discussing prior art."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICEN[CS]E*"]
