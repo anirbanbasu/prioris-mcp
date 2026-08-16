@@ -876,18 +876,21 @@ class PriorisMCP(MCPMixin):
             )
             note_ids = None
             if structural_filters_given:
-                note_ids = await self._notes_backend.matching_ids(
-                    provider=provider,
-                    canonical_identifier=canonical_identifier,
-                    format=format,
-                    date_from=date_from,
-                    date_to=date_to,
-                    author_filter=author_filter,
-                    author_name=author_name,
-                    tags_all=tags_all,
-                    tags_any=tags_any,
-                    tags_exclude=tags_exclude,
-                )
+                try:
+                    note_ids = await self._notes_backend.matching_ids(
+                        provider=provider,
+                        canonical_identifier=canonical_identifier,
+                        format=format,
+                        date_from=date_from,
+                        date_to=date_to,
+                        author_filter=author_filter,
+                        author_name=author_name,
+                        tags_all=tags_all,
+                        tags_any=tags_any,
+                        tags_exclude=tags_exclude,
+                    )
+                except ValueError as exc:
+                    raise InvalidRequestError(str(exc)) from exc
             # The status aggregate below must reflect every note the caller's structural filters
             # select, not just this page's KNN matches - an in-scope note that hasn't been
             # embedded yet has no vector row, so it can never appear in `matches`, but the caller
@@ -912,7 +915,17 @@ class PriorisMCP(MCPMixin):
                 # genuinely empty) - nothing to build, so there's no in-scope work in flight.
                 index_status = {"vector": "not_built"}
             else:
-                statuses = [await self._note_index_status(note_id) for note_id in status_scope_note_ids]
+                # One batched query for every in-scope note's persisted status, rather than N
+                # serial SqliteVecNoteBackend.status() connect+query round-trips - the
+                # "building" override still has to be per-note against the in-memory scheduler,
+                # same semantics `_note_index_status` (now folded in here) had.
+                db_statuses = await self._note_vector_backend.statuses_for(status_scope_note_ids)
+                statuses = [
+                    "building"
+                    if self._embedding_scheduler.is_building(("note", note_id))
+                    else db_statuses.get(note_id, "not_built")
+                    for note_id in status_scope_note_ids
+                ]
                 if "building" in statuses:
                     index_status = {"vector": "building"}
                 elif "not_built" in statuses:
@@ -923,17 +936,6 @@ class PriorisMCP(MCPMixin):
                     index_status = {"vector": "ready"}
 
         return NotesSearchResult(fts=fts_result, vector=vector_result, index_status=index_status)
-
-    async def _note_index_status(self, note_id: str) -> IndexStatus:
-        """This note's persisted vector status, overridden to `"building"` while a live re-embed task exists for it.
-
-        Mirrors `VectorMechanism.status`'s override for documents, kept inline here since notes'
-        `index_status` is aggregated over the caller's full structurally-matched scope rather than
-        polled per-note through a `SearchMechanism`.
-        """
-        if self._embedding_scheduler.is_building(("note", note_id)):
-            return "building"
-        return await self._note_vector_backend.status(note_id)
 
     async def _force_vector_reconnect(self) -> None:
         """Force both vector backends' `_connect()` to run now, so any model-mismatch drop happens here.
@@ -1026,7 +1028,11 @@ class PriorisMCP(MCPMixin):
             else:
                 self._rebuild_progress.document_succeeded()
 
-        self._embedding_scheduler.schedule((provider, identifier, format_), _reembed_and_mark_done)
+        self._embedding_scheduler.schedule(
+            (provider, identifier, format_),
+            _reembed_and_mark_done,
+            on_discarded=self._rebuild_progress.document_cancelled,
+        )
 
     async def _reconcile_notes(self) -> None:
         model_name = self._embedding_backend.model_name
@@ -1053,7 +1059,9 @@ class PriorisMCP(MCPMixin):
             else:
                 self._rebuild_progress.note_succeeded()
 
-        self._embedding_scheduler.schedule(("note", note_id), _reembed_and_mark_done)
+        self._embedding_scheduler.schedule(
+            ("note", note_id), _reembed_and_mark_done, on_discarded=self._rebuild_progress.note_cancelled
+        )
 
     async def _delete_fetched(self, entries: list[DeleteEntryRef]) -> DeleteFetchedResult:
         deleted: list[DeleteEntryRef] = []

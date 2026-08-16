@@ -246,6 +246,106 @@ class TestDirtyRerun:
         assert effects == ["first", "second"]
 
 
+class TestOnDiscarded:
+    """Tests for schedule(..., on_discarded=...) - notifies a caller when a pending factory is cancelled unrun."""
+
+    def test_cancel_calls_on_discarded_for_a_pending_factory_that_never_ran(self):
+        scheduler = EmbeddingScheduler()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        discarded_count = 0
+        pending_ran = False
+
+        async def live_factory():
+            started.set()
+            await release.wait()
+
+        async def pending_factory():
+            nonlocal pending_ran
+            pending_ran = True
+
+        def on_discarded():
+            nonlocal discarded_count
+            discarded_count += 1
+
+        async def scenario():
+            scheduler.schedule(("k",), live_factory)
+            await started.wait()
+            task = scheduler._tasks[("k",)]
+            scheduler.schedule(("k",), pending_factory, on_discarded=on_discarded)  # goes into _pending
+            release.set()
+            await scheduler.cancel(("k",))
+            return task.cancelled()
+
+        cancelled = asyncio.run(scenario())
+        assert cancelled is True
+        assert discarded_count == 1
+        assert pending_ran is False
+
+    def test_on_discarded_not_called_when_pending_factory_is_superseded_by_a_later_schedule(self):
+        scheduler = EmbeddingScheduler()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        first_discarded = 0
+        second_discarded = 0
+
+        async def live_factory():
+            started.set()
+            await release.wait()
+
+        async def first_pending_factory():
+            pass
+
+        async def second_pending_factory():
+            pass
+
+        def on_first_discarded():
+            nonlocal first_discarded
+            first_discarded += 1
+
+        def on_second_discarded():
+            nonlocal second_discarded
+            second_discarded += 1
+
+        async def scenario():
+            scheduler.schedule(("k",), live_factory)
+            await started.wait()
+            scheduler.schedule(("k",), first_pending_factory, on_discarded=on_first_discarded)
+            # Supersedes the first pending factory before the live task ever finishes - a newer
+            # update winning, not a cancellation, so the first factory's on_discarded must not fire.
+            scheduler.schedule(("k",), second_pending_factory, on_discarded=on_second_discarded)
+            release.set()
+            await scheduler.cancel(("k",))
+
+        asyncio.run(scenario())
+        assert first_discarded == 0
+        assert second_discarded == 1
+
+    def test_cancel_with_only_a_live_task_does_not_call_on_discarded(self):
+        """No pending entry at all - behaves exactly as before cancel()'s on_discarded handling existed."""
+        scheduler = EmbeddingScheduler()
+        started = asyncio.Event()
+        release = asyncio.Event()
+        discarded_count = 0
+
+        async def live_factory():
+            started.set()
+            await release.wait()
+
+        def on_discarded():
+            nonlocal discarded_count
+            discarded_count += 1
+
+        async def scenario():
+            scheduler.schedule(("k",), live_factory)
+            await started.wait()
+            release.set()
+            await scheduler.cancel(("k",))
+
+        asyncio.run(scenario())
+        assert discarded_count == 0
+
+
 class TestMaxConcurrent:
     """Tests for EmbeddingScheduler(max_concurrent=...) bounding concurrent task execution."""
 

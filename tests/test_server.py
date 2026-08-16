@@ -2714,6 +2714,40 @@ class TestResearchNotesSearch:
         with pytest.raises(ToolError):
             asyncio.run(scenario())
 
+    def test_mode_vector_canonical_identifier_without_provider_is_a_tool_error(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """The vector-only branch's matching_ids() call must translate ValueError the same way the fts branch does.
+
+        Mirrors test_canonical_identifier_without_provider_is_a_tool_error, but for mode='vector' where
+        matching_ids() (not self._notes_backend.search) is the one raising.
+        """
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "attention", "mode": "vector", "canonical_identifier": "id-1"},
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
+    def test_mode_vector_invalid_date_from_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """Mirrors test_invalid_date_from_is_a_tool_error, but for mode='vector' via matching_ids()."""
+        client = self._server_and_client(tmp_path, monkeypatch)
+
+        async def scenario():
+            async with client:
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={"keyword": "attention", "mode": "vector", "date_from": "not-a-date"},
+                )
+
+        with pytest.raises(ToolError):
+            asyncio.run(scenario())
+
     def test_mode_vector_returns_note_vector_results(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
@@ -2941,9 +2975,9 @@ class TestResearchNotesSearch:
     ):
         """Covers the non-empty-statuses "not_built" branch (distinct from the D6 empty-page one).
 
-        A match's own per-note status(), not the corpus-wide has_any_indexed() check, drives this
-        - simulated here (rather than via a real dangling row, since index_note always writes both
-        tables together) by stubbing status() directly, the same technique
+        A match's own batched statuses_for() lookup, not the corpus-wide has_any_indexed() check,
+        drives this - simulated here (rather than via a real dangling row, since index_note always
+        writes both tables together) by stubbing statuses_for() directly, the same technique
         test_mode_vector_reports_not_built_after_a_renamed_model_swap uses to simulate a status
         mismatch without hand-rolling raw SQL against the backend.
         """
@@ -2961,10 +2995,10 @@ class TestResearchNotesSearch:
                 )
                 await mcp_obj._embedding_scheduler.wait_all()
 
-                async def _always_not_built(note_id: str) -> str:
-                    return "not_built"
+                async def _always_not_built(note_ids: list[str]) -> dict[str, str]:
+                    return {}  # absent key -> "not_built", per statuses_for()'s documented contract
 
-                monkeypatch.setattr(mcp_obj._note_vector_backend, "status", _always_not_built)
+                monkeypatch.setattr(mcp_obj._note_vector_backend, "statuses_for", _always_not_built)
                 return await client.call_tool(
                     "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
                 )
@@ -3023,7 +3057,7 @@ class TestResearchNotesSearch:
     def test_mode_vector_aggregates_a_stale_status_row_if_one_is_ever_reported(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
     ):
-        """Exercises the aggregation's `stale` branch directly, by stubbing status().
+        """Exercises the aggregation's `stale` branch directly, by stubbing statuses_for().
 
         The real backend can no longer produce `stale` in practice (Fix 1 deletes a differently-
         named status row rather than letting it survive to be read - see
@@ -3048,10 +3082,10 @@ class TestResearchNotesSearch:
                 )
                 await mcp_obj._embedding_scheduler.wait_all()
 
-                async def _always_stale(note_id: str) -> str:
-                    return "stale"
+                async def _always_stale(note_ids: list[str]) -> dict[str, str]:
+                    return dict.fromkeys(note_ids, "stale")
 
-                monkeypatch.setattr(mcp_obj._note_vector_backend, "status", _always_stale)
+                monkeypatch.setattr(mcp_obj._note_vector_backend, "statuses_for", _always_stale)
                 return await client.call_tool(
                     "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
                 )
@@ -3194,6 +3228,57 @@ class TestResearchNotesSearch:
         result = asyncio.run(scenario())
         assert result.structured_content["vector"]["matches"] == []
         assert result.structured_content["index_status"] == {"vector": "building"}
+
+    def test_note_search_status_aggregation_batches_one_query_instead_of_per_note(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression for Fix 2: N in-scope notes must resolve via one statuses_for() call, not N status() calls.
+
+        Mixes ready and not_built notes across a scope of 5 - large enough that a per-note query
+        loop would be obviously wrong, while the outcome (which IndexStatus value comes back) must
+        stay exactly what the existing per-note-status tests above already assert: the aggregation
+        semantics are unchanged, only the query mechanism.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        call_count = 0
+        real_status = SqliteVecNoteBackend.status
+
+        async def _counting_status(self, note_id):
+            nonlocal call_count
+            call_count += 1
+            return await real_status(self, note_id)
+
+        async def scenario():
+            async with client:
+                # Three notes embedded (ready) via the normal create-time trigger.
+                for i in range(3):
+                    await client.call_tool(
+                        "research_notes_create",
+                        arguments={
+                            "provider": "arxiv",
+                            "identifier": f"A{i}",
+                            "text": "transformer attention mechanisms",
+                        },
+                    )
+                await mcp_obj._embedding_scheduler.wait_all()
+                # Two more created directly against the backend, bypassing research_notes_create's
+                # own embedding-scheduler trigger, so they genuinely have no vector row (not_built).
+                await mcp_obj._notes_backend.create("arxiv", "B0", None, "unindexed note", anchors=[], tags=[])
+                await mcp_obj._notes_backend.create("arxiv", "B1", None, "another unindexed note", anchors=[], tags=[])
+
+                monkeypatch.setattr(SqliteVecNoteBackend, "status", _counting_status)
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert call_count == 0
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
 
     def test_negative_offset_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         """D7: a negative offset must raise, not silently fall into Python's from-the-end slicing."""
@@ -3601,6 +3686,96 @@ class TestVectorReconciliation:
 
         notes = asyncio.run(scenario())
         assert notes.pending == 0
+        assert notes.succeeded == 0
+        assert notes.failed == 0
+
+    def test_delete_fetched_cancelling_a_pending_reconciliation_factory_clears_pending(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression for the review's Fix 1: a reconciliation re-embed discarded straight out of `_pending` must still be accounted for.
+
+        Before this fix, `EmbeddingScheduler.cancel()` silently dropped a still-pending factory
+        with no notification. Here, an ordinary (non-reconciliation) embed is already in flight for
+        a key when reconciliation runs - its own re-embed wrapper for that same key queues in
+        `_pending` behind the still-running ordinary task, never getting a chance to run. Deleting
+        the document through the real production cancellation path (`research_delete_fetched` ->
+        `_delete_fetched` -> `EmbeddingScheduler.cancel`) must still decrement `pending` to 0,
+        rather than leaving this item permanently reported as still pending/active.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+        gate = asyncio.Event()
+        key = ("arxiv", "2106.09685v2", "pdf")
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+
+            # An ordinary (non-reconciliation) embed already in flight for this key - never itself
+            # tracked by VectorRebuildProgress, mirroring the two schedule() call sites this fix
+            # deliberately leaves untouched.
+            mcp_obj._embedding_scheduler.schedule(key, gate.wait)
+            assert mcp_obj._embedding_scheduler.is_building(key)
+
+            await mcp_obj.reconcile_vector_index()
+            # The reconciliation wrapper for this same key went into _pending (key already in
+            # _tasks) rather than running - `pending` was already incremented via
+            # set_documents_total, ahead of the wrapper itself ever executing.
+            assert mcp_obj._rebuild_progress.documents.total == 1
+            assert mcp_obj._rebuild_progress.documents.pending == 1
+
+            async with client:
+                await client.call_tool(
+                    "research_delete_fetched",
+                    arguments={
+                        "entries": [
+                            {"provider": "arxiv", "identifier": "2106.09685v2", "format": "pdf", "artefact": "all"}
+                        ]
+                    },
+                )
+            return mcp_obj._rebuild_progress.documents
+
+        documents = asyncio.run(scenario())
+        assert documents.pending == 0
+        assert documents.active is False
+        assert documents.succeeded == 0
+        assert documents.failed == 0
+
+    def test_notes_delete_cancelling_a_pending_reconciliation_factory_clears_pending(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Mirror of the document test above, isolating the note re-embed wrapper's `_pending`-discard accounting."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+        gate = asyncio.Event()
+
+        async def scenario():
+            note = await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note")
+            key = ("note", note.id)
+
+            # An ordinary (non-reconciliation) embed already in flight for this key.
+            mcp_obj._embedding_scheduler.schedule(key, gate.wait)
+            assert mcp_obj._embedding_scheduler.is_building(key)
+
+            await mcp_obj.reconcile_vector_index()
+            assert mcp_obj._rebuild_progress.notes.total == 1
+            assert mcp_obj._rebuild_progress.notes.pending == 1
+
+            async with client:
+                await client.call_tool("research_notes_delete", arguments={"note_id": note.id})
+            return mcp_obj._rebuild_progress.notes
+
+        notes = asyncio.run(scenario())
+        assert notes.pending == 0
+        assert notes.active is False
         assert notes.succeeded == 0
         assert notes.failed == 0
 

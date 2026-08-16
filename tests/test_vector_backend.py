@@ -42,6 +42,9 @@ class _StubNoteBackend(NoteVectorSearchBackend):
     async def status(self, note_id):
         return "not_built"
 
+    async def statuses_for(self, note_ids):
+        return {}
+
     async def has_any_indexed(self, model_name):
         return False
 

@@ -470,6 +470,25 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
 
         return await to_thread.run_sync(_status)
 
+    async def statuses_for(self, note_ids: list[str]) -> dict[str, IndexStatus]:
+        """Every given note_id's persisted status in one batched query, keyed by note_id."""
+        if not note_ids:
+            return {}
+
+        def _statuses() -> dict[str, IndexStatus]:
+            placeholders = ", ".join("?" for _ in note_ids)
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"SELECT note_id, embedded_model FROM note_vectors_status WHERE note_id IN ({placeholders})",
+                    note_ids,
+                ).fetchall()
+            return {
+                row["note_id"]: ("ready" if row["embedded_model"] == self._embedding_backend.model_name else "stale")
+                for row in rows
+            }
+
+        return await to_thread.run_sync(_statuses)
+
     async def has_any_indexed(self, model_name: str) -> bool:
         """Cheap corpus-wide existence check: whether any note is indexed under `model_name`."""
 

@@ -97,6 +97,14 @@ class NoteVectorSearchBackend(ABC):
         """Compare this note's recorded embedded_model against the currently configured one."""
 
     @abstractmethod
+    async def statuses_for(self, note_ids: list[str]) -> dict[str, IndexStatus]:
+        """Every given note_id's persisted status in one batched query, keyed by note_id.
+
+        A note_id with no persisted status row is simply absent from the returned dict (the
+        caller treats a missing key as "not_built") rather than every id being guaranteed a key.
+        """
+
+    @abstractmethod
     async def has_any_indexed(self, model_name: str) -> bool:
         """Corpus-wide existence check: whether any note is indexed under `model_name`.
 

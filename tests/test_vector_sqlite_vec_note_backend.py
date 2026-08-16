@@ -186,6 +186,42 @@ class TestStatus:
         assert asyncio.run(backend_a2.indexed_under("model-a")) == set()
 
 
+class TestStatusesFor:
+    """Test the batched statuses_for() - one query for every given note_id's status (Fix 2)."""
+
+    def test_empty_note_ids_returns_empty_dict_without_touching_the_database(self, tmp_path):
+        """No connection/query side effect for an empty scope - a fresh, never-created vectors file is fine."""
+        backend = SqliteVecNoteBackend(tmp_path / "notes-vectors.sqlite3", FastEmbedBackend("BAAI/bge-small-en-v1.5"))
+        assert asyncio.run(backend.statuses_for([])) == {}
+        assert not (tmp_path / "notes-vectors.sqlite3").exists()
+
+    def test_mixed_ready_stale_and_absent_note_ids_resolved_in_one_call(self, tmp_path):
+        db_path = tmp_path / "notes-vectors.sqlite3"
+        backend_a = SqliteVecNoteBackend(db_path, _StubEmbedding("model-a", 4))
+        asyncio.run(backend_a.index_note("note-ready", "x"))
+        asyncio.run(backend_a.index_note("note-will-be-stale", "y"))
+
+        # Reconnecting under a different model wipes any status row it disagrees with (Fix 1's
+        # rollback protection) - so to get a genuinely `stale` row here, write it directly rather
+        # than through a model swap (which would instead report `not_built`, per TestStatus above).
+        def _write_stale_row() -> None:
+            conn = backend_a._connect()
+            with conn:
+                conn.execute(
+                    "INSERT INTO note_vectors_status (note_id, embedded_model) VALUES (?, ?) "
+                    "ON CONFLICT(note_id) DO UPDATE SET embedded_model = excluded.embedded_model",
+                    ("note-will-be-stale", "some-other-model"),
+                )
+            conn.close()
+
+        _write_stale_row()
+
+        statuses = asyncio.run(backend_a.statuses_for(["note-ready", "note-will-be-stale", "note-absent"]))
+        assert statuses["note-ready"] == "ready"
+        assert statuses["note-will-be-stale"] == "stale"
+        assert "note-absent" not in statuses  # absent key -> caller treats as "not_built"
+
+
 class TestHasAnyIndexed:
     """Test the corpus-wide has_any_indexed existence check (D6)."""
 

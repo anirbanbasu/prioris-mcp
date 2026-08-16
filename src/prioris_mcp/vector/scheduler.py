@@ -18,22 +18,34 @@ class EmbeddingScheduler:
 
     def __init__(self, max_concurrent: int | None = None) -> None:
         self._tasks: dict[tuple, asyncio.Task] = {}
-        self._pending: dict[tuple, Callable[[], Awaitable[None]]] = {}
+        self._pending: dict[tuple, tuple[Callable[[], Awaitable[None]], Callable[[], None] | None]] = {}
         self._semaphore = asyncio.Semaphore(max_concurrent) if max_concurrent is not None else None
 
     def is_building(self, key: tuple) -> bool:
         """Whether a live background embedding task currently exists for `key`."""
         return key in self._tasks
 
-    def schedule(self, key: tuple, coro_factory: Callable[[], Awaitable[None]]) -> None:
+    def schedule(
+        self,
+        key: tuple,
+        coro_factory: Callable[[], Awaitable[None]],
+        *,
+        on_discarded: Callable[[], None] | None = None,
+    ) -> None:
         """Schedule `coro_factory()` to run in the background.
 
         If `key` is already in flight, the previous run is left alone but `coro_factory` is
         remembered as the latest pending factory for `key` - once the in-flight run finishes, it
         re-triggers with this (possibly newer) factory instead of the update being dropped.
+
+        `on_discarded`, if given, is called (synchronously, never awaited) if and only if this
+        exact pending factory is later discarded by `cancel()` without ever running. It is not
+        called if a later `schedule()` call for the same key supersedes it first - superseding is
+        a newer update winning, not a cancellation - nor if `coro_factory` becomes the live task
+        directly (i.e. `key` wasn't already in flight when this call was made).
         """
         if key in self._tasks:
-            self._pending[key] = coro_factory
+            self._pending[key] = (coro_factory, on_discarded)
             return
         task = asyncio.ensure_future(self._run(key, coro_factory))
         self._tasks[key] = task
@@ -46,9 +58,19 @@ class EmbeddingScheduler:
         can otherwise finish its write after a caller's own subsequent delete completes, leaving a
         stale row behind. Awaiting here closes that race by not returning until the task has
         actually stopped.
+
+        A still-pending, never-run factory for `key` (if one exists) is always being discarded
+        here - independent of whether a live task also exists for `key` - so its `on_discarded`
+        (if any) fires unconditionally. A live task's own wrapper already handles its own
+        accounting through its own `except asyncio.CancelledError` branch, so that case is not
+        also treated as a discarded pending factory here - doing so would double-count it.
         """
         task = self._tasks.pop(key, None)
-        self._pending.pop(key, None)
+        pending = self._pending.pop(key, None)
+        if pending is not None:
+            _, on_discarded = pending
+            if on_discarded is not None:
+                on_discarded()
         if task is not None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -74,7 +96,8 @@ class EmbeddingScheduler:
                 self._tasks.pop(key, None)
         pending = self._pending.pop(key, None)
         if pending is not None:
-            self.schedule(key, pending)
+            factory, on_discarded = pending
+            self.schedule(key, factory, on_discarded=on_discarded)
 
     async def wait_all(self) -> None:
         """Wait for every tracked task, including any dirty re-runs it triggers. Test support only."""
