@@ -1204,9 +1204,9 @@ class PriorisMCP(MCPMixin):
     async def read_vector_rebuild_status_resource(self) -> str:
         """Read corpus-wide vector-index rebuild progress for the reconciliation run started at server startup.
 
-        `total`/`pending`/`succeeded`/`failed` count only items this run decided needed rebuilding
-        - a corpus already fully ready under the configured model reports all zeros. A nonzero
-        `failed` with `active=False` is a terminal, not-currently-recoverable-without-a-restart
+        `total`/`pending`/`succeeded`/`failed`/`cancelled` count only items this run decided needed
+        rebuilding - a corpus already fully ready under the configured model reports all zeros. A
+        nonzero `failed` with `active=False` is a terminal, not-currently-recoverable-without-a-restart
         state - see docs/requirement-specification/ADR/00031-rebuild-progress-failure-visibility.md.
         Process-local, in-memory, not persisted - see
         docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
@@ -1219,6 +1219,7 @@ class PriorisMCP(MCPMixin):
                 pending=progress.documents.pending,
                 succeeded=progress.documents.succeeded,
                 failed=progress.documents.failed,
+                cancelled=progress.documents.cancelled,
                 active=progress.documents.active,
             ),
             notes=VectorRebuildMechanismStatus(
@@ -1226,6 +1227,7 @@ class PriorisMCP(MCPMixin):
                 pending=progress.notes.pending,
                 succeeded=progress.notes.succeeded,
                 failed=progress.notes.failed,
+                cancelled=progress.notes.cancelled,
                 active=progress.notes.active,
             ),
         ).model_dump_json()

@@ -3586,7 +3586,14 @@ class TestVectorReconciliation:
             return json.loads(cast(TextResourceContents, result[0]).text)
 
         payload = asyncio.run(scenario())
-        assert payload["documents"] == {"total": 1, "pending": 0, "succeeded": 0, "failed": 1, "active": False}
+        assert payload["documents"] == {
+            "total": 1,
+            "pending": 0,
+            "succeeded": 0,
+            "failed": 1,
+            "cancelled": 0,
+            "active": False,
+        }
 
     def test_reconcile_note_reembed_failure_reports_failed_not_perpetually_pending(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -3612,7 +3619,14 @@ class TestVectorReconciliation:
             return json.loads(cast(TextResourceContents, result[0]).text)
 
         payload = asyncio.run(scenario())
-        assert payload["notes"] == {"total": 1, "pending": 0, "succeeded": 0, "failed": 1, "active": False}
+        assert payload["notes"] == {
+            "total": 1,
+            "pending": 0,
+            "succeeded": 0,
+            "failed": 1,
+            "cancelled": 0,
+            "active": False,
+        }
 
     def test_reconcile_document_reembed_cancellation_counts_as_neither_success_nor_failure(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -3653,6 +3667,7 @@ class TestVectorReconciliation:
         assert documents.pending == 0
         assert documents.succeeded == 0
         assert documents.failed == 0
+        assert documents.cancelled == 1
 
     def test_reconcile_note_reembed_cancellation_counts_as_neither_success_nor_failure(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -3688,6 +3703,7 @@ class TestVectorReconciliation:
         assert notes.pending == 0
         assert notes.succeeded == 0
         assert notes.failed == 0
+        assert notes.cancelled == 1
 
     def test_delete_fetched_cancelling_a_pending_reconciliation_factory_clears_pending(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -3745,6 +3761,7 @@ class TestVectorReconciliation:
         assert documents.active is False
         assert documents.succeeded == 0
         assert documents.failed == 0
+        assert documents.cancelled == 1
 
     def test_notes_delete_cancelling_a_pending_reconciliation_factory_clears_pending(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -3778,6 +3795,7 @@ class TestVectorReconciliation:
         assert notes.active is False
         assert notes.succeeded == 0
         assert notes.failed == 0
+        assert notes.cancelled == 1
 
     def test_reconcile_vector_index_isolates_document_and_note_failures(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -3889,7 +3907,7 @@ class TestVectorReconciliation:
 
         result = asyncio.run(scenario())
         payload = json.loads(cast(TextResourceContents, result[0]).text)
-        zero_mechanism = {"total": 0, "pending": 0, "succeeded": 0, "failed": 0, "active": False}
+        zero_mechanism = {"total": 0, "pending": 0, "succeeded": 0, "failed": 0, "cancelled": 0, "active": False}
         assert payload == {"documents": zero_mechanism, "notes": zero_mechanism}
 
     def test_rebuild_status_resource_reflects_progress_mid_reconciliation(
@@ -3916,8 +3934,22 @@ class TestVectorReconciliation:
             return mid_payload, done_payload
 
         mid_payload, done_payload = asyncio.run(scenario())
-        assert mid_payload["documents"] == {"total": 1, "pending": 1, "succeeded": 0, "failed": 0, "active": True}
-        assert done_payload["documents"] == {"total": 1, "pending": 0, "succeeded": 1, "failed": 0, "active": False}
+        assert mid_payload["documents"] == {
+            "total": 1,
+            "pending": 1,
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "active": True,
+        }
+        assert done_payload["documents"] == {
+            "total": 1,
+            "pending": 0,
+            "succeeded": 1,
+            "failed": 0,
+            "cancelled": 0,
+            "active": False,
+        }
 
     def test_lifespan_force_reconnects_before_yielding(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")

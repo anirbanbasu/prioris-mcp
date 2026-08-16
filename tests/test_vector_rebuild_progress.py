@@ -10,11 +10,13 @@ class TestVectorRebuildProgress:
         assert progress.documents.pending == 0
         assert progress.documents.succeeded == 0
         assert progress.documents.failed == 0
+        assert progress.documents.cancelled == 0
         assert progress.documents.active is False
         assert progress.notes.total == 0
         assert progress.notes.pending == 0
         assert progress.notes.succeeded == 0
         assert progress.notes.failed == 0
+        assert progress.notes.cancelled == 0
         assert progress.notes.active is False
 
     def test_set_documents_total_sets_total_and_pending(self):
@@ -48,6 +50,16 @@ class TestVectorRebuildProgress:
         assert progress.documents.pending == 1
         assert progress.documents.succeeded == 0
         assert progress.documents.failed == 0
+        assert progress.documents.cancelled == 1
+
+    def test_document_cancelled_keeps_total_fully_accounted_for(self):
+        """Regression: total must always equal pending + succeeded + failed + cancelled."""
+        progress = VectorRebuildProgress()
+        progress.set_documents_total(1)
+        progress.document_cancelled()
+        documents = progress.documents
+        assert documents.total == (documents.pending + documents.succeeded + documents.failed + documents.cancelled)
+        assert documents.active is False
 
     def test_document_pending_never_goes_negative(self):
         progress = VectorRebuildProgress()
@@ -83,6 +95,7 @@ class TestVectorRebuildProgress:
         assert progress.notes.pending == 0
         assert progress.notes.succeeded == 1
         assert progress.notes.failed == 1
+        assert progress.notes.cancelled == 1
         assert progress.notes.active is False
 
     def test_documents_and_notes_are_independent(self):

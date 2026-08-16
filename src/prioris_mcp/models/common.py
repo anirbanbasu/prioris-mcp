@@ -211,9 +211,11 @@ class VectorRebuildMechanismStatus(BaseModel):
     """One mechanism's (documents or notes) corpus-wide rebuild progress.
 
     See docs/requirement-specification/ADR/00031-rebuild-progress-failure-visibility.md.
-    `total`/`pending`/`succeeded`/`failed` count only items reconciliation decided needed
-    rebuilding this run, not the whole corpus - a corpus already fully ready reports all zeros.
-    `active` (`pending > 0`) is a convenience field so a caller doesn't have to derive it itself.
+    `total`/`pending`/`succeeded`/`failed`/`cancelled` count only items reconciliation decided
+    needed rebuilding this run, not the whole corpus - a corpus already fully ready reports all
+    zeros. `total == pending + succeeded + failed + cancelled` always holds, so a caller can fully
+    account for every item this run started with. `active` (`pending > 0`) is a convenience field
+    so a caller doesn't have to derive it itself.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -222,6 +224,7 @@ class VectorRebuildMechanismStatus(BaseModel):
     pending: Annotated[int, Field(..., strict=True, ge=0)]
     succeeded: Annotated[int, Field(..., strict=True, ge=0)]
     failed: Annotated[int, Field(..., strict=True, ge=0)]
+    cancelled: Annotated[int, Field(..., strict=True, ge=0)]
     active: Annotated[bool, Field(...)]
 
 

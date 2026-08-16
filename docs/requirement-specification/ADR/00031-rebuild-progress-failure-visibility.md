@@ -24,6 +24,12 @@ No in-process retry is added. A failed item stays failed until whatever recovers
 
 `research://vector-index/rebuild-status` can now show `{"total": 10, "pending": 0, "succeeded": 6, "failed": 4, "active": false}` — clearly terminal-and-partially-failed — instead of `{"total": 10, "remaining": 4}`, which was indistinguishable from "4 items still genuinely in flight." `active` (`pending > 0`) is a convenience field a caller could otherwise derive itself; it's included so a client doesn't have to know that convention. A restart remains the only recovery path for a failed item — this is a deliberate, documented limitation, not an oversight, matching the [Referenced from] ADR's existing "self-healing on restart" design for `building`/reconciliation state generally.
 
+## Addendum (2026-08-16): `cancelled` counter added
+
+A subsequent review found that "decrements `pending` without counting as either [succeeded or failed]" (the Decision above) left cancellation with no counter of its own anywhere in the shape. A sole cancelled item therefore reached a terminal `{"total": 1, "pending": 0, "succeeded": 0, "failed": 0, "active": false}` — indistinguishable from a response that had simply lost track of it, since `1 != 0 + 0 + 0`.
+
+`_MechanismProgress`/`VectorRebuildMechanismStatus` gained a fifth counter, `cancelled`, incremented by `*_cancelled()` alongside its existing `pending` decrement. The shape's invariant is now `total == pending + succeeded + failed + cancelled`, always fully accounting for every item a run started with. This is additive only — `*_cancelled()` still does not count toward `succeeded` or `failed`, exactly as originally decided; cancellation just now has its own place to be counted rather than none.
+
 ## Referenced from
 
 - [Vector search → Reconciliation runs automatically at server startup](../search/02-vector-search.md#reconciliation-runs-automatically-at-server-startup)

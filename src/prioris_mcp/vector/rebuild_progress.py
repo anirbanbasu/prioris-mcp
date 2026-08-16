@@ -9,6 +9,12 @@ docs/superpowers/specs/2026-08-15-vector-index-reconciliation-design.md.
 `succeeded`/`failed` (not just `pending`/`total`) exist so a caller can tell "still running" from
 "stuck with N failures" rather than `remaining` staying permanently nonzero with no explanation -
 see docs/requirement-specification/ADR/00031-rebuild-progress-failure-visibility.md.
+
+`cancelled` (ADR-00031 addendum) exists so a resource caller can always fully account for `total`:
+`total == pending + succeeded + failed + cancelled` holds after every transition below - without
+it, a cancelled (shutdown, or deleted mid-flight) item vanished from all four other counters,
+leaving a terminal `total=1, pending=0, succeeded=0, failed=0` state with no way to tell where it
+went.
 """
 
 from dataclasses import dataclass, field
@@ -20,6 +26,7 @@ class _MechanismProgress:
     pending: int = 0
     succeeded: int = 0
     failed: int = 0
+    cancelled: int = 0
 
     @property
     def active(self) -> bool:
@@ -51,6 +58,7 @@ class VectorRebuildProgress:
     def document_cancelled(self) -> None:
         """Mark one document's rebuild as abandoned (shutdown, or deleted mid-flight) - neither success nor failure."""
         self.documents.pending = max(0, self.documents.pending - 1)
+        self.documents.cancelled += 1
 
     def set_notes_total(self, total: int) -> None:
         """Record how many notes this reconciliation run decided need rebuilding."""
@@ -69,3 +77,4 @@ class VectorRebuildProgress:
     def note_cancelled(self) -> None:
         """Mark one note's rebuild as abandoned (shutdown, or deleted mid-flight) - neither success nor failure."""
         self.notes.pending = max(0, self.notes.pending - 1)
+        self.notes.cancelled += 1

@@ -382,8 +382,22 @@ class TestLiveResourceCacheBypassMiddleware:
         first_read, second_read = asyncio.run(scenario())
         first_payload = json.loads(first_read[0].text)
         second_payload = json.loads(second_read[0].text)
-        assert first_payload["documents"] == {"total": 1, "pending": 1, "succeeded": 0, "failed": 0, "active": True}
-        assert second_payload["documents"] == {"total": 1, "pending": 0, "succeeded": 1, "failed": 0, "active": False}
+        assert first_payload["documents"] == {
+            "total": 1,
+            "pending": 1,
+            "succeeded": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "active": True,
+        }
+        assert second_payload["documents"] == {
+            "total": 1,
+            "pending": 0,
+            "succeeded": 1,
+            "failed": 0,
+            "cancelled": 0,
+            "active": False,
+        }
 
     def test_an_ordinary_resource_is_still_served_from_cache(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         """A companion check that the bypass is scoped, not a blanket cache disable.
