@@ -90,22 +90,26 @@ class DecodeBinaryResourceContentMiddleware(Middleware):
         return ResourceResult(contents=contents, meta=result.meta)
 
 
-class NotesCacheBypassMiddleware(Middleware):
-    """Reads `notes://` resources straight from the handler, bypassing ResponseCachingMiddleware.
+class LiveResourceCacheBypassMiddleware(Middleware):
+    """Reads mutable/live resources straight from the handler, bypassing ResponseCachingMiddleware.
 
     Every other resource this server serves is either write-once (fetched provider content) or a
     static reference table (arXiv categories), so a blanket read-resource cache is safe for them.
-    Notes are mutable (create/update/delete), and `ReadResourceSettings` has no per-URI
-    included_/excluded_ option (unlike `CallToolSettings`), so this bypasses the cache directly:
-    dispatching with `run_middleware=False` invokes the resource's handler without going through
-    any middleware, including `ResponseCachingMiddleware`, for this one URI. Must be registered
-    before `ResponseCachingMiddleware` in `server.py`'s `app()` chain.
+    `notes://*` resources are mutable (create/update/delete), and
+    `research://vector-index/rebuild-status` is live in-process progress that callers poll while
+    reconciliation runs - both need every read to reach the real handler. `ReadResourceSettings`
+    has no per-URI included_/excluded_ option (unlike `CallToolSettings`), so this bypasses the
+    cache directly: dispatching with `run_middleware=False` invokes the resource's handler without
+    going through any middleware, including `ResponseCachingMiddleware`. Must be registered before
+    `ResponseCachingMiddleware` in `server.py`'s `app()` chain.
     """
 
+    _EXACT_URIS: ClassVar[frozenset[str]] = frozenset({"research://vector-index/rebuild-status"})
+
     async def on_read_resource(self, context, call_next):
-        """Read `notes://` resources fresh every time; everything else passes through unchanged."""
+        """Read bypassed URIs fresh every time; everything else passes through unchanged."""
         uri = str(context.message.uri)
-        if not uri.startswith("notes://"):
+        if not uri.startswith("notes://") and uri not in self._EXACT_URIS:
             return await call_next(context)
         if context.fastmcp_context is None:  # pragma: no cover - a live resource read always carries a context
             return await call_next(context)

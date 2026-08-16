@@ -86,6 +86,13 @@ class SqliteVecDocumentBackend(DocumentVectorSearchBackend):
         meta_row = conn.execute("SELECT model_name FROM document_vectors_meta WHERE id = 1").fetchone()
         if meta_row is not None and meta_row["model_name"] != self._embedding_backend.model_name:
             conn.execute("DROP TABLE IF EXISTS document_vectors")
+            # A status row surviving this drop would let indexed_under()/status() report a
+            # document as ready under some prior model even though its vector row is gone -
+            # concretely, a rollback (model-a -> model-b -> model-a) would otherwise skip
+            # reconciling documents whose model-a status row never got touched by the
+            # intervening model-b generation. Wiping every status row here forces status() to
+            # `not_built` for anything the drop affected, so it's always re-scheduled.
+            conn.execute("DELETE FROM document_vectors_status")
         conn.execute(
             f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS document_vectors USING vec0(
@@ -350,6 +357,11 @@ class SqliteVecNoteBackend(NoteVectorSearchBackend):
         meta_row = conn.execute("SELECT model_name FROM note_vectors_meta WHERE id = 1").fetchone()
         if meta_row is not None and meta_row["model_name"] != self._embedding_backend.model_name:
             conn.execute("DROP TABLE IF EXISTS note_vectors")
+            # See the matching comment in SqliteVecDocumentBackend._connect(): a status row
+            # surviving this drop would let indexed_under()/status() report a note as ready under
+            # some prior model even though its vector row is gone, letting a model-a -> model-b
+            # -> model-a rollback silently skip reconciling it.
+            conn.execute("DELETE FROM note_vectors_status")
         conn.execute(
             f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS note_vectors USING vec0(

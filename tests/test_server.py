@@ -2943,8 +2943,9 @@ class TestResearchNotesSearch:
 
         A match's own per-note status(), not the corpus-wide has_any_indexed() check, drives this
         - simulated here (rather than via a real dangling row, since index_note always writes both
-        tables together) by stubbing status() directly, same technique the existing "stale" test
-        above uses to simulate a status mismatch without hand-rolling raw SQL against the backend.
+        tables together) by stubbing status() directly, the same technique
+        test_mode_vector_reports_not_built_after_a_renamed_model_swap uses to simulate a status
+        mismatch without hand-rolling raw SQL against the backend.
         """
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
@@ -2972,7 +2973,14 @@ class TestResearchNotesSearch:
         assert len(result.structured_content["vector"]["matches"]) == 1
         assert result.structured_content["index_status"] == {"vector": "not_built"}
 
-    def test_mode_vector_reports_stale_index_status(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+    def test_mode_vector_reports_not_built_after_a_renamed_model_swap(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """`stale` is not observable through the public API (Fix 1).
+
+        The first status() connect under a renamed model wipes the prior status row in the same
+        step that drops the mismatched vec0 table.
+        """
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
@@ -3010,6 +3018,46 @@ class TestResearchNotesSearch:
 
         result = asyncio.run(scenario())
         assert len(result.structured_content["vector"]["matches"]) == 1
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
+
+    def test_mode_vector_aggregates_a_stale_status_row_if_one_is_ever_reported(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Exercises the aggregation's `stale` branch directly, by stubbing status().
+
+        The real backend can no longer produce `stale` in practice (Fix 1 deletes a differently-
+        named status row rather than letting it survive to be read - see
+        test_mode_vector_reports_not_built_after_a_renamed_model_swap), but `stale` remains a
+        legal `IndexStatus` value the aggregation must still rank correctly if a future backend
+        (or the generation-token design vector-search.md documents as a rejected alternative) ever
+        produces it - the same technique
+        test_mode_vector_reports_not_built_when_a_matched_note_has_no_status_row uses for
+        `not_built`.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                async def _always_stale(note_id: str) -> str:
+                    return "stale"
+
+                monkeypatch.setattr(mcp_obj._note_vector_backend, "status", _always_stale)
+                return await client.call_tool(
+                    "research_notes_search", arguments={"keyword": "attention-based models", "mode": "vector"}
+                )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["vector"]["matches"]) == 1
         assert result.structured_content["index_status"] == {"vector": "stale"}
 
     def test_mode_vector_with_no_matches_reports_not_built(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
@@ -3029,13 +3077,17 @@ class TestResearchNotesSearch:
         assert result.structured_content["vector"]["matches"] == []
         assert result.structured_content["index_status"] == {"vector": "not_built"}
 
-    def test_mode_vector_empty_page_with_indexed_corpus_reports_ready(
+    def test_mode_vector_filtered_empty_scope_reports_not_built_despite_ready_corpus_elsewhere(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
     ):
-        """D6: zero matches on this particular page must report "ready", not "not_built".
+        """A structural filter matching no notes at all must not borrow an unrelated ready corpus's status.
 
-        The corpus-wide index does have content under the current model - "not_built" is reserved
-        for a genuinely empty/never-built index (see test_mode_vector_with_no_matches_reports_not_built).
+        Previously (the review's Medium finding) an empty vector.matches page fell back to a
+        corpus-wide has_any_indexed() check that ignored the caller's filters entirely - a filter
+        matching zero notes reported "ready" merely because *some* unrelated note elsewhere was
+        ready. The requested scope here (provider="europepmc") has nothing to build, so it must
+        report "not_built", matching test_mode_vector_with_no_matches_reports_not_built's
+        genuinely-empty-corpus case rather than the corpus-wide ready note under "arxiv".
         """
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
@@ -3051,8 +3103,7 @@ class TestResearchNotesSearch:
                 )
                 await mcp_obj._embedding_scheduler.wait_all()
                 # A structural filter matching no notes (the only note is under "arxiv") narrows
-                # note_ids to [] before the vector search runs, giving a genuine zero-match page
-                # against an index that does have content indexed under the current model.
+                # the scope to [] before the vector search runs.
                 return await client.call_tool(
                     "research_notes_search",
                     arguments={"keyword": "attention-based models", "mode": "vector", "provider": "europepmc"},
@@ -3060,7 +3111,89 @@ class TestResearchNotesSearch:
 
         result = asyncio.run(scenario())
         assert result.structured_content["vector"]["matches"] == []
+        assert result.structured_content["index_status"] == {"vector": "not_built"}
+
+    def test_mode_vector_empty_page_past_total_still_reports_ready(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """D6: zero matches on this particular *page* must report "ready", not "not_built".
+
+        Distinct from an empty *scope* (see the sibling "not_built" test above): here the note is
+        in scope and ready, but `offset` pages past the only match, so `vector.matches` is empty
+        for a page-size reason unrelated to build state.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "transformer attention mechanisms"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+                return await client.call_tool(
+                    "research_notes_search",
+                    arguments={
+                        "keyword": "attention-based models",
+                        "mode": "vector",
+                        "provider": "arxiv",
+                        "offset": 5,
+                    },
+                )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["vector"]["matches"] == []
         assert result.structured_content["index_status"] == {"vector": "ready"}
+
+    def test_mode_vector_reports_building_for_a_filtered_in_scope_note_with_no_vector_row_yet(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression for the review's exact repro: an out-of-filter ready note must not mask an in-scope building one.
+
+        Before this fix, an empty vector.matches page for the in-scope note (it has no vector row
+        yet, so it can never be a KNN match) fell back to a corpus-wide has_any_indexed() check,
+        which only saw the *other*, outside-filter note's ready status and reported "ready" - even
+        though the caller's requested scope (provider="europepmc") had nothing searchable yet.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def scenario():
+            async with client:
+                await client.call_tool(
+                    "research_notes_create",
+                    arguments={"provider": "arxiv", "identifier": "A", "text": "ready note outside the filter"},
+                )
+                await mcp_obj._embedding_scheduler.wait_all()
+
+                # Create the in-scope note directly against the notes backend, bypassing
+                # research_notes_create's own embedding-scheduler trigger, so it genuinely has no
+                # vector row at all - then fake a live building task for it, the same gate
+                # technique test_mode_vector_reports_building_while_a_reembed_task_is_in_flight uses.
+                in_scope_note = await mcp_obj._notes_backend.create(
+                    "europepmc", "B", None, "in-scope note still building", anchors=[], tags=[]
+                )
+                gate = asyncio.Event()
+                mcp_obj._embedding_scheduler.schedule(("note", in_scope_note.id), gate.wait)
+                try:
+                    return await client.call_tool(
+                        "research_notes_search",
+                        arguments={"keyword": "attention-based models", "mode": "vector", "provider": "europepmc"},
+                    )
+                finally:
+                    gate.set()
+                    await mcp_obj._embedding_scheduler.wait_all()
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["vector"]["matches"] == []
+        assert result.structured_content["index_status"] == {"vector": "building"}
 
     def test_negative_offset_is_a_tool_error(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         """D7: a negative offset must raise, not silently fall into Python's from-the-end slicing."""
@@ -3244,9 +3377,14 @@ class TestVectorReconciliation:
         total = asyncio.run(scenario())
         assert total == 0  # already ready - nothing scheduled
 
-    def test_reconcile_reindexes_a_document_stale_under_a_renamed_model(
+    def test_reconcile_reindexes_a_document_not_built_under_a_renamed_model(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
     ):
+        """The document was indexed under a since-renamed model.
+
+        `stale` isn't observable (Fix 1), so the first connect under the real model already
+        reports `not_built`; reconciliation still restores it to `ready`.
+        """
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
         mcp_obj = PriorisMCP()
@@ -3259,14 +3397,14 @@ class TestVectorReconciliation:
             )
             # Index under a stand-in "old" model name directly against the same file, then point
             # the real mcp_obj (a differently-named model) at it - mirrors the existing
-            # test_status_stale_when_recorded_model_differs_from_configured pattern.
+            # test_status_not_built_after_a_model_change_wipes_the_prior_status_row pattern.
             old_backend = SqliteVecDocumentBackend(
                 tmp_path / "vectors" / "vectors.sqlite3", _RenamedStub(mcp_obj._embedding_backend, "old-model")
             )
             await old_backend.index_entries(
                 "arxiv", "2106.09685v2", "pdf", [{"chunk_id": "c1", "start": 0, "length": 20, "text": "old text"}]
             )
-            assert await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf") == "stale"
+            assert await mcp_obj._document_vector_backend.status("arxiv", "2106.09685v2", "pdf") == "not_built"
 
             await mcp_obj.reconcile_vector_index()
             await mcp_obj._embedding_scheduler.wait_all()
@@ -3313,18 +3451,158 @@ class TestVectorReconciliation:
 
             await mcp_obj.reconcile_vector_index()
             before = (mcp_obj._rebuild_progress.documents.total, mcp_obj._rebuild_progress.notes.total)
-            before_remaining = (
-                mcp_obj._rebuild_progress.documents.remaining,
-                mcp_obj._rebuild_progress.notes.remaining,
+            before_pending = (
+                mcp_obj._rebuild_progress.documents.pending,
+                mcp_obj._rebuild_progress.notes.pending,
             )
             await mcp_obj._embedding_scheduler.wait_all()
-            after_remaining = (mcp_obj._rebuild_progress.documents.remaining, mcp_obj._rebuild_progress.notes.remaining)
-            return before, before_remaining, after_remaining
+            after_pending = (mcp_obj._rebuild_progress.documents.pending, mcp_obj._rebuild_progress.notes.pending)
+            after_succeeded = (
+                mcp_obj._rebuild_progress.documents.succeeded,
+                mcp_obj._rebuild_progress.notes.succeeded,
+            )
+            return before, before_pending, after_pending, after_succeeded
 
-        before, before_remaining, after_remaining = asyncio.run(scenario())
+        before, before_pending, after_pending, after_succeeded = asyncio.run(scenario())
         assert before == (1, 1)
-        assert before_remaining == (1, 1)
-        assert after_remaining == (0, 0)
+        assert before_pending == (1, 1)
+        assert after_pending == (0, 0)
+        assert after_succeeded == (1, 1)
+
+    def test_reconcile_document_reembed_failure_reports_failed_not_perpetually_pending(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Regression for ADR-00031: a failed document re-embed must not leave `pending` stuck forever.
+
+        Before this fix, `EmbeddingScheduler` caught and only logged the failure, with no callback
+        to `VectorRebuildProgress` - the resource would report `remaining=1` (now `pending=1`)
+        forever, indistinguishable from a task genuinely still running.
+        """
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def _failing_index_entries(*args, **kwargs):
+            raise RuntimeError("boom - embedding backend unreachable")
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            monkeypatch.setattr(mcp_obj._document_vector_backend, "index_entries", _failing_index_entries)
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+            async with client:
+                result = await client.read_resource("research://vector-index/rebuild-status")
+            return json.loads(cast(TextResourceContents, result[0]).text)
+
+        payload = asyncio.run(scenario())
+        assert payload["documents"] == {"total": 1, "pending": 0, "succeeded": 0, "failed": 1, "active": False}
+
+    def test_reconcile_note_reembed_failure_reports_failed_not_perpetually_pending(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Mirror of the document failure test, isolating the note re-embed wrapper's except-branch."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        client = Client(transport=mcp_obj.register_features(FastMCP()), timeout=60)
+
+        async def _failing_index_note(*args, **kwargs):
+            raise RuntimeError("boom - embedding backend unreachable")
+
+        async def scenario():
+            await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note")
+            monkeypatch.setattr(mcp_obj._note_vector_backend, "index_note", _failing_index_note)
+
+            await mcp_obj.reconcile_vector_index()
+            await mcp_obj._embedding_scheduler.wait_all()
+            async with client:
+                result = await client.read_resource("research://vector-index/rebuild-status")
+            return json.loads(cast(TextResourceContents, result[0]).text)
+
+        payload = asyncio.run(scenario())
+        assert payload["notes"] == {"total": 1, "pending": 0, "succeeded": 0, "failed": 1, "active": False}
+
+    def test_reconcile_document_reembed_cancellation_counts_as_neither_success_nor_failure(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """A cancelled (e.g. shutdown, or deleted mid-flight) document re-embed is not a failure."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        gate = asyncio.Event()
+
+        async def _hanging_index_entries(*args, **kwargs):
+            await gate.wait()
+
+        async def scenario():
+            await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
+            manifest = mcp_obj._storage.manifest_for("arxiv", "2106.09685v2")
+            await manifest.replace_chunk_rows(
+                "pdf", [{"key": "c1", "start": 0, "length": 20}], scheme="heading-bounded-v1"
+            )
+            monkeypatch.setattr(mcp_obj._document_vector_backend, "index_entries", _hanging_index_entries)
+
+            await mcp_obj.reconcile_vector_index()
+            assert mcp_obj._embedding_scheduler.is_building(("arxiv", "2106.09685v2", "pdf"))
+            # Let the freshly-created task actually run at least once and reach the `gate.wait()`
+            # suspension point before cancelling it - cancelling a task that has never been
+            # stepped at all bypasses its own try/except entirely (nothing has executed yet),
+            # which would make this test pass for the wrong reason (no code ran, not "cancellation
+            # handled correctly").
+            for _ in range(10):
+                await asyncio.sleep(0)
+            # cancel() awaits the task to actually stop before returning - Task.cancel() delivers
+            # CancelledError at the suspended `await gate.wait()`, so the gate itself never needs
+            # to be set for this to unblock.
+            await mcp_obj._embedding_scheduler.cancel(("arxiv", "2106.09685v2", "pdf"))
+            return mcp_obj._rebuild_progress.documents
+
+        documents = asyncio.run(scenario())
+        assert documents.pending == 0
+        assert documents.succeeded == 0
+        assert documents.failed == 0
+
+    def test_reconcile_note_reembed_cancellation_counts_as_neither_success_nor_failure(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Mirror of the document cancellation test, isolating the note re-embed wrapper's cancel-branch."""
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        mcp_obj = PriorisMCP()
+        gate = asyncio.Event()
+
+        async def _hanging_index_note(*args, **kwargs):
+            await gate.wait()
+
+        async def scenario():
+            note = await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note")
+            monkeypatch.setattr(mcp_obj._note_vector_backend, "index_note", _hanging_index_note)
+
+            await mcp_obj.reconcile_vector_index()
+            assert mcp_obj._embedding_scheduler.is_building(("note", note.id))
+            # Let the freshly-created task actually run at least once and reach the `gate.wait()`
+            # suspension point before cancelling it - see the matching comment in the document
+            # cancellation test above for why.
+            for _ in range(10):
+                await asyncio.sleep(0)
+            # cancel() awaits the task to actually stop before returning - Task.cancel() delivers
+            # CancelledError at the suspended `await gate.wait()`, so the gate itself never needs
+            # to be set for this to unblock.
+            await mcp_obj._embedding_scheduler.cancel(("note", note.id))
+            return mcp_obj._rebuild_progress.notes
+
+        notes = asyncio.run(scenario())
+        assert notes.pending == 0
+        assert notes.succeeded == 0
+        assert notes.failed == 0
 
     def test_reconcile_vector_index_isolates_document_and_note_failures(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -3436,7 +3714,8 @@ class TestVectorReconciliation:
 
         result = asyncio.run(scenario())
         payload = json.loads(cast(TextResourceContents, result[0]).text)
-        assert payload == {"documents": {"total": 0, "remaining": 0}, "notes": {"total": 0, "remaining": 0}}
+        zero_mechanism = {"total": 0, "pending": 0, "succeeded": 0, "failed": 0, "active": False}
+        assert payload == {"documents": zero_mechanism, "notes": zero_mechanism}
 
     def test_rebuild_status_resource_reflects_progress_mid_reconciliation(
         self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
@@ -3462,8 +3741,8 @@ class TestVectorReconciliation:
             return mid_payload, done_payload
 
         mid_payload, done_payload = asyncio.run(scenario())
-        assert mid_payload["documents"] == {"total": 1, "remaining": 1}
-        assert done_payload["documents"] == {"total": 1, "remaining": 0}
+        assert mid_payload["documents"] == {"total": 1, "pending": 1, "succeeded": 0, "failed": 0, "active": True}
+        assert done_payload["documents"] == {"total": 1, "pending": 0, "succeeded": 1, "failed": 0, "active": False}
 
     def test_lifespan_force_reconnects_before_yielding(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")

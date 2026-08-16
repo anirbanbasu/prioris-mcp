@@ -11,7 +11,9 @@ date: 2026-08-12
 
 ## Decision
 
-Every search response carries an `index_status` field per mechanism (e.g. `{"fts": "ready", "vector": "stale"}`) unconditionally — not only when results are empty, and not gated behind a separate status-check call.
+`index_status` is folded into the same response `search`/`research_notes_search` already returns (e.g. `{"fts": "ready", "vector": "stale"}`), not gated behind a separate status-check call.
+
+This does not mean *unconditionally present with every mechanism's status on every call* — see [Vector search → `index_status` travels with every search response, not a separate status-check call](../search/02-vector-search.md#index_status-travels-with-every-search-response-not-a-separate-status-check-call) for the actual per-corpus population rules (documents: gated on `provider`/`identifier`/`format` all being given; notes: gated on the vector mechanism having actually run, and never carrying an `"fts"` key at all). What this ADR settles is narrower and still holds: *when* `index_status` is populated, it rides along with the ordinary search response rather than requiring a dedicated call.
 
 ## Alternatives considered
 
@@ -19,8 +21,8 @@ Every search response carries an `index_status` field per mechanism (e.g. `{"fts
 
 ## Consequences
 
-Folding status into every response means the explanation travels with the result whether or not the caller was looking for it, and lets a caller retry the same `search` call as a natural readiness-polling loop instead of orchestrating a separate check-then-search sequence. `fts` is included in `index_status` despite being synchronous and normally immediate, because "normally" isn't "always" — a missing FTS entry for a document that does exist (a failed/partial `index_entries` call, external corruption, a manually deleted `search.sqlite3`) is a real integrity gap this field surfaces instead of silently assuming away.
+Folding status into the response means the explanation travels with the result whenever it's populated, and lets a caller retry the same `search` call as a natural readiness-polling loop instead of orchestrating a separate check-then-search sequence. `fts` is included in the documents side of `index_status` despite being synchronous and normally immediate, because "normally" isn't "always" — a missing FTS entry for a document that does exist (a failed/partial `index_entries` call, external corruption, a manually deleted `search.sqlite3`) is a real integrity gap this field surfaces instead of silently assuming away.
 
 ## Referenced from
 
-- [Vector search → Search responses always carry per-mechanism `index_status`, including `fts`](../search/02-vector-search.md#search-responses-always-carry-per-mechanism-index_status-including-fts)
+- [Vector search → `index_status` travels with every search response, not a separate status-check call](../search/02-vector-search.md#index_status-travels-with-every-search-response-not-a-separate-status-check-call)

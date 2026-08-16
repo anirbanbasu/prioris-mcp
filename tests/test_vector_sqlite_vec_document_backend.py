@@ -351,7 +351,16 @@ class TestStatus:
         )
         assert asyncio.run(backend.status("arxiv", "A", "pdf")) == "ready"
 
-    def test_status_stale_when_recorded_model_differs_from_configured(self, tmp_path):
+    def test_status_not_built_after_a_model_change_wipes_the_prior_status_row(self, tmp_path):
+        """A model-name change reports `not_built`, not `stale`, the moment anything connects under it.
+
+        `stale` (a status row exists but names a different model) is no longer reachable through
+        the public API: `_connect()` deletes every `*_vectors_status` row in the same step that
+        drops the mismatched `vec0` table (see the Fix 1 rollback regression tests below for why),
+        and that deletion runs on the very first connect under the new model - the same connect
+        `status()` itself needs to read anything. There is no window in which a surviving,
+        differently-named row could be observed.
+        """
         embedding = FastEmbedBackend("BAAI/bge-small-en-v1.5")
         backend = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", embedding)
         asyncio.run(
@@ -369,8 +378,8 @@ class TestStatus:
             async def embed(self, text):
                 return await embedding.embed(text)
 
-        stale_view = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", _RenamedStub())
-        assert asyncio.run(stale_view.status("arxiv", "A", "pdf")) == "stale"
+        renamed_view = SqliteVecDocumentBackend(tmp_path / "vectors.sqlite3", _RenamedStub())
+        assert asyncio.run(renamed_view.status("arxiv", "A", "pdf")) == "not_built"
 
     def test_reindexing_under_a_different_dimension_model_self_heals(self, tmp_path):
         db_path = tmp_path / "vectors.sqlite3"
@@ -380,7 +389,9 @@ class TestStatus:
         )
 
         backend_b = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-b", 8))
-        assert asyncio.run(backend_b.status("arxiv", "A", "pdf")) == "stale"
+        # Connecting under model-b drops the old table and wipes model-a's status row in the same
+        # step (Fix 1), so this reports `not_built`, not `stale` - see the test above.
+        assert asyncio.run(backend_b.status("arxiv", "A", "pdf")) == "not_built"
 
         # Must not raise sqlite3.OperationalError despite the old vec0 table being built at
         # dimension 4 while backend_b embeds at dimension 8.
@@ -406,8 +417,8 @@ class TestStatus:
         query = asyncio.run(backend._embedding_backend.embed("x"))
         assert asyncio.run(backend.search(query, provider="arxiv", identifier="A")) == []
 
-    def test_status_stale_for_a_same_dimension_differently_named_model(self, tmp_path):
-        """The Low finding this task fixes: same dimension, different model name, must still be stale."""
+    def test_status_not_built_for_a_same_dimension_differently_named_model(self, tmp_path):
+        """A same-dimension model rename must still trigger a drop-and-recreate, not silently reuse old vectors."""
         db_path = tmp_path / "vectors.sqlite3"
         backend_a = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-a", 4))
         asyncio.run(
@@ -415,7 +426,7 @@ class TestStatus:
         )
 
         backend_b = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-b", 4))  # same dimension
-        assert asyncio.run(backend_b.status("arxiv", "A", "pdf")) == "stale"
+        assert asyncio.run(backend_b.status("arxiv", "A", "pdf")) == "not_built"
 
         # Must not raise despite backend_b's table already existing under model-a's rows - a
         # same-dimension mismatch must still trigger the drop-and-recreate, not silently reuse
@@ -427,6 +438,32 @@ class TestStatus:
         query = asyncio.run(backend_b._embedding_backend.embed("new"))
         results = asyncio.run(backend_b.search(query, provider="arxiv", identifier="A"))
         assert [r["chunk_id"] for r in results] == ["c2"]
+
+    def test_rollback_a_to_b_to_a_does_not_resurrect_a_stale_generations_ready_status(self, tmp_path):
+        """Regression for the review's High finding: A -> B -> A must not report a dropped table's rows as ready.
+
+        Before this fix, dropping the vec0 table on a model mismatch left the previous model's
+        status rows untouched. A -> B (no re-embed yet, simulating reconciliation not having
+        caught up) -> A left model-a's original status row on disk, so a caller connecting back
+        under model-a saw `status() == "ready"` and `indexed_under("model-a")` containing this
+        document, despite its vec0 table having been dropped twice and holding zero rows.
+        """
+        db_path = tmp_path / "vectors.sqlite3"
+        backend_a = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-a", 4))
+        asyncio.run(
+            backend_a.index_entries("arxiv", "A", "pdf", [{"chunk_id": "c1", "start": 0, "length": 3, "text": "old"}])
+        )
+        assert asyncio.run(backend_a.status("arxiv", "A", "pdf")) == "ready"
+
+        backend_b = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-b", 8))
+        # Connecting alone (no re-embed) is enough to trigger the drop - simulates reconciliation
+        # not having gotten to this item under model-b yet.
+        assert asyncio.run(backend_b.count()) == 0
+
+        backend_a2 = SqliteVecDocumentBackend(db_path, _StubEmbedding("model-a", 4))
+        assert asyncio.run(backend_a2.count()) == 0
+        assert asyncio.run(backend_a2.status("arxiv", "A", "pdf")) == "not_built"
+        assert asyncio.run(backend_a2.indexed_under("model-a")) == set()
 
 
 class TestIndexedUnder:

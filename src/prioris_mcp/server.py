@@ -32,7 +32,7 @@ from prioris_mcp.errors import InvalidRequestError, NotFoundError
 from prioris_mcp.middleware import (
     DecodeBinaryResourceContentMiddleware,
     EncodeBinaryResourceContentMiddleware,
-    NotesCacheBypassMiddleware,
+    LiveResourceCacheBypassMiddleware,
     ResponseMetadataMiddleware,
     StripUnknownArgumentsMiddleware,
 )
@@ -859,6 +859,7 @@ class PriorisMCP(MCPMixin):
                 raise InvalidRequestError(f"invalid search query: {exc}") from exc
 
         vector_result: PagedNoteVectorMatches | None = None
+        status_scope_note_ids: list[str] | None = None
         if mode in ("vector", "hybrid") and keyword is not None:
             structural_filters_given = any(
                 [
@@ -887,6 +888,15 @@ class PriorisMCP(MCPMixin):
                     tags_any=tags_any,
                     tags_exclude=tags_exclude,
                 )
+            # The status aggregate below must reflect every note the caller's structural filters
+            # select, not just this page's KNN matches - an in-scope note that hasn't been
+            # embedded yet has no vector row, so it can never appear in `matches`, but the caller
+            # still needs to see "building"/"not_built" for it rather than a stale/unrelated
+            # corpus-wide "ready". `note_ids` is reused when given (already the structural scope);
+            # an unfiltered query fetches the same full-corpus id set matching_ids() would return,
+            # purely for this status computation - `mechanism.search`/`count` still receive `None`
+            # so the unfiltered KNN query itself stays unscoped.
+            status_scope_note_ids = note_ids if note_ids is not None else await self._notes_backend.matching_ids()
             mechanism = cast(NotesVectorMechanism, self._notes_search_mechanisms["vector"])
             raw = await mechanism.search(keyword, note_ids=note_ids, offset=offset, limit=limit)
             total = await mechanism.count(note_ids=note_ids)
@@ -897,21 +907,20 @@ class PriorisMCP(MCPMixin):
 
         index_status: dict[str, IndexStatus] | None = None
         if vector_result is not None:
-            statuses = [await self._note_index_status(match.note_id) for match in vector_result.matches]
-            if not statuses:
-                # Zero matches alone doesn't distinguish "index genuinely empty/never built" from
-                # "index built, nothing matched this particular query/filters" - fall back to a
-                # corpus-wide existence check under the currently configured model.
-                has_any = await self._note_vector_backend.has_any_indexed(self._embedding_backend.model_name)
-                index_status = {"vector": "ready" if has_any else "not_built"}
-            elif "building" in statuses:
-                index_status = {"vector": "building"}
-            elif "not_built" in statuses:
+            if not status_scope_note_ids:
+                # No note matches the caller's structural filters at all (or the corpus is
+                # genuinely empty) - nothing to build, so there's no in-scope work in flight.
                 index_status = {"vector": "not_built"}
-            elif "stale" in statuses:
-                index_status = {"vector": "stale"}
             else:
-                index_status = {"vector": "ready"}
+                statuses = [await self._note_index_status(note_id) for note_id in status_scope_note_ids]
+                if "building" in statuses:
+                    index_status = {"vector": "building"}
+                elif "not_built" in statuses:
+                    index_status = {"vector": "not_built"}
+                elif "stale" in statuses:
+                    index_status = {"vector": "stale"}
+                else:
+                    index_status = {"vector": "ready"}
 
         return NotesSearchResult(fts=fts_result, vector=vector_result, index_status=index_status)
 
@@ -919,8 +928,8 @@ class PriorisMCP(MCPMixin):
         """This note's persisted vector status, overridden to `"building"` while a live re-embed task exists for it.
 
         Mirrors `VectorMechanism.status`'s override for documents, kept inline here since notes'
-        `index_status` is aggregated over matched notes rather than polled per-note through a
-        `SearchMechanism`.
+        `index_status` is aggregated over the caller's full structurally-matched scope rather than
+        polled per-note through a `SearchMechanism`.
         """
         if self._embedding_scheduler.is_building(("note", note_id)):
             return "building"
@@ -988,21 +997,34 @@ class PriorisMCP(MCPMixin):
         format_ = entry["format"]
 
         async def _reembed_and_mark_done() -> None:
-            markdown_bytes = await self._storage.read(provider, canonical_identifier, format_, artefact="markdown")
-            markdown = markdown_bytes.decode("utf-8")
-            manifest = self._storage.manifest_for(provider, canonical_identifier)
-            search_rows = await manifest.rows_for_search(format_)
-            reindex_entries = [
-                {
-                    "chunk_id": str(uuid.uuid4()),
-                    "start": row["start"],
-                    "length": row["length"],
-                    "text": markdown[row["start"] : row["start"] + row["length"]],
-                }
-                for row in search_rows
-            ]
-            await self._document_vector_backend.index_entries(provider, identifier, format_, reindex_entries)
-            self._rebuild_progress.document_done()
+            # try/except/else, not a bare call: EmbeddingScheduler already catches and logs any
+            # non-cancellation exception, but it has no callback to this progress counter - a
+            # failure here would otherwise leave `pending` stuck forever with no evidence of what
+            # happened. Re-raising in both non-success branches preserves the scheduler's own
+            # single log site and cancellation handling unchanged; this only adds bookkeeping.
+            try:
+                markdown_bytes = await self._storage.read(provider, canonical_identifier, format_, artefact="markdown")
+                markdown = markdown_bytes.decode("utf-8")
+                manifest = self._storage.manifest_for(provider, canonical_identifier)
+                search_rows = await manifest.rows_for_search(format_)
+                reindex_entries = [
+                    {
+                        "chunk_id": str(uuid.uuid4()),
+                        "start": row["start"],
+                        "length": row["length"],
+                        "text": markdown[row["start"] : row["start"] + row["length"]],
+                    }
+                    for row in search_rows
+                ]
+                await self._document_vector_backend.index_entries(provider, identifier, format_, reindex_entries)
+            except asyncio.CancelledError:
+                self._rebuild_progress.document_cancelled()
+                raise
+            except Exception:
+                self._rebuild_progress.document_failed()
+                raise
+            else:
+                self._rebuild_progress.document_succeeded()
 
         self._embedding_scheduler.schedule((provider, identifier, format_), _reembed_and_mark_done)
 
@@ -1017,9 +1039,19 @@ class PriorisMCP(MCPMixin):
 
     def _schedule_note_reembed(self, note_id: str) -> None:
         async def _reembed_and_mark_done() -> None:
-            note = await self._notes_backend.read(note_id)
-            await self._note_vector_backend.index_note(note_id, note.text)
-            self._rebuild_progress.note_done()
+            # See the matching comment in _schedule_document_reembed for why this is
+            # try/except/else rather than a bare call.
+            try:
+                note = await self._notes_backend.read(note_id)
+                await self._note_vector_backend.index_note(note_id, note.text)
+            except asyncio.CancelledError:
+                self._rebuild_progress.note_cancelled()
+                raise
+            except Exception:
+                self._rebuild_progress.note_failed()
+                raise
+            else:
+                self._rebuild_progress.note_succeeded()
 
         self._embedding_scheduler.schedule(("note", note_id), _reembed_and_mark_done)
 
@@ -1164,8 +1196,10 @@ class PriorisMCP(MCPMixin):
     async def read_vector_rebuild_status_resource(self) -> str:
         """Read corpus-wide vector-index rebuild progress for the reconciliation run started at server startup.
 
-        `total`/`remaining` count only items this run decided needed rebuilding - a corpus already
-        fully ready under the configured model reports `{"total": 0, "remaining": 0}`.
+        `total`/`pending`/`succeeded`/`failed` count only items this run decided needed rebuilding
+        - a corpus already fully ready under the configured model reports all zeros. A nonzero
+        `failed` with `active=False` is a terminal, not-currently-recoverable-without-a-restart
+        state - see docs/requirement-specification/ADR/00031-rebuild-progress-failure-visibility.md.
         Process-local, in-memory, not persisted - see
         docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
         Returns the `VectorRebuildStatus` serialised to JSON - see `read_markdown_resource` for why.
@@ -1173,9 +1207,19 @@ class PriorisMCP(MCPMixin):
         progress = self._rebuild_progress
         return VectorRebuildStatus(
             documents=VectorRebuildMechanismStatus(
-                total=progress.documents.total, remaining=progress.documents.remaining
+                total=progress.documents.total,
+                pending=progress.documents.pending,
+                succeeded=progress.documents.succeeded,
+                failed=progress.documents.failed,
+                active=progress.documents.active,
             ),
-            notes=VectorRebuildMechanismStatus(total=progress.notes.total, remaining=progress.notes.remaining),
+            notes=VectorRebuildMechanismStatus(
+                total=progress.notes.total,
+                pending=progress.notes.pending,
+                succeeded=progress.notes.succeeded,
+                failed=progress.notes.failed,
+                active=progress.notes.active,
+            ),
         ).model_dump_json()
 
 
@@ -1220,10 +1264,11 @@ def app() -> FastMCP:  # pragma: no cover
     )
     app_with_features = mcp_obj.register_features(app)
     app_with_features.add_middleware(StripUnknownArgumentsMiddleware())
-    # NotesCacheBypassMiddleware runs before the Encode/Decode sandwich below and fully bypasses
-    # it for notes:// URIs, dispatching straight to the resource handler with run_middleware=False
-    # so mutable note content is never read from - or written to - the response cache.
-    app_with_features.add_middleware(NotesCacheBypassMiddleware())
+    # LiveResourceCacheBypassMiddleware runs before the Encode/Decode sandwich below and fully
+    # bypasses it for notes:// URIs and the rebuild-status resource, dispatching straight to the
+    # resource handler with run_middleware=False so mutable note content and live reconciliation
+    # progress are never read from - or written to - the response cache.
+    app_with_features.add_middleware(LiveResourceCacheBypassMiddleware())
     # Encode/DecodeBinaryResourceContentMiddleware sandwich ResponseCachingMiddleware: fastmcp's
     # cache wrapper JSON-serialises via Pydantic, whose default bytes encoding is a UTF-8 decode -
     # it crashes on non-UTF-8-safe resource content (e.g. a fetched PDF's fulltext resource).

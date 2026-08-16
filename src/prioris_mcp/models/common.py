@@ -210,15 +210,19 @@ class SearchFetchedResult(BaseModel):
 class VectorRebuildMechanismStatus(BaseModel):
     """One mechanism's (documents or notes) corpus-wide rebuild progress.
 
-    See docs/requirement-specification/search/02-vector-search.md#index-status-is-per-documentnote-derived-by-comparing-recorded-vs-configured-model.
-    `total`/`remaining` count only items reconciliation decided needed rebuilding this run, not
-    the whole corpus - a corpus already fully ready reports total=0, remaining=0.
+    See docs/requirement-specification/ADR/00031-rebuild-progress-failure-visibility.md.
+    `total`/`pending`/`succeeded`/`failed` count only items reconciliation decided needed
+    rebuilding this run, not the whole corpus - a corpus already fully ready reports all zeros.
+    `active` (`pending > 0`) is a convenience field so a caller doesn't have to derive it itself.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     total: Annotated[int, Field(..., strict=True, ge=0)]
-    remaining: Annotated[int, Field(..., strict=True, ge=0)]
+    pending: Annotated[int, Field(..., strict=True, ge=0)]
+    succeeded: Annotated[int, Field(..., strict=True, ge=0)]
+    failed: Annotated[int, Field(..., strict=True, ge=0)]
+    active: Annotated[bool, Field(...)]
 
 
 class VectorRebuildStatus(BaseModel):
