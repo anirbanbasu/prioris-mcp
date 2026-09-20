@@ -29,6 +29,8 @@ from starlette.middleware.cors import CORSMiddleware
 from prioris_mcp import PACKAGE_NAME, EnvVars
 from prioris_mcp.discovery.openalex import OPENALEX_MAX_RESULTS, OpenAlexClient
 from prioris_mcp.errors import InvalidRequestError, NotFoundError
+from prioris_mcp.graph.algorithms import GraphAlgorithms
+from prioris_mcp.graph.ladybug_backend import LadybugSearchBackend
 from prioris_mcp.middleware import (
     DecodeBinaryResourceContentMiddleware,
     EncodeBinaryResourceContentMiddleware,
@@ -277,6 +279,9 @@ class PriorisMCP(MCPMixin):
             "fts": NotesFtsMechanism(self._notes_search_index),
             "vector": NotesVectorMechanism(self._note_vector_backend, self._embedding_backend),
         }
+        graph_dir = grouping_dir(EnvVars.PRIORIS_MCP_GRAPH_DIR, DEFAULT_GROUPING)
+        self._graph_backend = LadybugSearchBackend(graph_dir / "graph.ladybug")
+        self._graph_algorithms = GraphAlgorithms(self._graph_backend)
         self._rebuild_progress = VectorRebuildProgress()
         self._reconciliation_task: asyncio.Task | None = None
 

@@ -99,7 +99,12 @@ class LadybugSearchBackend(GraphSearchBackend):
     def __init__(self, path: Path) -> None:
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = lb.Database(str(self._path))
+        # ladybug defaults buffer_pool_size to ~80% of system memory and reserves an 8TB mmap
+        # region per Database when unset. PriorisMCP now constructs one per test via server.py's
+        # __init__, and enough concurrently-live instances exhaust memory/address space. Both
+        # bounds are ladybug's documented knobs for this; 128MiB is ample for an embedded
+        # metadata graph.
+        self._db = lb.Database(str(self._path), buffer_pool_size=128 * 1024**2, max_db_size=1 * 1024**3)
         schema_conn = lb.Connection(self._db)
         try:
             for ddl in _SCHEMA_DDL:

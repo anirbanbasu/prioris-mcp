@@ -17,16 +17,19 @@ def _isolated_data_dirs_session(tmp_path_factory):
     original_storage = EnvVars.PRIORIS_MCP_STORAGE_DIR
     original_notes = EnvVars.PRIORIS_MCP_NOTES_DIR
     original_vector = EnvVars.PRIORIS_MCP_VECTOR_DIR
+    original_graph = EnvVars.PRIORIS_MCP_GRAPH_DIR
 
     EnvVars.PRIORIS_MCP_STORAGE_DIR = base / "downloads"
     EnvVars.PRIORIS_MCP_NOTES_DIR = base / "notes"
     EnvVars.PRIORIS_MCP_VECTOR_DIR = base / "vectors"
+    EnvVars.PRIORIS_MCP_GRAPH_DIR = base / "graph"
 
     yield
 
     EnvVars.PRIORIS_MCP_STORAGE_DIR = original_storage
     EnvVars.PRIORIS_MCP_NOTES_DIR = original_notes
     EnvVars.PRIORIS_MCP_VECTOR_DIR = original_vector
+    EnvVars.PRIORIS_MCP_GRAPH_DIR = original_graph
 
 
 @pytest.fixture(autouse=True)
@@ -40,11 +43,13 @@ def _isolated_data_dirs(tmp_path):
     original_storage = EnvVars.PRIORIS_MCP_STORAGE_DIR
     original_notes = EnvVars.PRIORIS_MCP_NOTES_DIR
     original_vector = EnvVars.PRIORIS_MCP_VECTOR_DIR
+    original_graph = EnvVars.PRIORIS_MCP_GRAPH_DIR
 
     # Set isolated directories
     EnvVars.PRIORIS_MCP_STORAGE_DIR = tmp_path / "downloads"
     EnvVars.PRIORIS_MCP_NOTES_DIR = tmp_path / "notes"
     EnvVars.PRIORIS_MCP_VECTOR_DIR = tmp_path / "vectors"
+    EnvVars.PRIORIS_MCP_GRAPH_DIR = tmp_path / "graph"
 
     yield
 
@@ -52,3 +57,4 @@ def _isolated_data_dirs(tmp_path):
     EnvVars.PRIORIS_MCP_STORAGE_DIR = original_storage
     EnvVars.PRIORIS_MCP_NOTES_DIR = original_notes
     EnvVars.PRIORIS_MCP_VECTOR_DIR = original_vector
+    EnvVars.PRIORIS_MCP_GRAPH_DIR = original_graph

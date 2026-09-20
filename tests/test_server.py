@@ -154,6 +154,15 @@ class TestMCPServer:
         assert mcp_obj._arxiv_provider._default_inline_char_limit == 12345
         assert mcp_obj._europepmc_provider._default_inline_char_limit == 12345
 
+    def test_graph_backend_and_algorithms_are_constructed(self):
+        mcp_obj = PriorisMCP()
+        from prioris_mcp.graph.algorithms import GraphAlgorithms
+        from prioris_mcp.graph.ladybug_backend import LadybugSearchBackend
+
+        assert isinstance(mcp_obj._graph_backend, LadybugSearchBackend)
+        assert isinstance(mcp_obj._graph_algorithms, GraphAlgorithms)
+        assert mcp_obj._graph_backend._path == EnvVars.PRIORIS_MCP_GRAPH_DIR / "graph.ladybug"
+
     def test_outbound_http_client_trusts_env_for_proxy_and_ca_bundle(self):
         """`trust_env` (on by default) is what makes httpx honour `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and `SSL_CERT_FILE`/`SSL_CERT_DIR`.
 
