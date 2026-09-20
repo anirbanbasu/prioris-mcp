@@ -407,7 +407,25 @@ class LadybugSearchBackend(GraphSearchBackend):
         return {"nodes": nodes, "edges": edges}
 
     async def find_concepts(self, query: str, *, limit: int = 20) -> list[dict]:
-        raise NotImplementedError
+        from rapidfuzz import fuzz, process
+
+        result = await self._conn.execute("MATCH (c:Concept) RETURN c.id AS id, c.label AS label, c.aliases AS aliases")
+        assert isinstance(result, QueryResult)  # see the narrowing note on upsert_pointer above
+        rows = list(result.rows_as_dict())
+        candidates: list[tuple[str, str]] = []
+        for row in rows:
+            candidates.append((row["id"], row["label"]))
+            candidates.extend((row["id"], alias) for alias in row["aliases"])
+        scored = process.extract(
+            query, {i: text for i, (_, text) in enumerate(candidates)}, scorer=fuzz.WRatio, limit=len(candidates)
+        )
+        best_score_by_node_id: dict[str, float] = {}
+        for _, score, idx in scored:
+            node_id = candidates[idx][0]
+            if node_id not in best_score_by_node_id or score > best_score_by_node_id[node_id]:
+                best_score_by_node_id[node_id] = score
+        ranked = sorted(best_score_by_node_id.items(), key=lambda item: item[1], reverse=True)[:limit]
+        return [{"node": await self.get_node(node_id), "score": score} for node_id, score in ranked]
 
     async def list_concepts(
         self,
@@ -417,7 +435,38 @@ class LadybugSearchBackend(GraphSearchBackend):
         offset: int = 0,
         limit: int = 50,
     ) -> list[dict]:
-        raise NotImplementedError
+        where_clause = ""
+        params: dict[str, Any] = {}
+        if text is not None:
+            operator = {"starts_with": "STARTS WITH", "contains": "CONTAINS", "ends_with": "ENDS WITH"}[match]
+            where_clause = f" WHERE lower(c.label) {operator} lower($text)"
+            params["text"] = text
+        # SKIP/LIMIT must be inlined rather than passed as $offset/$limit query params - see the
+        # note on neighbors() above; int() casting keeps this injection-safe despite the string
+        # interpolation. ORDER BY also appends c.id as a deterministic tiebreak, since created_at
+        # values can collide within the same timestamp resolution during pagination.
+        result = await self._conn.execute(
+            f"MATCH (c:Concept){where_clause} "
+            "RETURN c.id AS id, c.label AS label, c.aliases AS aliases, c.description AS description, "
+            "c.metadata AS metadata, c.created_at AS created_at, c.updated_at AS updated_at "
+            f"ORDER BY c.created_at DESC, c.id SKIP {int(offset)} LIMIT {int(limit)}",
+            params,
+        )
+        assert isinstance(result, QueryResult)  # see the narrowing note on upsert_pointer above
+        concepts: list[dict] = []
+        for row in result.rows_as_dict():
+            assert isinstance(row, dict)  # rows_as_dict() rows are dict[str, Any], not the list[Any] row variant
+            row["metadata"] = _metadata_from_row(row["metadata"])
+            row["kind"] = "concept"
+            concepts.append(row)
+        return concepts
 
     async def export_graph(self) -> dict:
-        raise NotImplementedError
+        node_result = await self._conn.execute("MATCH (n) RETURN n.id AS id")
+        assert isinstance(node_result, QueryResult)  # see the narrowing note on upsert_pointer above
+        node_ids = [row["id"] for row in node_result.rows_as_dict()]
+        nodes = [await self.get_node(node_id) for node_id in node_ids]
+        edge_result = await self._conn.execute("MATCH ()-[e:Related]->() RETURN e.id AS id")
+        assert isinstance(edge_result, QueryResult)  # see the narrowing note on upsert_pointer above
+        edges = [await self.get_edge(row["id"]) for row in edge_result.rows_as_dict()]
+        return {"nodes": nodes, "edges": edges}

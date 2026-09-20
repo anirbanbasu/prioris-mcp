@@ -344,3 +344,71 @@ def test_subgraph_empty_node_ids_returns_empty_result(tmp_path):
     backend = _backend(tmp_path)
     result = asyncio.run(backend.subgraph([]))
     assert result == {"nodes": [], "edges": []}
+
+
+def test_find_concepts_ranks_by_fuzzy_similarity(tmp_path):
+    """find_concepts ranks the closer fuzzy match to the query text first."""
+    backend = _backend(tmp_path)
+    asyncio.run(backend.create_concept("gradient checkpointing"))
+    asyncio.run(backend.create_concept("transformer architecture"))
+    results = asyncio.run(backend.find_concepts("gradient check-pointing"))
+    assert results[0]["node"]["label"] == "gradient checkpointing"
+
+
+def test_find_concepts_matches_against_aliases_too(tmp_path):
+    """find_concepts matches a query against a Concept's aliases, not just its label."""
+    backend = _backend(tmp_path)
+    asyncio.run(backend.create_concept("gradient checkpointing", aliases=["activation checkpointing"]))
+    results = asyncio.run(backend.find_concepts("activation check-pointing"))
+    assert len(results) == 1
+
+
+def test_find_concepts_respects_limit(tmp_path):
+    """find_concepts caps the number of returned candidates at limit."""
+    backend = _backend(tmp_path)
+    for i in range(5):
+        asyncio.run(backend.create_concept(f"concept {i}"))
+    results = asyncio.run(backend.find_concepts("concept", limit=2))
+    assert len(results) == 2
+
+
+def test_list_concepts_unfiltered_returns_everything(tmp_path):
+    """list_concepts with no text filter returns every Concept node."""
+    backend = _backend(tmp_path)
+    asyncio.run(backend.create_concept("a"))
+    asyncio.run(backend.create_concept("b"))
+    results = asyncio.run(backend.list_concepts())
+    assert len(results) == 2
+
+
+def test_list_concepts_starts_with_filter(tmp_path):
+    """list_concepts(match="starts_with") restricts results to labels starting with text."""
+    backend = _backend(tmp_path)
+    asyncio.run(backend.create_concept("gradient checkpointing"))
+    asyncio.run(backend.create_concept("transformer"))
+    results = asyncio.run(backend.list_concepts(text="gradient", match="starts_with"))
+    assert len(results) == 1
+    assert results[0]["label"] == "gradient checkpointing"
+
+
+def test_list_concepts_pagination(tmp_path):
+    """offset/limit page through Concept nodes without overlap between pages."""
+    backend = _backend(tmp_path)
+    for i in range(5):
+        asyncio.run(backend.create_concept(f"concept {i}"))
+    page1 = asyncio.run(backend.list_concepts(offset=0, limit=2))
+    page2 = asyncio.run(backend.list_concepts(offset=2, limit=2))
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert {p["id"] for p in page1}.isdisjoint({p["id"] for p in page2})
+
+
+def test_export_graph_returns_every_node_and_edge(tmp_path):
+    """export_graph returns every node and edge in the graph, unfiltered."""
+    backend = _backend(tmp_path)
+    pointer_id = asyncio.run(backend.upsert_pointer("chunk", "abc"))
+    concept_id = asyncio.run(backend.create_concept("gradient checkpointing"))
+    asyncio.run(backend.create_edge(pointer_id, concept_id, "discussed_in"))
+    result = asyncio.run(backend.export_graph())
+    assert {n["id"] for n in result["nodes"]} == {pointer_id, concept_id}
+    assert len(result["edges"]) == 1
