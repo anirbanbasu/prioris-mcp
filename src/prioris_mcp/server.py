@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import sqlite3
@@ -215,6 +216,7 @@ class PriorisMCP(MCPMixin):
         {"fn": "read_openalex_work_types_resource", "uri": "research://openalex/work-types"},
         {"fn": "read_notes_export_resource", "uri": "notes://{note_id}/export"},
         {"fn": "read_vector_rebuild_status_resource", "uri": "research://vector-index/rebuild-status"},
+        {"fn": "read_graph_concepts_resource", "uri": "research://graph/concepts{?text,match,offset,limit}"},
     ]
 
     def __init__(self) -> None:
@@ -1442,6 +1444,23 @@ class PriorisMCP(MCPMixin):
                 active=progress.notes.active,
             ),
         ).model_dump_json()
+
+    async def read_graph_concepts_resource(
+        self,
+        text: str | None = None,
+        match: Literal["starts_with", "contains", "ends_with"] = "contains",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> str:
+        """Browse the entire Concept vocabulary, paginated - the fallback for cross-lingual/synonym dedup.
+
+        `limit` is clamped to PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT regardless of what the caller
+        requests. Returns a JSON array of concept dicts (not wrapped in a Pydantic model - see
+        `read_markdown_resource` for why resources here return pre-serialised JSON strings).
+        """
+        effective_limit = min(limit, EnvVars.PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT)
+        concepts = await self._graph_backend.list_concepts(text=text, match=match, offset=offset, limit=effective_limit)
+        return json.dumps(concepts)
 
 
 def _vector_reconciliation_lifespan(

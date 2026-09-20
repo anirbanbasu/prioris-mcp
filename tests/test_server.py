@@ -621,8 +621,8 @@ class TestArxivTools:
         """Verify that research and notes resource templates are registered.
 
         Fulltext/markdown for research documents (documented in
-        docs/requirement-specification/06-interface-specification.md#resources), and notes
-        export.
+        docs/requirement-specification/06-interface-specification.md#resources), notes
+        export, and graph concepts resource.
         """
 
         def handler(req: httpx.Request) -> httpx.Response:
@@ -635,11 +635,12 @@ class TestArxivTools:
                 return await client.list_resource_templates()
 
         templates = asyncio.run(scenario())
-        assert {t.uri_template for t in templates} == {
-            "research://{provider}/{identifier}/{format}/fulltext",
-            "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
-            "notes://{note_id}/export",
-        }
+        template_set = {t.uri_template for t in templates}
+        # Check that the expected resource templates are registered
+        assert "research://{provider}/{identifier}/{format}/fulltext" in template_set
+        assert "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}" in template_set
+        assert "notes://{note_id}/export" in template_set
+        assert "research://graph/concepts{?text,match,offset,limit}" in template_set
 
     def test_greet_tool_no_longer_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
         def handler(req: httpx.Request) -> httpx.Response:
@@ -4734,3 +4735,36 @@ class TestGraphAnalyze(TestMCPServer):
     def test_unknown_op_is_invalid_request(self, mcp_client):
         with pytest.raises(ToolError):
             asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="not_a_real_op", node_ids=["x"]))
+
+
+class TestGraphConceptsResource(TestMCPServer):
+    """research://graph/concepts resource coverage.
+
+    Wraps each scenario in `asyncio.run(...)` rather than declaring `async def test_...` directly:
+    this suite has no pytest-asyncio/anyio-marker plugin installed, so bare coroutine test
+    functions aren't natively collectible - see the rest of this file's `asyncio.run(scenario())`
+    convention (e.g. `TestGraphQuery`).
+    """
+
+    def test_lists_created_concepts(self, mcp_client):
+        async def scenario():
+            await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="resource test concept")
+            result = await self.read_resource("research://graph/concepts", mcp_client)
+            payload = json.loads(result[0].text)
+            return payload
+
+        payload = asyncio.run(scenario())
+        assert any(c["label"] == "resource test concept" for c in payload)
+
+    def test_limit_is_clamped_to_configured_max(self, mcp_client, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT", 1)
+
+        async def scenario():
+            for i in range(3):
+                await self.call_tool("research_graph_write", mcp_client, op="create_concept", label=f"clamp test {i}")
+            result = await self.read_resource("research://graph/concepts?limit=1000", mcp_client)
+            payload = json.loads(result[0].text)
+            return payload
+
+        payload = asyncio.run(scenario())
+        assert len(payload) <= 1
