@@ -4494,3 +4494,243 @@ class TestGraphQuery(TestMCPServer):
     def test_unknown_op_is_invalid_request(self, mcp_client):
         with pytest.raises(ToolError):
             asyncio.run(self.call_tool("research_graph_query", mcp_client, op="not_a_real_op"))
+
+
+class TestGraphAnalyze(TestMCPServer):
+    """research_graph_analyze op-dispatch coverage.
+
+    Wraps each scenario in `asyncio.run(...)` rather than declaring `async def test_...` directly:
+    this suite has no pytest-asyncio/anyio-marker plugin installed, so bare coroutine test
+    functions aren't natively collectible - see the rest of this file's `asyncio.run(scenario())`
+    convention (e.g. `TestArxivTools`).
+    """
+
+    def test_betweenness_centrality_requires_node_ids(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="betweenness_centrality"))
+
+    def test_betweenness_centrality_returns_scores(self, mcp_client):
+        async def scenario():
+            a = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="centrality a")
+            b = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="centrality b")
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=a.structured_content["id"],
+                to_id=b.structured_content["id"],
+                relation_type="related_to",
+            )
+            return (
+                a,
+                b,
+                await self.call_tool(
+                    "research_graph_analyze",
+                    mcp_client,
+                    op="betweenness_centrality",
+                    node_ids=[a.structured_content["id"], b.structured_content["id"]],
+                ),
+            )
+
+        a, b, result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "betweenness_centrality"
+        assert set(result.structured_content["result"]["scores"].keys()) == {
+            a.structured_content["id"],
+            b.structured_content["id"],
+        }
+
+    def test_pagerank_requires_node_ids(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="pagerank"))
+
+    def test_pagerank_returns_scores(self, mcp_client):
+        async def scenario():
+            a = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="analyze a")
+            b = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="analyze b")
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=a.structured_content["id"],
+                to_id=b.structured_content["id"],
+                relation_type="related_to",
+            )
+            return (
+                a,
+                b,
+                await self.call_tool(
+                    "research_graph_analyze",
+                    mcp_client,
+                    op="pagerank",
+                    node_ids=[a.structured_content["id"], b.structured_content["id"]],
+                ),
+            )
+
+        a, b, result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "pagerank"
+        assert set(result.structured_content["result"]["scores"].keys()) == {
+            a.structured_content["id"],
+            b.structured_content["id"],
+        }
+
+    def test_communities_requires_node_ids(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="communities"))
+
+    def test_communities_returns_communities(self, mcp_client):
+        async def scenario():
+            a = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="community a")
+            b = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="community b")
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=a.structured_content["id"],
+                to_id=b.structured_content["id"],
+                relation_type="related_to",
+            )
+            return await self.call_tool(
+                "research_graph_analyze",
+                mcp_client,
+                op="communities",
+                node_ids=[a.structured_content["id"], b.structured_content["id"]],
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "communities"
+        assert len(result.structured_content["result"]["communities"]) >= 1
+
+    def test_paths_requires_from_id_and_to_id(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="paths", max_depth=2))
+
+    def test_paths_returns_hop_paths(self, mcp_client):
+        async def scenario():
+            a = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="paths a")
+            b = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="paths b")
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=a.structured_content["id"],
+                to_id=b.structured_content["id"],
+                relation_type="related_to",
+            )
+            return await self.call_tool(
+                "research_graph_analyze",
+                mcp_client,
+                op="paths",
+                from_id=a.structured_content["id"],
+                to_id=b.structured_content["id"],
+                max_depth=2,
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "paths"
+        assert len(result.structured_content["result"]["paths"]) >= 1
+
+    def test_reachable_requires_node_ids_and_max_depth(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="reachable", node_ids=["x"]))
+
+    def test_reachable_returns_node_ids(self, mcp_client):
+        async def scenario():
+            a = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="reach a")
+            b = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="reach b")
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=a.structured_content["id"],
+                to_id=b.structured_content["id"],
+                relation_type="related_to",
+            )
+            return b, await self.call_tool(
+                "research_graph_analyze",
+                mcp_client,
+                op="reachable",
+                node_ids=[a.structured_content["id"]],
+                max_depth=2,
+            )
+
+        b, result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "reachable"
+        assert b.structured_content["id"] in result.structured_content["result"]["node_ids"]
+
+    def test_steiner_tree_requires_node_ids_and_max_depth(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="steiner_tree", node_ids=["x"]))
+
+    def test_steiner_tree_returns_nodes_and_edges(self, mcp_client):
+        async def scenario():
+            a = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="steiner a")
+            b = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="steiner b")
+            c = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="steiner c")
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=a.structured_content["id"],
+                to_id=b.structured_content["id"],
+                relation_type="related_to",
+            )
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=b.structured_content["id"],
+                to_id=c.structured_content["id"],
+                relation_type="related_to",
+            )
+            return await self.call_tool(
+                "research_graph_analyze",
+                mcp_client,
+                op="steiner_tree",
+                node_ids=[a.structured_content["id"], c.structured_content["id"]],
+                max_depth=2,
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "steiner_tree"
+        assert len(result.structured_content["result"]["nodes"]) >= 2
+
+    def test_predict_links_requires_node_ids_and_max_depth(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="predict_links", node_ids=["x"]))
+
+    def test_predict_links_returns_predictions(self, mcp_client):
+        async def scenario():
+            a = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="predict a")
+            b = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="predict b")
+            c = await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="predict c")
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=a.structured_content["id"],
+                to_id=b.structured_content["id"],
+                relation_type="related_to",
+            )
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=c.structured_content["id"],
+                to_id=b.structured_content["id"],
+                relation_type="related_to",
+            )
+            return await self.call_tool(
+                "research_graph_analyze",
+                mcp_client,
+                op="predict_links",
+                node_ids=[a.structured_content["id"], c.structured_content["id"]],
+                max_depth=2,
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "predict_links"
+        assert isinstance(result.structured_content["result"]["predictions"], list)
+
+    def test_unknown_op_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="not_a_real_op", node_ids=["x"]))

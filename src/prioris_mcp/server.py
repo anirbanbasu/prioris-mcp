@@ -57,12 +57,19 @@ from prioris_mcp.models.common import (
 from prioris_mcp.models.discovery import DiscoveryHit, DiscoveryResult
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
 from prioris_mcp.models.graph import (
+    CentralityResult,
+    CommunitiesResult,
     ConceptMatchesResult,
     EdgeResult,
+    GraphAnalyzeResult,
     GraphQueryResult,
     GraphWriteResult,
     NeighborsResult,
     NodeResult,
+    PathsResult,
+    PredictedLinksResult,
+    ReachableResult,
+    SteinerTreeResult,
     SubgraphResult,
 )
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
@@ -191,6 +198,7 @@ class PriorisMCP(MCPMixin):
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
         {"fn": "research_graph_query", "tags": ["research", "graph"], "annotations": {"readOnlyHint": True}},
+        {"fn": "research_graph_analyze", "tags": ["research", "graph"], "annotations": {"readOnlyHint": True}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -1071,6 +1079,74 @@ class PriorisMCP(MCPMixin):
             raise InvalidRequestError("subgraph requires node_ids")
         raw = await backend.subgraph(node_ids, depth=depth, relation_type=relation_type)
         return SubgraphResult(op="subgraph", nodes=raw["nodes"], edges=raw["edges"])
+
+    async def research_graph_analyze(
+        self,
+        ctx: Context,
+        op: Annotated[
+            Literal[
+                "betweenness_centrality",
+                "pagerank",
+                "communities",
+                "paths",
+                "reachable",
+                "steiner_tree",
+                "predict_links",
+            ],
+            Field(description="Which graph algorithm to run"),
+        ],
+        node_ids: Annotated[list[str] | None, Field(default=None)] = None,
+        from_id: Annotated[str | None, Field(default=None, description="Required for paths")] = None,
+        to_id: Annotated[str | None, Field(default=None, description="Required for paths")] = None,
+        depth: Annotated[int, Field(default=1)] = 1,
+        max_depth: Annotated[
+            int | None, Field(default=None, description="Required for paths/reachable/steiner_tree/predict_links")
+        ] = None,
+        max_paths: Annotated[int, Field(default=20)] = 20,
+        top_k: Annotated[int, Field(default=20)] = 20,
+        direction: Annotated[Literal["out", "in"], Field(default="out")] = "out",
+        relation_type: Annotated[str | None, Field(default=None)] = None,
+        seed: Annotated[int | None, Field(default=None)] = None,
+    ) -> GraphAnalyzeResult:
+        """Run one of the seven fixed graph algorithms over a depth-bounded neighborhood of node_ids."""
+        algorithms = self._graph_algorithms
+        if op in ("betweenness_centrality", "pagerank"):
+            if not node_ids:
+                raise InvalidRequestError(f"{op} requires node_ids")
+            fn = algorithms.betweenness_centrality if op == "betweenness_centrality" else algorithms.pagerank
+            scores = await fn(node_ids, depth=depth, relation_type=relation_type)
+            return CentralityResult(op=op, scores=scores)
+        if op == "communities":
+            if not node_ids:
+                raise InvalidRequestError("communities requires node_ids")
+            communities = await algorithms.communities(node_ids, depth=depth, relation_type=relation_type, seed=seed)
+            return CommunitiesResult(op="communities", communities=communities)
+        if op == "paths":
+            if from_id is None or to_id is None or max_depth is None:
+                raise InvalidRequestError("paths requires from_id, to_id, and max_depth")
+            paths = await algorithms.paths(
+                from_id, to_id, max_depth=max_depth, max_paths=max_paths, relation_type=relation_type
+            )
+            return PathsResult(op="paths", paths=paths)
+        if op == "reachable":
+            if not node_ids or max_depth is None:
+                raise InvalidRequestError("reachable requires node_ids (one seed) and max_depth")
+            reached = await algorithms.reachable(
+                node_ids[0], direction=direction, max_depth=max_depth, relation_type=relation_type
+            )
+            return ReachableResult(op="reachable", node_ids=reached)
+        if op == "steiner_tree":
+            if not node_ids or max_depth is None:
+                raise InvalidRequestError("steiner_tree requires node_ids and max_depth")
+            raw = await algorithms.steiner_tree(node_ids, max_depth=max_depth, relation_type=relation_type)
+            return SteinerTreeResult(op="steiner_tree", nodes=raw["nodes"], edges=raw["edges"])
+        # op == "predict_links"
+        if not node_ids or max_depth is None:
+            raise InvalidRequestError("predict_links requires node_ids and max_depth")
+        predictions = await algorithms.predict_links(
+            node_ids, max_depth=max_depth, top_k=top_k, relation_type=relation_type
+        )
+        return PredictedLinksResult(op="predict_links", predictions=predictions)
 
     async def _force_vector_reconnect(self) -> None:
         """Force both vector backends' `_connect()` to run now, so any model-mismatch drop happens here.
