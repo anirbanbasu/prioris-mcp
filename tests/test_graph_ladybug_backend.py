@@ -170,3 +170,90 @@ def test_get_edge_raises_not_found(tmp_path):
         raise AssertionError("expected NotFoundError")
     except NotFoundError:
         pass
+
+
+def test_create_edge_between_pointer_and_concept(tmp_path):
+    """create_edge between a Pointer and a Concept returns a new, non-empty edge id."""
+    backend = _backend(tmp_path)
+    pointer_id = asyncio.run(backend.upsert_pointer("chunk", "abc"))
+    concept_id = asyncio.run(backend.create_concept("gradient checkpointing"))
+    edge_id = asyncio.run(backend.create_edge(pointer_id, concept_id, "discussed_in"))
+    assert isinstance(edge_id, str) and edge_id
+
+
+def test_create_edge_between_two_concepts(tmp_path):
+    """create_edge between two Concept nodes round-trips from_id/to_id through get_edge."""
+    backend = _backend(tmp_path)
+    c1 = asyncio.run(backend.create_concept("gradient checkpointing"))
+    c2 = asyncio.run(backend.create_concept("transformer"))
+    edge_id = asyncio.run(backend.create_edge(c1, c2, "related_to"))
+    edge = asyncio.run(backend.get_edge(edge_id))
+    assert edge["from_id"] == c1 and edge["to_id"] == c2
+
+
+def test_create_edge_raises_not_found_for_missing_from_id(tmp_path):
+    """create_edge raises NotFoundError when from_id has no matching node."""
+    backend = _backend(tmp_path)
+    concept_id = asyncio.run(backend.create_concept("gradient checkpointing"))
+    try:
+        asyncio.run(backend.create_edge("does-not-exist", concept_id, "discussed_in"))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
+
+
+def test_create_edge_raises_not_found_for_missing_to_id(tmp_path):
+    """create_edge raises NotFoundError when to_id has no matching node."""
+    backend = _backend(tmp_path)
+    pointer_id = asyncio.run(backend.upsert_pointer("chunk", "abc"))
+    try:
+        asyncio.run(backend.create_edge(pointer_id, "does-not-exist", "discussed_in"))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
+
+
+def test_update_edge_partial_update(tmp_path):
+    """Omitted update_edge kwargs (e.g. weight) leave the corresponding field at its existing value."""
+    backend = _backend(tmp_path)
+    c1 = asyncio.run(backend.create_concept("gradient checkpointing"))
+    c2 = asyncio.run(backend.create_concept("transformer"))
+    edge_id = asyncio.run(backend.create_edge(c1, c2, "discussed_in", weight=0.1))
+    asyncio.run(backend.update_edge(edge_id, relation_type="introduced_in"))
+    edge = asyncio.run(backend.get_edge(edge_id))
+    assert edge["relation_type"] == "introduced_in"
+    assert edge["weight"] == 0.1
+
+
+def test_update_edge_raises_not_found(tmp_path):
+    """update_edge on an id with no matching Related edge raises NotFoundError."""
+    backend = _backend(tmp_path)
+    try:
+        asyncio.run(backend.update_edge("does-not-exist", relation_type="x"))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
+
+
+def test_delete_edge_removes_edge(tmp_path):
+    """delete_edge removes the edge; a subsequent get_edge raises NotFoundError."""
+    backend = _backend(tmp_path)
+    c1 = asyncio.run(backend.create_concept("gradient checkpointing"))
+    c2 = asyncio.run(backend.create_concept("transformer"))
+    edge_id = asyncio.run(backend.create_edge(c1, c2, "discussed_in"))
+    asyncio.run(backend.delete_edge(edge_id))
+    try:
+        asyncio.run(backend.get_edge(edge_id))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
+
+
+def test_delete_edge_raises_not_found(tmp_path):
+    """delete_edge on an id with no matching Related edge raises NotFoundError."""
+    backend = _backend(tmp_path)
+    try:
+        asyncio.run(backend.delete_edge("does-not-exist"))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass

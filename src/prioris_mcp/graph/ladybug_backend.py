@@ -237,7 +237,30 @@ class LadybugSearchBackend(GraphSearchBackend):
         weight: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> EdgeId:
-        raise NotImplementedError
+        from_node = await self.get_node(from_id)  # raises NotFoundError if missing
+        to_node = await self.get_node(to_id)  # raises NotFoundError if missing
+        from_label = "Pointer" if from_node["kind"] == "pointer" else "Concept"
+        to_label = "Pointer" if to_node["kind"] == "pointer" else "Concept"
+        edge_id = str(uuid.uuid4())
+        now = _now_iso()
+        keys, values = _metadata_to_cypher_params(metadata or {})
+        await self._conn.execute(
+            f"MATCH (a:{from_label} {{id: $from_id}}), (b:{to_label} {{id: $to_id}}) "
+            "CREATE (a)-[e:Related {id: $id, relation_type: $relation_type, weight: $weight, "
+            "metadata: map(CAST($keys AS STRING[]), CAST($values AS STRING[])), "
+            "created_at: $ts, updated_at: $ts}]->(b)",
+            {
+                "from_id": from_id,
+                "to_id": to_id,
+                "id": edge_id,
+                "relation_type": relation_type,
+                "weight": weight,
+                "keys": keys,
+                "values": values,
+                "ts": now,
+            },
+        )
+        return edge_id
 
     async def update_edge(
         self,
@@ -247,10 +270,27 @@ class LadybugSearchBackend(GraphSearchBackend):
         weight: float | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        raise NotImplementedError
+        current = await self.get_edge(edge_id)  # raises NotFoundError if missing
+        new_relation_type = relation_type if relation_type is not None else current["relation_type"]
+        new_weight = weight if weight is not None else current["weight"]
+        merged_metadata = _merge_metadata(current["metadata"], metadata) if metadata else current["metadata"]
+        keys, values = _metadata_to_cypher_params(merged_metadata)
+        await self._conn.execute(
+            "MATCH ()-[e:Related {id: $id}]->() SET e.relation_type = $relation_type, e.weight = $weight, "
+            "e.metadata = map(CAST($keys AS STRING[]), CAST($values AS STRING[])), e.updated_at = $ts",
+            {
+                "id": edge_id,
+                "relation_type": new_relation_type,
+                "weight": new_weight,
+                "keys": keys,
+                "values": values,
+                "ts": _now_iso(),
+            },
+        )
 
     async def delete_edge(self, edge_id: EdgeId) -> None:
-        raise NotImplementedError
+        await self.get_edge(edge_id)  # raises NotFoundError if missing
+        await self._conn.execute("MATCH ()-[e:Related {id: $id}]->() DELETE e", {"id": edge_id})
 
     async def get_node(self, node_id: NodeId) -> dict:
         result = await self._conn.execute(
