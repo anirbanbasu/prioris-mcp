@@ -337,3 +337,33 @@ class TestEmbeddingMaxConcurrencyDefault:
         monkeypatch.setenv("PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY", "8")
         reloaded = importlib.reload(prioris_mcp)
         assert reloaded.EnvVars.PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY == 8
+
+
+class TestGraphEnvVars:
+    """EnvVars.PRIORIS_MCP_GRAPH_DIR and PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT defaults and overrides."""
+
+    def test_graph_dir_defaults_to_sibling_of_vector_dir(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_GRAPH_DIR", raising=False)
+        reloaded = _reload_prioris_mcp()
+        assert reloaded.EnvVars.PRIORIS_MCP_GRAPH_DIR.name == "graph"
+
+    def test_graph_dir_override(self, monkeypatch: "pytest.MonkeyPatch", tmp_path: Path):
+        override = tmp_path / "custom-graph"
+        monkeypatch.setenv("PRIORIS_MCP_GRAPH_DIR", str(override))
+        reloaded = _reload_prioris_mcp()
+        assert reloaded.EnvVars.PRIORIS_MCP_GRAPH_DIR == override
+
+    def test_graph_concepts_max_limit_default(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.delenv("PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT", raising=False)
+        reloaded = _reload_prioris_mcp()
+        assert reloaded.EnvVars.PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT == 500
+
+    def test_graph_concepts_max_limit_override(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT", "1000")
+        reloaded = _reload_prioris_mcp()
+        assert reloaded.EnvVars.PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT == 1000
+
+    def test_graph_concepts_max_limit_rejects_out_of_range(self, monkeypatch: "pytest.MonkeyPatch"):
+        monkeypatch.setenv("PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT", "1001")
+        with pytest.raises(EnvValidationError):
+            _reload_prioris_mcp()

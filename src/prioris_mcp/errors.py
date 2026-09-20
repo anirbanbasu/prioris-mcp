@@ -45,3 +45,13 @@ class ConfigurationError(Exception):
 
     Maps to the `configuration_error` error code.
     """
+
+
+class MetadataConflictError(Exception):
+    """A graph node/edge write's metadata key already exists with a different value.
+
+    Maps to the `metadata_conflict` error code. Raised by LadybugSearchBackend's per-key
+    metadata merge - same value for an existing key is a no-op, a differing value raises this
+    rather than silently overwriting - see
+    docs/requirement-specification/search/03-graph-search.md#metadata-merge-on-write-conflict-raises-not-silent-overwrite-or-merge.
+    """
