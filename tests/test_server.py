@@ -4203,3 +4203,166 @@ class TestVectorReconciliation:
 
         final_status = asyncio.run(run_and_wait())
         assert final_status == "ready"
+
+
+class TestGraphWrite(TestMCPServer):
+    """research_graph_write op-dispatch coverage.
+
+    Wraps each scenario in `asyncio.run(...)` rather than declaring `async def test_...` directly:
+    this suite has no pytest-asyncio/anyio-marker plugin installed, so bare coroutine test
+    functions aren't natively collectible - see the rest of this file's `asyncio.run(scenario())`
+    convention (e.g. `TestArxivTools`).
+    """
+
+    def test_upsert_pointer_returns_id(self, mcp_client):
+        result = asyncio.run(
+            self.call_tool("research_graph_write", mcp_client, op="upsert_pointer", ref_type="chunk", ref_id="abc123")
+        )
+        assert result.structured_content["op"] == "upsert_pointer"
+        assert result.structured_content["id"]
+
+    def test_create_concept_returns_id(self, mcp_client):
+        result = asyncio.run(
+            self.call_tool("research_graph_write", mcp_client, op="create_concept", label="gradient checkpointing")
+        )
+        assert result.structured_content["op"] == "create_concept"
+        assert result.structured_content["id"]
+
+    def test_create_concept_requires_label(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_write", mcp_client, op="create_concept"))
+
+    def test_unknown_op_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_write", mcp_client, op="not_a_real_op"))
+
+    def test_create_edge_full_round_trip(self, mcp_client):
+        async def scenario():
+            pointer = await self.call_tool(
+                "research_graph_write", mcp_client, op="upsert_pointer", ref_type="chunk", ref_id="c1"
+            )
+            concept = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="gradient checkpointing"
+            )
+            return await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=pointer.structured_content["id"],
+                to_id=concept.structured_content["id"],
+                relation_type="discussed_in",
+            )
+
+        edge = asyncio.run(scenario())
+        assert edge.structured_content["op"] == "create_edge"
+        assert edge.structured_content["id"]
+
+    def test_delete_node_of_missing_node_is_not_found(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_write", mcp_client, op="delete_node", node_id="does-not-exist"))
+
+    def test_upsert_pointer_requires_ref_type_and_ref_id(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_write", mcp_client, op="upsert_pointer"))
+
+    def test_update_concept_requires_node_id(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_write", mcp_client, op="update_concept", label="renamed"))
+
+    def test_update_concept_round_trip(self, mcp_client):
+        async def scenario():
+            concept = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="gradient checkpointing"
+            )
+            return await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="update_concept",
+                node_id=concept.structured_content["id"],
+                label="renamed concept",
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["op"] == "update_concept"
+        assert result.structured_content["id"]
+
+    def test_delete_node_requires_node_id(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_write", mcp_client, op="delete_node"))
+
+    def test_delete_node_round_trip(self, mcp_client):
+        async def scenario():
+            concept = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="low-rank adaptation"
+            )
+            return await self.call_tool(
+                "research_graph_write", mcp_client, op="delete_node", node_id=concept.structured_content["id"]
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["op"] == "delete_node"
+        assert result.structured_content["id"]
+
+    def test_create_edge_requires_from_to_and_relation_type(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_write", mcp_client, op="create_edge"))
+
+    def test_update_edge_requires_edge_id(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_write", mcp_client, op="update_edge", weight=0.5))
+
+    def test_update_edge_round_trip(self, mcp_client):
+        async def scenario():
+            pointer = await self.call_tool(
+                "research_graph_write", mcp_client, op="upsert_pointer", ref_type="chunk", ref_id="c2"
+            )
+            concept = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="mixed precision training"
+            )
+            edge = await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=pointer.structured_content["id"],
+                to_id=concept.structured_content["id"],
+                relation_type="discussed_in",
+            )
+            return await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="update_edge",
+                edge_id=edge.structured_content["id"],
+                weight=0.75,
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["op"] == "update_edge"
+        assert result.structured_content["id"]
+
+    def test_delete_edge_requires_edge_id(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_write", mcp_client, op="delete_edge"))
+
+    def test_delete_edge_round_trip(self, mcp_client):
+        async def scenario():
+            pointer = await self.call_tool(
+                "research_graph_write", mcp_client, op="upsert_pointer", ref_type="chunk", ref_id="c3"
+            )
+            concept = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="flash attention"
+            )
+            edge = await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=pointer.structured_content["id"],
+                to_id=concept.structured_content["id"],
+                relation_type="discussed_in",
+            )
+            return await self.call_tool(
+                "research_graph_write", mcp_client, op="delete_edge", edge_id=edge.structured_content["id"]
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["op"] == "delete_edge"
+        assert result.structured_content["id"]

@@ -8,7 +8,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib.metadata import version
-from typing import Annotated, ClassVar, Literal, cast
+from typing import Annotated, Any, ClassVar, Literal, cast
 
 import httpx
 import uvicorn
@@ -56,6 +56,7 @@ from prioris_mcp.models.common import (
 )
 from prioris_mcp.models.discovery import DiscoveryHit, DiscoveryResult
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
+from prioris_mcp.models.graph import GraphWriteResult
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, NotesSearchResult, PagedNotes
 from prioris_mcp.models.vector import (
@@ -176,6 +177,11 @@ class PriorisMCP(MCPMixin):
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
         {"fn": "research_notes_search", "tags": ["research", "notes"], "annotations": {"readOnlyHint": True}},
+        {
+            "fn": "research_graph_write",
+            "tags": ["research", "graph"],
+            "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        },
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -945,6 +951,72 @@ class PriorisMCP(MCPMixin):
                     index_status = {"vector": "ready"}
 
         return NotesSearchResult(fts=fts_result, vector=vector_result, index_status=index_status)
+
+    async def research_graph_write(
+        self,
+        ctx: Context,
+        op: Annotated[
+            Literal[
+                "upsert_pointer",
+                "create_concept",
+                "update_concept",
+                "delete_node",
+                "create_edge",
+                "update_edge",
+                "delete_edge",
+            ],
+            Field(description="Which graph write operation to perform"),
+        ],
+        ref_type: Annotated[Literal["chunk", "document", "note"] | None, Field(default=None)] = None,
+        ref_id: Annotated[str | None, Field(default=None)] = None,
+        node_id: Annotated[str | None, Field(default=None, description="Target node id for update/delete ops")] = None,
+        label: Annotated[str | None, Field(default=None)] = None,
+        aliases: Annotated[list[str] | None, Field(default=None)] = None,
+        description: Annotated[str | None, Field(default=None)] = None,
+        from_id: Annotated[str | None, Field(default=None)] = None,
+        to_id: Annotated[str | None, Field(default=None)] = None,
+        relation_type: Annotated[str | None, Field(default=None)] = None,
+        weight: Annotated[float | None, Field(default=None)] = None,
+        edge_id: Annotated[str | None, Field(default=None, description="Target edge id for update/delete ops")] = None,
+        metadata: Annotated[dict[str, Any] | None, Field(default=None)] = None,
+    ) -> GraphWriteResult:
+        """Create/update/delete a graph node or edge - see op for which fields apply."""
+        backend = self._graph_backend
+        if op == "upsert_pointer":
+            if ref_type is None or ref_id is None:
+                raise InvalidRequestError("upsert_pointer requires ref_type and ref_id")
+            result_id = await backend.upsert_pointer(ref_type, ref_id, metadata=metadata)
+        elif op == "create_concept":
+            if label is None:
+                raise InvalidRequestError("create_concept requires label")
+            result_id = await backend.create_concept(label, aliases=aliases, description=description, metadata=metadata)
+        elif op == "update_concept":
+            if node_id is None:
+                raise InvalidRequestError("update_concept requires node_id")
+            await backend.update_concept(
+                node_id, label=label, aliases=aliases, description=description, metadata=metadata
+            )
+            result_id = node_id
+        elif op == "delete_node":
+            if node_id is None:
+                raise InvalidRequestError("delete_node requires node_id")
+            await backend.delete_node(node_id)
+            result_id = node_id
+        elif op == "create_edge":
+            if from_id is None or to_id is None or relation_type is None:
+                raise InvalidRequestError("create_edge requires from_id, to_id, and relation_type")
+            result_id = await backend.create_edge(from_id, to_id, relation_type, weight=weight, metadata=metadata)
+        elif op == "update_edge":
+            if edge_id is None:
+                raise InvalidRequestError("update_edge requires edge_id")
+            await backend.update_edge(edge_id, relation_type=relation_type, weight=weight, metadata=metadata)
+            result_id = edge_id
+        else:  # op == "delete_edge"
+            if edge_id is None:
+                raise InvalidRequestError("delete_edge requires edge_id")
+            await backend.delete_edge(edge_id)
+            result_id = edge_id
+        return GraphWriteResult(op=op, id=result_id)
 
     async def _force_vector_reconnect(self) -> None:
         """Force both vector backends' `_connect()` to run now, so any model-mismatch drop happens here.
