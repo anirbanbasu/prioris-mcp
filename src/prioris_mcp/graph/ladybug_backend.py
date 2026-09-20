@@ -253,10 +253,48 @@ class LadybugSearchBackend(GraphSearchBackend):
         raise NotImplementedError
 
     async def get_node(self, node_id: NodeId) -> dict:
-        raise NotImplementedError
+        result = await self._conn.execute(
+            "MATCH (n {id: $id}) RETURN n.id AS id, label(n) AS kind, properties(n) AS props", {"id": node_id}
+        )
+        assert isinstance(result, QueryResult)  # see the narrowing note on upsert_pointer above
+        rows = list(result.rows_as_dict())
+        if not rows:
+            raise NotFoundError(f"Node not found: {node_id}")
+        row = rows[0]
+        assert isinstance(row, dict)  # rows_as_dict() rows are dict[str, Any], not the list[Any] row variant
+        kind = row["kind"].lower()
+        props = row["props"]
+        base = {
+            "id": row["id"],
+            "kind": kind,
+            "metadata": _metadata_from_row(props["metadata"]),
+            "created_at": props["created_at"],
+            "updated_at": props["updated_at"],
+        }
+        if kind == "pointer":
+            base["ref_type"] = props["ref_type"]
+            base["ref_id"] = props["ref_id"]
+        else:
+            base["label"] = props["label"]
+            base["aliases"] = props["aliases"]
+            base["description"] = props["description"]
+        return base
 
     async def get_edge(self, edge_id: EdgeId) -> dict:
-        raise NotImplementedError
+        result = await self._conn.execute(
+            "MATCH (a)-[e:Related {id: $id}]->(b) "
+            "RETURN e.id AS id, a.id AS from_id, b.id AS to_id, e.relation_type AS relation_type, "
+            "e.weight AS weight, e.metadata AS metadata, e.created_at AS created_at, e.updated_at AS updated_at",
+            {"id": edge_id},
+        )
+        assert isinstance(result, QueryResult)  # see the narrowing note on upsert_pointer above
+        rows = list(result.rows_as_dict())
+        if not rows:
+            raise NotFoundError(f"Edge not found: {edge_id}")
+        row = rows[0]
+        assert isinstance(row, dict)  # rows_as_dict() rows are dict[str, Any], not the list[Any] row variant
+        row["metadata"] = _metadata_from_row(row["metadata"])
+        return row
 
     async def neighbors(
         self,

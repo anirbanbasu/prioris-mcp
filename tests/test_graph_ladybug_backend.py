@@ -109,3 +109,64 @@ def test_delete_node_raises_not_found_for_missing_node(tmp_path):
         raise AssertionError("expected NotFoundError")
     except NotFoundError:
         pass
+
+
+def test_get_node_pointer_has_computed_kind_and_fields(tmp_path):
+    """get_node on a Pointer node id returns kind='pointer' plus the pointer-specific fields."""
+    backend = _backend(tmp_path)
+    node_id = asyncio.run(backend.upsert_pointer("chunk", "abc123", metadata={"source": "human"}))
+    node = asyncio.run(backend.get_node(node_id))
+    assert node["kind"] == "pointer"
+    assert node["ref_type"] == "chunk"
+    assert node["ref_id"] == "abc123"
+    assert node["metadata"] == {"source": "human"}
+    assert node["id"] == node_id
+    assert node["created_at"] and node["updated_at"]
+
+
+def test_get_node_concept_has_computed_kind_and_fields(tmp_path):
+    """get_node on a Concept node id returns kind='concept' plus the concept-specific fields."""
+    backend = _backend(tmp_path)
+    node_id = asyncio.run(
+        backend.create_concept("gradient checkpointing", aliases=["activation checkpointing"], description="d")
+    )
+    node = asyncio.run(backend.get_node(node_id))
+    assert node["kind"] == "concept"
+    assert node["label"] == "gradient checkpointing"
+    assert node["aliases"] == ["activation checkpointing"]
+    assert node["description"] == "d"
+
+
+def test_get_node_raises_not_found(tmp_path):
+    """get_node on an id with no matching node (Pointer or Concept) raises NotFoundError."""
+    backend = _backend(tmp_path)
+    try:
+        asyncio.run(backend.get_node("does-not-exist"))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
+
+
+def test_get_edge_returns_edge_fields(tmp_path):
+    """get_edge returns the edge id, endpoint ids, relation_type, weight, and metadata."""
+    backend = _backend(tmp_path)
+    pointer_id = asyncio.run(backend.upsert_pointer("chunk", "abc"))
+    concept_id = asyncio.run(backend.create_concept("gradient checkpointing"))
+    edge_id = asyncio.run(backend.create_edge(pointer_id, concept_id, "discussed_in", weight=0.5, metadata={"k": "v"}))
+    edge = asyncio.run(backend.get_edge(edge_id))
+    assert edge["id"] == edge_id
+    assert edge["from_id"] == pointer_id
+    assert edge["to_id"] == concept_id
+    assert edge["relation_type"] == "discussed_in"
+    assert edge["weight"] == 0.5
+    assert edge["metadata"] == {"k": "v"}
+
+
+def test_get_edge_raises_not_found(tmp_path):
+    """get_edge on an id with no matching Related edge raises NotFoundError."""
+    backend = _backend(tmp_path)
+    try:
+        asyncio.run(backend.get_edge("does-not-exist"))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
