@@ -94,3 +94,45 @@ class GraphAlgorithms:
         if direction == "out":
             return sorted(nx.descendants(graph, node_id))
         return sorted(nx.ancestors(graph, node_id))
+
+    async def steiner_tree(self, node_ids: list[NodeId], *, max_depth: int, relation_type: str | None = None) -> dict:
+        graph = await self._materialized_subgraph(node_ids, depth=max_depth, relation_type=relation_type)
+        undirected = graph.to_undirected()
+        # Unlike betweenness_centrality/pagerank/communities, steiner_tree is meant to use edge
+        # weight when present (see requirement spec). But every materialized edge carries a
+        # `weight` attribute of `None` (from GraphEdge.weight) unless explicitly set, and
+        # NetworkX's dijkstra-based weight function treats a weight callable/attr result of `None`
+        # as "no edge" (a documented sentinel to *exclude* the edge from traversal), not as "use
+        # the default of 1" - so hub-and-spoke terminals silently became unreachable and
+        # `_mehlhorn_steiner_tree` raised `KeyError` looking up a node dijkstra never visited.
+        # Default only the missing/None case to 1.0 so unweighted edges behave like unweighted
+        # edges (cost 1), while any edge with a real numeric weight is still honoured as-is.
+        for _, _, data in undirected.edges(data=True):
+            if data.get("weight") is None:
+                data["weight"] = 1.0
+        terminals = [node_id for node_id in node_ids if node_id in undirected]
+        tree = nx.algorithms.approximation.steiner_tree(undirected, terminals, weight="weight")
+        nodes = [dict(undirected.nodes[node_id]) for node_id in tree.nodes]
+        edges = []
+        for u, v in tree.edges():
+            edge_data = graph.get_edge_data(u, v) or graph.get_edge_data(v, u)
+            edge_attrs = next(iter(edge_data.values()))
+            edges.append(dict(edge_attrs))
+        return {"nodes": nodes, "edges": edges}
+
+    async def predict_links(
+        self, node_ids: list[NodeId], *, max_depth: int, top_k: int = 20, relation_type: str | None = None
+    ) -> list[dict]:
+        graph = await self._materialized_subgraph(node_ids, depth=max_depth, relation_type=relation_type)
+        # nx.adamic_adar_index is unimplemented for multigraphs (`graph.to_undirected()` on the
+        # materialized MultiDiGraph is a MultiGraph), so collapse to a simple Graph first. Adamic-
+        # Adar only consumes neighbor sets, not edge multiplicity/weight, so collapsing parallel
+        # edges is lossless for this algorithm; no weight-related issue here.
+        undirected = nx.Graph(graph.to_undirected())
+        candidate_ids = [node_id for node_id in node_ids if node_id in undirected]
+        non_adjacent_pairs = [
+            (u, v) for i, u in enumerate(candidate_ids) for v in candidate_ids[i + 1 :] if not undirected.has_edge(u, v)
+        ]
+        predictions = list(nx.adamic_adar_index(undirected, non_adjacent_pairs))
+        predictions.sort(key=lambda item: item[2], reverse=True)
+        return [{"from_id": u, "to_id": v, "score": score} for u, v, score in predictions[:top_k]]

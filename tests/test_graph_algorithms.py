@@ -138,3 +138,31 @@ def test_reachable_returns_empty_when_the_node_is_missing_from_the_subgraph():
     algorithms = GraphAlgorithms(_EmptySubgraphBackend())
     result = asyncio.run(algorithms.reachable("missing", max_depth=2))
     assert result == []
+
+
+def test_steiner_tree_connects_seed_nodes(tmp_path):
+    """steiner_tree() returns a tree whose nodes include every seed node."""
+    backend, algorithms = _algorithms(tmp_path)
+    a = asyncio.run(backend.create_concept("a"))
+    b = asyncio.run(backend.create_concept("b"))
+    c = asyncio.run(backend.create_concept("c"))
+    hub = asyncio.run(backend.create_concept("hub"))
+    asyncio.run(backend.create_edge(hub, a, "related_to"))
+    asyncio.run(backend.create_edge(hub, b, "related_to"))
+    asyncio.run(backend.create_edge(hub, c, "related_to"))
+    result = asyncio.run(algorithms.steiner_tree([a, b, c], max_depth=2))
+    node_ids = {n["id"] for n in result["nodes"]}
+    assert {a, b, c}.issubset(node_ids)
+
+
+def test_predict_links_suggests_a_candidate_edge_for_shared_neighbor(tmp_path):
+    """predict_links() surfaces a candidate edge for two nodes sharing a common neighbor."""
+    backend, algorithms = _algorithms(tmp_path)
+    a = asyncio.run(backend.create_concept("a"))
+    b = asyncio.run(backend.create_concept("b"))
+    shared = asyncio.run(backend.create_concept("shared"))
+    asyncio.run(backend.create_edge(a, shared, "related_to"))
+    asyncio.run(backend.create_edge(b, shared, "related_to"))
+    result = asyncio.run(algorithms.predict_links([a, b, shared], max_depth=2))
+    pairs = {(p["from_id"], p["to_id"]) for p in result} | {(p["to_id"], p["from_id"]) for p in result}
+    assert (a, b) in pairs
