@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class VectorSearchMatch(BaseModel):
     """One document-corpus vector search result - mirrors SearchMatch's shape."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     provider: Annotated[str, Field(..., strict=True)]
     identifier: Annotated[str, Field(..., strict=True)]

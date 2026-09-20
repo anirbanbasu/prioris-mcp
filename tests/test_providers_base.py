@@ -48,7 +48,7 @@ class TestResearchPublicationProvider:
 
     def test_cannot_instantiate_without_implementing_required_capabilities(self):
         with pytest.raises(TypeError):
-            ResearchPublicationProvider()  # type: ignore[abstract]
+            ResearchPublicationProvider()  # ty: ignore[call-non-callable]
 
     def test_default_list_top_n_raises_capability_not_supported(self):
         async def scenario():

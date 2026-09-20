@@ -17,7 +17,7 @@ class LocalFileFetchResult(BaseModel):
     provider-internal-shared-shape pattern.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     id: Annotated[str, Field(..., strict=True, description="The caller-facing identifier for the persisted file.")]
     location: Annotated[str, Field(..., strict=True, description="The storage location of the persisted file.")]

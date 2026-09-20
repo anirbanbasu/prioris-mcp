@@ -96,7 +96,7 @@ class ArxivResolvedIdentifier(BaseModel):
     `providers.identifier_routing.resolve_research_identifier` - not itself an MCP tool output.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     identifier: Annotated[str, Field(..., strict=True, description="The resolved identifier.")]
     resolved_url: Annotated[str, Field(..., strict=True, description="The resolved URL.")]

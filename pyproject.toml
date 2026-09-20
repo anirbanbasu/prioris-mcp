@@ -1,6 +1,6 @@
 [project]
 name = "prioris-mcp"
-version = "0.2.0"
+version = "0.2.1"
 description = "A model context protocol (MCP) server to facilitate looking up and discussing prior art."
 readme = "README.md"
 license = "MIT"
@@ -23,7 +23,7 @@ dependencies = [
     "defusedxml>=0.7.1",
     "environs>=15.0.1",
     "fastembed>=0.8.0",
-    "fastmcp>=3.4.4",
+    "fastmcp>=4.0.5",
     "html-to-markdown>=3.10.6",
     "httpx>=0.28.1",
     "liteparse>=2.9.0",
@@ -46,6 +46,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "icecream>=2.1.8",
+    "ruff>=0.16.0",
     "ty>=0.0.1a29",
 ]
 docs = [

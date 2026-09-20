@@ -40,11 +40,11 @@ _ALLOWED_DOMAINS = {
 }
 
 
-_ResolvedT = TypeVar("_ResolvedT", bound=BaseModel)
+_ResolvedT_co = TypeVar("_ResolvedT_co", bound=BaseModel, covariant=True)
 
 
-class _ResolvingProvider(Protocol[_ResolvedT]):
-    async def resolve_identifier(self, identifier: str, format: str) -> _ResolvedT: ...
+class _ResolvingProvider(Protocol[_ResolvedT_co]):
+    async def resolve_identifier(self, identifier: str, format: str) -> _ResolvedT_co: ...
 
 
 def _is_arxiv_identifier(identifier: str) -> bool:
@@ -60,8 +60,8 @@ def _is_doi(identifier: str) -> bool:
 
 
 async def _resolve_identifier(  # noqa: UP047 -- TODO: revisit if PEP 695's inferred covariance is proven safe here
-    provider: _ResolvingProvider[_ResolvedT], identifier: str, format: str
-) -> _ResolvedT:
+    provider: _ResolvingProvider[_ResolvedT_co], identifier: str, format: str
+) -> _ResolvedT_co:
     """Call `provider.resolve_identifier`, translating its format validation into `InvalidRequestError`.
 
     A provider (e.g. `ArxivProvider`) raises a bare `ValueError` for a caller-supplied `format` it

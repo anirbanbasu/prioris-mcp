@@ -41,6 +41,13 @@ format:
     @uv run ruff check --fix --fix-only
     @echo "Code formatted."
 
+# Lint and format the code, mirroring the ruff-pre-commit hook's args/excludes
+lint-format:
+    @echo "Linting and formatting code..."
+    @uv run ruff check --fix --exit-non-zero-on-fix --respect-gitignore --exclude "uv.lock" --exclude "*_static*"
+    @uv run ruff format --respect-gitignore --exclude "uv.lock" --exclude "*_static*"
+    @echo "Linting and formatting complete."
+
 # Run the type checker
 type-check:
     @echo "Running type checker..."

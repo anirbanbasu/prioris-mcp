@@ -276,7 +276,7 @@ startxref
         first_read, second_read = asyncio.run(scenario())
         assert base64.b64decode(first_read[0].blob) == payload
         assert base64.b64decode(second_read[0].blob) == payload
-        assert first_read[0].mimeType == "application/octet-stream"
+        assert first_read[0].mime_type == "application/octet-stream"
 
     def test_text_resource_passes_through_untouched_on_cache_miss_and_hit(self):
         """A `str`-content resource (parsed Markdown) is untouched by either middleware.

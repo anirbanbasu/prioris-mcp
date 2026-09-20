@@ -10,7 +10,7 @@ class TestParserBackend:
 
     def test_cannot_instantiate_without_implementing_to_markdown(self):
         with pytest.raises(TypeError):
-            ParserBackend()  # type: ignore[abstract]
+            ParserBackend()  # ty: ignore[call-non-callable]
 
     def test_parse_error_is_a_plain_exception(self):
         assert isinstance(ParseError("bad document"), Exception)

@@ -19,7 +19,7 @@ class FullTextFetchResult(BaseModel):
     and #research_europepmc_fetch_full_text.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     location: Annotated[str, Field(..., strict=True, description="The location of the fetched full text.")]
     format_: Annotated[str, Field(..., alias="format", strict=True, description="The format of the fetched full text.")]
@@ -76,7 +76,7 @@ class ArxivResolvedIdentifierResult(BaseModel):
     `providers.identifier_routing.resolve_research_identifier`.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     provider: Annotated[Literal["arxiv"], Field(description="The owning provider.")] = "arxiv"
     identifier: Annotated[str, Field(..., strict=True, description="The resolved identifier.")]
@@ -93,7 +93,7 @@ class EuropePmcResolvedIdentifierResult(BaseModel):
     `ArxivResolvedIdentifierResult`'s docstring for why this isn't merged into one model.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     provider: Annotated[Literal["europepmc"], Field(description="The owning provider.")] = "europepmc"
     identifier: Annotated[str, Field(..., strict=True, description="The resolved identifier.")]
@@ -115,7 +115,7 @@ class StorageEntry(BaseModel):
     See docs/requirement-specification/06-interface-specification.md#research_list_fetched.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     provider: Annotated[str, Field(..., strict=True, description="The provider that persisted this entry.")]
     identifier: Annotated[str, Field(..., strict=True, description="The externally-visible identifier.")]
@@ -147,7 +147,7 @@ class ListFetchedResult(BaseModel):
 class DeleteEntryRef(BaseModel):
     """One caller-supplied (provider, identifier, format) entry reference for `research_delete_fetched`."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     provider: Annotated[str, Field(..., strict=True, description="The provider the entry was persisted under.")]
     identifier: Annotated[str, Field(..., strict=True, description="The externally-visible identifier.")]
@@ -169,7 +169,7 @@ class DeleteFetchedResult(BaseModel):
 class SearchMatch(BaseModel):
     """One match result from a search across the local index."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     provider: Annotated[str, Field(..., strict=True)]
     identifier: Annotated[str, Field(..., strict=True)]

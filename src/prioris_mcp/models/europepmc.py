@@ -26,7 +26,7 @@ class EuropePmcAuthor(BaseModel):
 class EuropePmcMetadataRecord(BaseModel):
     """One Europe PMC record, the shared shape `search`/`fetch_metadata` both return."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     identifier: Annotated[str, Field(..., strict=True, description="The identifier of the record.")]
     pmid: Annotated[str | None, Field(None, strict=True, description="The PubMed ID of the record.")] = None
@@ -83,7 +83,7 @@ class EuropePmcResolvedIdentifier(BaseModel):
     `providers.identifier_routing.resolve_research_identifier` - not itself an MCP tool output.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     identifier: Annotated[str, Field(..., strict=True, description="The resolved identifier.")]
     resolved_url: Annotated[str, Field(..., strict=True, description="The resolved URL.")]

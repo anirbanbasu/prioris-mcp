@@ -74,7 +74,7 @@ class AuthorFilter(StrEnum):
 class Note(BaseModel):
     """One persisted note - the shape every NotesBackend read/write operation returns."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
 
     id: Annotated[str, Field(..., strict=True, description="UUID, also the export filename stem.")]
     provider: Annotated[str, Field(..., strict=True)]

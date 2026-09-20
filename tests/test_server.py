@@ -11,7 +11,7 @@ import httpx
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from mcp.types import TextResourceContents
 
 from prioris_mcp import EnvVars
@@ -605,7 +605,7 @@ class TestArxivTools:
             async with client:
                 await client.read_resource("research://arxiv/2106.09685v2/pdf/fulltext")
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             asyncio.run(scenario())
 
     def test_expected_resource_templates_are_registered(self, tmp_path, monkeypatch: "pytest.MonkeyPatch"):
@@ -626,7 +626,7 @@ class TestArxivTools:
                 return await client.list_resource_templates()
 
         templates = asyncio.run(scenario())
-        assert {t.uriTemplate for t in templates} == {
+        assert {t.uri_template for t in templates} == {
             "research://{provider}/{identifier}/{format}/fulltext",
             "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
             "notes://{note_id}/export",
@@ -1061,7 +1061,7 @@ startxref
             async with client:
                 await client.read_resource("research://localfile/20260729-1430-a3f2/pdf/fulltext")
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             asyncio.run(scenario())
 
     def _upload_in_chunks(self, client: Client, content: bytes, chunk_size: int, filename: str | None = None):
@@ -1300,7 +1300,7 @@ class TestReadMarkdownResourcePageParam:
             async with client:
                 await client.read_resource("research://arxiv/2106.09685v2/html/markdown?page=1")
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             asyncio.run(scenario())
 
     def test_page_before_any_parse_has_happened_is_not_found(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
@@ -1317,7 +1317,7 @@ class TestReadMarkdownResourcePageParam:
                 # manifest leaf rows exist yet; page=1 must be a not-found, not a silent fallback.
                 await client.read_resource(f"research://localfile/{caller_facing_id}/pdf/markdown?page=1")
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             asyncio.run(scenario())
 
     def test_page_beyond_total_pages_after_parse_is_not_found(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
@@ -1340,7 +1340,7 @@ class TestReadMarkdownResourcePageParam:
                 await client.call_tool("research_localfile_parse_full_text", arguments={"id": caller_facing_id})
                 await client.read_resource(f"research://localfile/{caller_facing_id}/pdf/markdown?page=2")
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             asyncio.run(scenario())
 
 
@@ -1895,7 +1895,7 @@ class TestResearchDiscovery:
             async with client:
                 return await client.read_resource("research://openalex/work-types")
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             asyncio.run(scenario())
 
     def test_openalex_work_types_resource_returns_sorted_types(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
@@ -3381,7 +3381,7 @@ class TestNotesExportResource:
             async with client:
                 await client.read_resource("notes://does-not-exist/export")
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             asyncio.run(scenario())
 
 

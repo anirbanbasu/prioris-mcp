@@ -177,7 +177,11 @@ class PriorisMCP(MCPMixin):
     ]
 
     resources: ClassVar[list[dict]] = [
-        {"fn": "read_fulltext_resource", "uri": "research://{provider}/{identifier}/{format}/fulltext"},
+        {
+            "fn": "read_fulltext_resource",
+            "uri": "research://{provider}/{identifier}/{format}/fulltext",
+            "mime_type": "application/octet-stream",
+        },
         {
             "fn": "read_markdown_resource",
             "uri": "research://{provider}/{identifier}/{format}/markdown{?offset,limit,page}",
