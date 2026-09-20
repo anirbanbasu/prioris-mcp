@@ -3524,6 +3524,17 @@ class TestVectorReconciliation:
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
         mcp_obj = PriorisMCP()
+        # Real embedding speed isn't a reliable clock to race against - gate both reembeds behind
+        # events so "pending" is observed deterministically rather than racing the document
+        # reembed's actual embedding work against the note reconciliation awaits that follow it.
+        release_document = asyncio.Event()
+        release_note = asyncio.Event()
+
+        async def _gated_index_entries(*args, **kwargs):
+            await release_document.wait()
+
+        async def _gated_index_note(*args, **kwargs):
+            await release_note.wait()
 
         async def scenario():
             await mcp_obj._storage.write("arxiv", "2106.09685v2", "pdf", b"# Title\n\nBody text.", artefact="markdown")
@@ -3533,13 +3544,22 @@ class TestVectorReconciliation:
             )
             note = await mcp_obj._notes_backend.create("arxiv", "2106.09685v2", None, "a note")
             await mcp_obj._embedding_scheduler.cancel(("note", note.id))
+            monkeypatch.setattr(mcp_obj._document_vector_backend, "index_entries", _gated_index_entries)
+            monkeypatch.setattr(mcp_obj._note_vector_backend, "index_note", _gated_index_note)
 
             await mcp_obj.reconcile_vector_index()
             before = (mcp_obj._rebuild_progress.documents.total, mcp_obj._rebuild_progress.notes.total)
+            # Let both freshly-created tasks actually run and reach their gate.wait() suspension
+            # point before reading "pending" - see the matching comment on the cancellation tests
+            # above for why this matters.
+            for _ in range(10):
+                await asyncio.sleep(0)
             before_pending = (
                 mcp_obj._rebuild_progress.documents.pending,
                 mcp_obj._rebuild_progress.notes.pending,
             )
+            release_document.set()
+            release_note.set()
             await mcp_obj._embedding_scheduler.wait_all()
             after_pending = (mcp_obj._rebuild_progress.documents.pending, mcp_obj._rebuild_progress.notes.pending)
             after_succeeded = (
