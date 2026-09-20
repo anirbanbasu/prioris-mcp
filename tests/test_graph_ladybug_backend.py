@@ -337,3 +337,10 @@ def test_subgraph_relation_type_filter(tmp_path):
     result = asyncio.run(backend.subgraph([a], depth=1, relation_type="keep"))
     edge_types = {e["relation_type"] for e in result["edges"]}
     assert edge_types == {"keep"}
+
+
+def test_subgraph_empty_node_ids_returns_empty_result(tmp_path):
+    """subgraph([]) short-circuits to an empty result without querying for edges."""
+    backend = _backend(tmp_path)
+    result = asyncio.run(backend.subgraph([]))
+    assert result == {"nodes": [], "edges": []}
