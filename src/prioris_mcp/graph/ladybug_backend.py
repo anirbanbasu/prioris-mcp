@@ -26,7 +26,7 @@ from typing import Any, Literal
 import ladybug as lb
 from ladybug.query_result import QueryResult
 
-from prioris_mcp.errors import MetadataConflictError
+from prioris_mcp.errors import MetadataConflictError, NotFoundError
 from prioris_mcp.graph.backend import EdgeId, GraphSearchBackend, MatchMode, NodeId, RefType
 
 _SCHEMA_DDL: tuple[str, ...] = (
@@ -156,7 +156,37 @@ class LadybugSearchBackend(GraphSearchBackend):
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> NodeId:
-        raise NotImplementedError
+        node_id = str(uuid.uuid4())
+        now = _now_iso()
+        keys, values = _metadata_to_cypher_params(metadata or {})
+        await self._conn.execute(
+            "CREATE (c:Concept {id: $id, label: $label, aliases: $aliases, description: $description, "
+            "metadata: map(CAST($keys AS STRING[]), CAST($values AS STRING[])), created_at: $ts, updated_at: $ts})",
+            {
+                "id": node_id,
+                "label": label,
+                "aliases": aliases or [],
+                "description": description,
+                "keys": keys,
+                "values": values,
+                "ts": now,
+            },
+        )
+        return node_id
+
+    async def _get_concept_row(self, node_id: NodeId) -> dict:
+        result = await self._conn.execute(
+            "MATCH (c:Concept {id: $id}) "
+            "RETURN c.label AS label, c.aliases AS aliases, c.description AS description, c.metadata AS metadata",
+            {"id": node_id},
+        )
+        assert isinstance(result, QueryResult)  # see the narrowing note on upsert_pointer above
+        rows = list(result.rows_as_dict())
+        if not rows:
+            raise NotFoundError(f"Concept not found: {node_id}")
+        row = rows[0]
+        assert isinstance(row, dict)  # rows_as_dict() rows are dict[str, Any], not the list[Any] row variant
+        return row
 
     async def update_concept(
         self,
@@ -167,10 +197,36 @@ class LadybugSearchBackend(GraphSearchBackend):
         description: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        raise NotImplementedError
+        current = await self._get_concept_row(node_id)
+        new_label = label if label is not None else current["label"]
+        new_aliases = aliases if aliases is not None else current["aliases"]
+        new_description = description if description is not None else current["description"]
+        if metadata:
+            merged_metadata = _merge_metadata(_metadata_from_row(current["metadata"]), metadata)
+        else:
+            merged_metadata = _metadata_from_row(current["metadata"])
+        keys, values = _metadata_to_cypher_params(merged_metadata)
+        await self._conn.execute(
+            "MATCH (c:Concept {id: $id}) SET c.label = $label, c.aliases = $aliases, "
+            "c.description = $description, c.metadata = map(CAST($keys AS STRING[]), CAST($values AS STRING[])), "
+            "c.updated_at = $ts",
+            {
+                "id": node_id,
+                "label": new_label,
+                "aliases": new_aliases,
+                "description": new_description,
+                "keys": keys,
+                "values": values,
+                "ts": _now_iso(),
+            },
+        )
 
     async def delete_node(self, node_id: NodeId) -> None:
-        raise NotImplementedError
+        existing = await self._conn.execute("MATCH (n {id: $id}) RETURN n.id AS id", {"id": node_id})
+        assert isinstance(existing, QueryResult)  # see the narrowing note on upsert_pointer above
+        if not list(existing.rows_as_dict()):
+            raise NotFoundError(f"Node not found: {node_id}")
+        await self._conn.execute("MATCH (n {id: $id}) DETACH DELETE n", {"id": node_id})
 
     async def create_edge(
         self,

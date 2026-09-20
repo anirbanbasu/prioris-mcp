@@ -1,5 +1,6 @@
 import asyncio
 
+from prioris_mcp.errors import NotFoundError
 from prioris_mcp.graph.ladybug_backend import LadybugSearchBackend
 
 
@@ -30,3 +31,81 @@ def test_reopening_same_path_does_not_recreate_schema(tmp_path):
     backend2 = LadybugSearchBackend(path)  # must not raise on re-running CREATE ... IF NOT EXISTS
     second_node_id = asyncio.run(backend2.upsert_pointer("chunk", "abc123"))
     assert second_node_id  # same ref -> same node, proves the table from backend1 persisted
+
+
+def test_create_concept_returns_new_node_id(tmp_path):
+    """create_concept returns a new, non-empty node id."""
+    backend = _backend(tmp_path)
+    node_id = asyncio.run(backend.create_concept("gradient checkpointing", aliases=["activation checkpointing"]))
+    assert isinstance(node_id, str) and node_id
+
+
+def test_create_concept_always_creates_a_new_node(tmp_path):
+    """Unlike upsert_pointer, create_concept has no idempotency key - repeat calls create distinct nodes."""
+    backend = _backend(tmp_path)
+    first = asyncio.run(backend.create_concept("gradient checkpointing"))
+    second = asyncio.run(backend.create_concept("gradient checkpointing"))
+    assert first != second
+
+
+def test_update_concept_partial_update_leaves_unset_fields_unchanged(tmp_path):
+    """Omitted update_concept kwargs leave the corresponding field at its existing value."""
+    backend = _backend(tmp_path)
+    node_id = asyncio.run(
+        backend.create_concept("gradient checkpointing", aliases=["activation checkpointing"], description="d")
+    )
+    asyncio.run(backend.update_concept(node_id, label="renamed"))
+    node = asyncio.run(backend.get_node(node_id))
+    assert node["label"] == "renamed"
+    assert node["aliases"] == ["activation checkpointing"]
+    assert node["description"] == "d"
+
+
+def test_update_concept_raises_not_found_for_missing_node(tmp_path):
+    """update_concept on an id with no matching Concept node raises NotFoundError."""
+    backend = _backend(tmp_path)
+    try:
+        asyncio.run(backend.update_concept("does-not-exist", label="x"))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
+
+
+def test_update_concept_raises_not_found_for_a_pointer_node(tmp_path):
+    """update_concept refuses to touch a node id that identifies a Pointer, not a Concept."""
+    backend = _backend(tmp_path)
+    pointer_id = asyncio.run(backend.upsert_pointer("chunk", "abc"))
+    try:
+        asyncio.run(backend.update_concept(pointer_id, label="x"))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
+
+
+def test_delete_node_removes_node_and_incident_edges(tmp_path):
+    """delete_node removes the node and cascades to delete any edges incident to it."""
+    backend = _backend(tmp_path)
+    pointer_id = asyncio.run(backend.upsert_pointer("chunk", "abc"))
+    concept_id = asyncio.run(backend.create_concept("gradient checkpointing"))
+    edge_id = asyncio.run(backend.create_edge(pointer_id, concept_id, "discussed_in"))
+    asyncio.run(backend.delete_node(concept_id))
+    try:
+        asyncio.run(backend.get_node(concept_id))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
+    try:
+        asyncio.run(backend.get_edge(edge_id))
+        raise AssertionError("expected NotFoundError (cascade)")
+    except NotFoundError:
+        pass
+
+
+def test_delete_node_raises_not_found_for_missing_node(tmp_path):
+    """delete_node on an id with no matching node (Pointer or Concept) raises NotFoundError."""
+    backend = _backend(tmp_path)
+    try:
+        asyncio.run(backend.delete_node("does-not-exist"))
+        raise AssertionError("expected NotFoundError")
+    except NotFoundError:
+        pass
