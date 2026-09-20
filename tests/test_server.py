@@ -4366,3 +4366,131 @@ class TestGraphWrite(TestMCPServer):
         result = asyncio.run(scenario())
         assert result.structured_content["op"] == "delete_edge"
         assert result.structured_content["id"]
+
+
+class TestGraphQuery(TestMCPServer):
+    """research_graph_query op-dispatch coverage.
+
+    Wraps each scenario in `asyncio.run(...)` rather than declaring `async def test_...` directly:
+    this suite has no pytest-asyncio/anyio-marker plugin installed, so bare coroutine test
+    functions aren't natively collectible - see the rest of this file's `asyncio.run(scenario())`
+    convention (e.g. `TestArxivTools`).
+    """
+
+    def test_get_node_returns_typed_node(self, mcp_client):
+        async def scenario():
+            write_result = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="gradient checkpointing"
+            )
+            node_id = write_result.structured_content["id"]
+            return await self.call_tool("research_graph_query", mcp_client, op="get_node", node_id=node_id)
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "get_node"
+        assert result.structured_content["result"]["node"]["kind"] == "concept"
+
+    def test_get_node_missing_is_not_found(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="get_node", node_id="does-not-exist"))
+
+    def test_get_node_requires_node_id(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="get_node"))
+
+    def test_get_edge_returns_edge(self, mcp_client):
+        async def scenario():
+            pointer = await self.call_tool(
+                "research_graph_write", mcp_client, op="upsert_pointer", ref_type="chunk", ref_id="n15q1"
+            )
+            concept = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="a concept for get_edge test"
+            )
+            edge = await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=pointer.structured_content["id"],
+                to_id=concept.structured_content["id"],
+                relation_type="discussed_in",
+            )
+            return await self.call_tool(
+                "research_graph_query", mcp_client, op="get_edge", edge_id=edge.structured_content["id"]
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "get_edge"
+        assert result.structured_content["result"]["edge"]["relation_type"] == "discussed_in"
+
+    def test_get_edge_missing_is_not_found(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="get_edge", edge_id="does-not-exist"))
+
+    def test_get_edge_requires_edge_id(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="get_edge"))
+
+    def test_neighbors_returns_matches(self, mcp_client):
+        async def scenario():
+            pointer = await self.call_tool(
+                "research_graph_write", mcp_client, op="upsert_pointer", ref_type="chunk", ref_id="n15c1"
+            )
+            concept = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="a concept for neighbors test"
+            )
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=pointer.structured_content["id"],
+                to_id=concept.structured_content["id"],
+                relation_type="discussed_in",
+            )
+            return await self.call_tool(
+                "research_graph_query", mcp_client, op="neighbors", node_id=pointer.structured_content["id"]
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "neighbors"
+        assert len(result.structured_content["result"]["matches"]) == 1
+
+    def test_neighbors_requires_node_id(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="neighbors"))
+
+    def test_find_concepts_requires_query(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="find_concepts"))
+
+    def test_find_concepts_returns_ranked_matches(self, mcp_client):
+        async def scenario():
+            await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="gradient checkpointing"
+            )
+            return await self.call_tool(
+                "research_graph_query", mcp_client, op="find_concepts", query="gradient checkpoint"
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "find_concepts"
+        assert len(result.structured_content["result"]["matches"]) >= 1
+
+    def test_subgraph_returns_nodes_and_edges(self, mcp_client):
+        async def scenario():
+            concept = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="a concept for subgraph test"
+            )
+            return await self.call_tool(
+                "research_graph_query", mcp_client, op="subgraph", node_ids=[concept.structured_content["id"]]
+            )
+
+        result = asyncio.run(scenario())
+        assert result.structured_content["result"]["op"] == "subgraph"
+        assert len(result.structured_content["result"]["nodes"]) == 1
+
+    def test_subgraph_requires_node_ids(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="subgraph"))
+
+    def test_unknown_op_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="not_a_real_op"))

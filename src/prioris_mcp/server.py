@@ -56,7 +56,15 @@ from prioris_mcp.models.common import (
 )
 from prioris_mcp.models.discovery import DiscoveryHit, DiscoveryResult
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
-from prioris_mcp.models.graph import GraphWriteResult
+from prioris_mcp.models.graph import (
+    ConceptMatchesResult,
+    EdgeResult,
+    GraphQueryResult,
+    GraphWriteResult,
+    NeighborsResult,
+    NodeResult,
+    SubgraphResult,
+)
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, NotesSearchResult, PagedNotes
 from prioris_mcp.models.vector import (
@@ -182,6 +190,7 @@ class PriorisMCP(MCPMixin):
             "tags": ["research", "graph"],
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
+        {"fn": "research_graph_query", "tags": ["research", "graph"], "annotations": {"readOnlyHint": True}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -1017,6 +1026,51 @@ class PriorisMCP(MCPMixin):
             await backend.delete_edge(edge_id)
             result_id = edge_id
         return GraphWriteResult(op=op, id=result_id)
+
+    async def research_graph_query(
+        self,
+        ctx: Context,
+        op: Annotated[
+            Literal["get_node", "get_edge", "neighbors", "find_concepts", "subgraph"],
+            Field(description="Which graph read operation to perform"),
+        ],
+        node_id: Annotated[str | None, Field(default=None)] = None,
+        edge_id: Annotated[str | None, Field(default=None)] = None,
+        direction: Annotated[Literal["out", "in", "both"], Field(default="both")] = "both",
+        relation_type: Annotated[str | None, Field(default=None)] = None,
+        query: Annotated[str | None, Field(default=None, description="Required for find_concepts")] = None,
+        node_ids: Annotated[list[str] | None, Field(default=None, description="Required for subgraph")] = None,
+        depth: Annotated[int, Field(default=1)] = 1,
+        offset: Annotated[int, Field(default=0)] = 0,
+        limit: Annotated[int, Field(default=50)] = 50,
+    ) -> GraphQueryResult:
+        """Read a single node/edge, a node's neighbors, fuzzy concept candidates, or a subgraph."""
+        backend = self._graph_backend
+        if op == "get_node":
+            if node_id is None:
+                raise InvalidRequestError("get_node requires node_id")
+            return NodeResult(op="get_node", node=await backend.get_node(node_id))
+        if op == "get_edge":
+            if edge_id is None:
+                raise InvalidRequestError("get_edge requires edge_id")
+            return EdgeResult(op="get_edge", edge=await backend.get_edge(edge_id))
+        if op == "neighbors":
+            if node_id is None:
+                raise InvalidRequestError("neighbors requires node_id")
+            hops = await backend.neighbors(
+                node_id, direction=direction, relation_type=relation_type, offset=offset, limit=limit
+            )
+            return NeighborsResult(op="neighbors", matches=hops)
+        if op == "find_concepts":
+            if query is None:
+                raise InvalidRequestError("find_concepts requires query")
+            matches = await backend.find_concepts(query, limit=limit)
+            return ConceptMatchesResult(op="find_concepts", matches=matches)
+        # op == "subgraph"
+        if not node_ids:
+            raise InvalidRequestError("subgraph requires node_ids")
+        raw = await backend.subgraph(node_ids, depth=depth, relation_type=relation_type)
+        return SubgraphResult(op="subgraph", nodes=raw["nodes"], edges=raw["edges"])
 
     async def _force_vector_reconnect(self) -> None:
         """Force both vector backends' `_connect()` to run now, so any model-mismatch drop happens here.
