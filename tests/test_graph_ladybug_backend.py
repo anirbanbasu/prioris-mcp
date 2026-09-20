@@ -257,3 +257,83 @@ def test_delete_edge_raises_not_found(tmp_path):
         raise AssertionError("expected NotFoundError")
     except NotFoundError:
         pass
+
+
+def test_neighbors_out_direction(tmp_path):
+    """neighbors(direction="out") returns the outgoing edge/node pair for a node with one out-edge."""
+    backend = _backend(tmp_path)
+    pointer_id = asyncio.run(backend.upsert_pointer("chunk", "abc"))
+    concept_id = asyncio.run(backend.create_concept("gradient checkpointing"))
+    asyncio.run(backend.create_edge(pointer_id, concept_id, "discussed_in"))
+    results = asyncio.run(backend.neighbors(pointer_id, direction="out"))
+    assert len(results) == 1
+    assert results[0]["node"]["id"] == concept_id
+    assert results[0]["edge"]["relation_type"] == "discussed_in"
+
+
+def test_neighbors_in_direction(tmp_path):
+    """neighbors(direction="in") returns the source node reachable via an incoming edge."""
+    backend = _backend(tmp_path)
+    pointer_id = asyncio.run(backend.upsert_pointer("chunk", "abc"))
+    concept_id = asyncio.run(backend.create_concept("gradient checkpointing"))
+    asyncio.run(backend.create_edge(pointer_id, concept_id, "discussed_in"))
+    results = asyncio.run(backend.neighbors(concept_id, direction="in"))
+    assert len(results) == 1
+    assert results[0]["node"]["id"] == pointer_id
+
+
+def test_neighbors_both_direction_and_relation_type_filter(tmp_path):
+    """direction="both" returns neighbors on either side; relation_type further restricts them."""
+    backend = _backend(tmp_path)
+    c1 = asyncio.run(backend.create_concept("a"))
+    c2 = asyncio.run(backend.create_concept("b"))
+    c3 = asyncio.run(backend.create_concept("c"))
+    asyncio.run(backend.create_edge(c1, c2, "related_to"))
+    asyncio.run(backend.create_edge(c3, c1, "discussed_in"))
+    both = asyncio.run(backend.neighbors(c1, direction="both"))
+    assert {r["node"]["id"] for r in both} == {c2, c3}
+    filtered = asyncio.run(backend.neighbors(c1, direction="both", relation_type="related_to"))
+    assert {r["node"]["id"] for r in filtered} == {c2}
+
+
+def test_neighbors_pagination(tmp_path):
+    """offset/limit page through a node's neighbors without overlap between pages."""
+    backend = _backend(tmp_path)
+    c1 = asyncio.run(backend.create_concept("hub"))
+    for i in range(5):
+        c = asyncio.run(backend.create_concept(f"leaf{i}"))
+        asyncio.run(backend.create_edge(c1, c, "related_to"))
+    page1 = asyncio.run(backend.neighbors(c1, direction="out", offset=0, limit=2))
+    page2 = asyncio.run(backend.neighbors(c1, direction="out", offset=2, limit=2))
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert {r["node"]["id"] for r in page1}.isdisjoint({r["node"]["id"] for r in page2})
+
+
+def test_subgraph_within_depth(tmp_path):
+    """Subgraph includes every node within `depth` hops of a seed and excludes nodes beyond it."""
+    backend = _backend(tmp_path)
+    a = asyncio.run(backend.create_concept("a"))
+    b = asyncio.run(backend.create_concept("b"))
+    c = asyncio.run(backend.create_concept("c"))
+    far = asyncio.run(backend.create_concept("far"))
+    asyncio.run(backend.create_edge(a, b, "related_to"))
+    asyncio.run(backend.create_edge(b, c, "related_to"))
+    asyncio.run(backend.create_edge(c, far, "related_to"))
+    result = asyncio.run(backend.subgraph([a], depth=2))
+    node_ids = {n["id"] for n in result["nodes"]}
+    assert {a, b, c}.issubset(node_ids)
+    assert far not in node_ids
+
+
+def test_subgraph_relation_type_filter(tmp_path):
+    """Subgraph's relation_type restricts the returned edges to that one relation type."""
+    backend = _backend(tmp_path)
+    a = asyncio.run(backend.create_concept("a"))
+    b = asyncio.run(backend.create_concept("b"))
+    c = asyncio.run(backend.create_concept("c"))
+    asyncio.run(backend.create_edge(a, b, "keep"))
+    asyncio.run(backend.create_edge(a, c, "drop"))
+    result = asyncio.run(backend.subgraph([a], depth=1, relation_type="keep"))
+    edge_types = {e["relation_type"] for e in result["edges"]}
+    assert edge_types == {"keep"}

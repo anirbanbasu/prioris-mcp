@@ -15,6 +15,8 @@ docs/superpowers/plans/2026-09-20-graph-search-backend.md for what was confirmed
 - CREATE ... -[e:Related {...}]-> ... requires each endpoint to be matched with an explicit node
   table label (Pointer or Concept) - Related spans four FROM/TO combinations, so an unlabeled
   match is ambiguous at CREATE time (though not at read time).
+- SKIP/LIMIT must be inlined into the query text, not bound as $offset/$limit query parameters -
+  with parameters, SKIP is silently ignored and every page returns the same first N rows.
 """
 
 import json
@@ -336,6 +338,14 @@ class LadybugSearchBackend(GraphSearchBackend):
         row["metadata"] = _metadata_from_row(row["metadata"])
         return row
 
+    @staticmethod
+    def _direction_pattern(direction: str) -> str:
+        if direction == "out":
+            return "-[e:Related]->"
+        if direction == "in":
+            return "<-[e:Related]-"
+        return "-[e:Related]-"
+
     async def neighbors(
         self,
         node_id: NodeId,
@@ -345,10 +355,56 @@ class LadybugSearchBackend(GraphSearchBackend):
         offset: int = 0,
         limit: int = 50,
     ) -> list[dict]:
-        raise NotImplementedError
+        pattern = self._direction_pattern(direction)
+        where_clause = " WHERE e.relation_type = $relation_type" if relation_type is not None else ""
+        params: dict[str, Any] = {"id": node_id}
+        if relation_type is not None:
+            params["relation_type"] = relation_type
+        # SKIP/LIMIT must be inlined rather than passed as $offset/$limit query params - with
+        # parameters, this ladybug version silently ignores SKIP and returns the same first page
+        # every time (confirmed interactively); int() casting keeps this injection-safe despite
+        # the string interpolation.
+        result = await self._conn.execute(
+            f"MATCH (a {{id: $id}}){pattern}(b){where_clause} "
+            "RETURN e.id AS edge_id, a.id AS a_id, b.id AS node_id "
+            f"ORDER BY b.id, e.id SKIP {int(offset)} LIMIT {int(limit)}",
+            params,
+        )
+        assert isinstance(result, QueryResult)  # see the narrowing note on upsert_pointer above
+        rows = list(result.rows_as_dict())
+        hops = []
+        for row in rows:
+            edge = await self.get_edge(row["edge_id"])
+            node = await self.get_node(row["node_id"])
+            hops.append({"edge": edge, "node": node})
+        return hops
 
     async def subgraph(self, node_ids: list[NodeId], *, depth: int = 1, relation_type: str | None = None) -> dict:
-        raise NotImplementedError
+        reach_result = await self._conn.execute(
+            f"MATCH (seed) WHERE seed.id IN $seed_ids "
+            f"OPTIONAL MATCH (seed)-[:Related*0..{int(depth)}]-(m) "
+            "WITH seed, m WHERE m IS NOT NULL "
+            "RETURN DISTINCT m.id AS id",
+            {"seed_ids": node_ids},
+        )
+        assert isinstance(reach_result, QueryResult)  # see the narrowing note on upsert_pointer above
+        reached_ids = {row["id"] for row in reach_result.rows_as_dict()}
+        all_ids = reached_ids | set(node_ids)
+        if not all_ids:
+            return {"nodes": [], "edges": []}
+        id_list = sorted(all_ids)
+        nodes = [await self.get_node(node_id) for node_id in id_list]
+        where_clause = "a.id IN $ids AND b.id IN $ids"
+        params: dict[str, Any] = {"ids": id_list}
+        if relation_type is not None:
+            where_clause += " AND e.relation_type = $relation_type"
+            params["relation_type"] = relation_type
+        edge_result = await self._conn.execute(
+            f"MATCH (a)-[e:Related]->(b) WHERE {where_clause} RETURN e.id AS edge_id", params
+        )
+        assert isinstance(edge_result, QueryResult)  # see the narrowing note on upsert_pointer above
+        edges = [await self.get_edge(row["edge_id"]) for row in edge_result.rows_as_dict()]
+        return {"nodes": nodes, "edges": edges}
 
     async def find_concepts(self, query: str, *, limit: int = 20) -> list[dict]:
         raise NotImplementedError
