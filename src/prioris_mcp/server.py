@@ -10,12 +10,13 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib.metadata import version
-from typing import Annotated, Any, ClassVar, Literal, cast
+from typing import Annotated, Any, ClassVar, Final, Literal, cast
 
 import httpx
 import networkx
 import uvicorn
 from fastmcp import Context, FastMCP
+from fastmcp.resources import ResourceContent, ResourceResult
 from fastmcp.server.middleware.caching import (
     CallToolSettings,
     GetPromptSettings,
@@ -63,6 +64,8 @@ from prioris_mcp.models.graph import (
     CentralityResult,
     CommunitiesResult,
     ConceptMatchesResult,
+    ConceptNode,
+    ConceptsResult,
     EdgeResult,
     GraphAnalyzeResult,
     GraphQueryResult,
@@ -113,6 +116,8 @@ from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, Sqli
 
 package_version = version(PACKAGE_NAME)
 logger = logging.getLogger(__name__)
+
+_MAX_GRAPH_DEPTH: Final[int] = 30  # hard engine limit on variable-length relationship patterns
 
 
 class PriorisMCP(MCPMixin):
@@ -1040,6 +1045,21 @@ class PriorisMCP(MCPMixin):
             result_id = edge_id
         return GraphWriteResult(op=op, id=result_id)
 
+    @staticmethod
+    def _validate_graph_depth(value: int, name: str) -> None:
+        """Shared `depth`/`max_depth` bound check for research_graph_query/research_graph_analyze.
+
+        Split out to a helper (mirroring `_validate_notes_search_params`'s rationale) purely to
+        keep each caller's own cyclomatic complexity under the ruff-enforced ceiling - every
+        op-branch needs this same check, and inlining it repeatedly pushes both dispatcher methods
+        over the limit.
+
+        Raises:
+            InvalidRequestError: value outside [0, _MAX_GRAPH_DEPTH].
+        """
+        if not 0 <= value <= _MAX_GRAPH_DEPTH:
+            raise InvalidRequestError(f"{name} must be between 0 and {_MAX_GRAPH_DEPTH}, got {value}")
+
     async def research_graph_query(
         self,
         ctx: Context,
@@ -1055,10 +1075,15 @@ class PriorisMCP(MCPMixin):
         node_ids: Annotated[list[str] | None, Field(default=None, description="Required for subgraph")] = None,
         depth: Annotated[int, Field(default=1)] = 1,
         offset: Annotated[int, Field(default=0)] = 0,
-        limit: Annotated[int, Field(default=50)] = 50,
+        limit: Annotated[
+            int | None,
+            Field(default=None, description="Defaults to 50 for neighbors, 20 for find_concepts"),
+        ] = None,
     ) -> GraphQueryResult:
         """Read a single node/edge, a node's neighbors, fuzzy concept candidates, or a subgraph."""
         backend = self._graph_backend
+        if offset < 0:
+            raise InvalidRequestError(f"offset must be >= 0, got {offset}")
         if op == "get_node":
             if node_id is None:
                 raise InvalidRequestError("get_node requires node_id")
@@ -1070,18 +1095,25 @@ class PriorisMCP(MCPMixin):
         if op == "neighbors":
             if node_id is None:
                 raise InvalidRequestError("neighbors requires node_id")
+            effective_limit = 50 if limit is None else limit
+            if limit is not None and limit <= 0:
+                raise InvalidRequestError(f"limit must be > 0, got {limit}")
             hops = await backend.neighbors(
-                node_id, direction=direction, relation_type=relation_type, offset=offset, limit=limit
+                node_id, direction=direction, relation_type=relation_type, offset=offset, limit=effective_limit
             )
             return NeighborsResult(op="neighbors", matches=hops)
         if op == "find_concepts":
             if query is None:
                 raise InvalidRequestError("find_concepts requires query")
-            matches = await backend.find_concepts(query, limit=limit)
+            effective_limit = 20 if limit is None else limit
+            if limit is not None and limit <= 0:
+                raise InvalidRequestError(f"limit must be > 0, got {limit}")
+            matches = await backend.find_concepts(query, limit=effective_limit)
             return ConceptMatchesResult(op="find_concepts", matches=matches)
         # op == "subgraph"
         if not node_ids:
             raise InvalidRequestError("subgraph requires node_ids")
+        self._validate_graph_depth(depth, "depth")
         raw = await backend.subgraph(node_ids, depth=depth, relation_type=relation_type)
         return SubgraphResult(op="subgraph", nodes=raw["nodes"], edges=raw["edges"])
 
@@ -1118,17 +1150,20 @@ class PriorisMCP(MCPMixin):
         if op in ("betweenness_centrality", "pagerank"):
             if not node_ids:
                 raise InvalidRequestError(f"{op} requires node_ids")
+            self._validate_graph_depth(depth, "depth")
             fn = algorithms.betweenness_centrality if op == "betweenness_centrality" else algorithms.pagerank
             scores = await fn(node_ids, depth=depth, relation_type=relation_type)
             return CentralityResult(op=op, scores=scores)
         if op == "communities":
             if not node_ids:
                 raise InvalidRequestError("communities requires node_ids")
+            self._validate_graph_depth(depth, "depth")
             communities = await algorithms.communities(node_ids, depth=depth, relation_type=relation_type, seed=seed)
             return CommunitiesResult(op="communities", communities=communities)
         if op == "paths":
             if from_id is None or to_id is None or max_depth is None:
                 raise InvalidRequestError("paths requires from_id, to_id, and max_depth")
+            self._validate_graph_depth(max_depth, "max_depth")
             paths = await algorithms.paths(
                 from_id, to_id, max_depth=max_depth, max_paths=max_paths, relation_type=relation_type
             )
@@ -1136,6 +1171,7 @@ class PriorisMCP(MCPMixin):
         if op == "reachable":
             if not node_ids or max_depth is None:
                 raise InvalidRequestError("reachable requires node_ids (one seed) and max_depth")
+            self._validate_graph_depth(max_depth, "max_depth")
             reached = await algorithms.reachable(
                 node_ids[0], direction=direction, max_depth=max_depth, relation_type=relation_type
             )
@@ -1143,11 +1179,13 @@ class PriorisMCP(MCPMixin):
         if op == "steiner_tree":
             if not node_ids or max_depth is None:
                 raise InvalidRequestError("steiner_tree requires node_ids and max_depth")
+            self._validate_graph_depth(max_depth, "max_depth")
             raw = await algorithms.steiner_tree(node_ids, max_depth=max_depth, relation_type=relation_type)
             return SteinerTreeResult(op="steiner_tree", nodes=raw["nodes"], edges=raw["edges"])
         # op == "predict_links"
         if not node_ids or max_depth is None:
             raise InvalidRequestError("predict_links requires node_ids and max_depth")
+        self._validate_graph_depth(max_depth, "max_depth")
         predictions = await algorithms.predict_links(
             node_ids, max_depth=max_depth, top_k=top_k, relation_type=relation_type
         )
@@ -1458,14 +1496,20 @@ class PriorisMCP(MCPMixin):
         """Browse the entire Concept vocabulary, paginated - the fallback for cross-lingual/synonym dedup.
 
         `limit` is clamped to PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT regardless of what the caller
-        requests. Returns a JSON array of concept dicts (not wrapped in a Pydantic model - see
-        `read_markdown_resource` for why resources here return pre-serialised JSON strings).
+        requests. Returns the `ConceptsResult` serialised to JSON - see `read_markdown_resource`
+        for why resources here return pre-serialised JSON strings.
         """
+        if offset < 0:
+            raise InvalidRequestError(f"offset must be >= 0, got {offset}")
+        if limit <= 0:
+            raise InvalidRequestError(f"limit must be > 0, got {limit}")
         effective_limit = min(limit, EnvVars.PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT)
         concepts = await self._graph_backend.list_concepts(text=text, match=match, offset=offset, limit=effective_limit)
-        return json.dumps(concepts)
+        return ConceptsResult(concepts=[ConceptNode(**concept) for concept in concepts]).model_dump_json()
 
-    async def read_graph_export_resource(self, format: Literal["cypher_json", "graphml"] = "cypher_json") -> str:
+    async def read_graph_export_resource(
+        self, format: Literal["cypher_json", "graphml"] = "cypher_json"
+    ) -> str | ResourceResult:
         """Export the entire corpus-wide graph, unfiltered - for diagnostic/visualization use.
 
         Not scoped to a seed set the way subgraph() (research_graph_query) is - see
@@ -1495,7 +1539,7 @@ class PriorisMCP(MCPMixin):
                     del data[key]
         buffer = io.BytesIO()
         networkx.write_graphml(graph, buffer)
-        return buffer.getvalue().decode("utf-8")
+        return ResourceResult([ResourceContent(buffer.getvalue().decode("utf-8"), mime_type="text/xml")])
 
 
 def _vector_reconciliation_lifespan(

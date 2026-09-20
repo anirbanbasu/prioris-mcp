@@ -318,6 +318,7 @@ class TestLiveResourceCacheBypassMiddleware:
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_STORAGE_DIR", tmp_path / "storage")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_NOTES_DIR", tmp_path / "notes")
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_VECTOR_DIR", tmp_path / "vectors")
+        monkeypatch.setattr(EnvVars, "PRIORIS_MCP_GRAPH_DIR", tmp_path / "graph")
         mcp_obj = PriorisMCP()
         server = FastMCP()
         server_with_features = mcp_obj.register_features(server)
@@ -398,6 +399,57 @@ class TestLiveResourceCacheBypassMiddleware:
             "cancelled": 0,
             "active": False,
         }
+
+    def test_graph_concepts_resource_is_never_served_from_cache(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"
+    ):
+        """Read concepts -> create a new concept -> read again must reflect the new concept.
+
+        Without the bypass, ResponseCachingMiddleware would serve the second read from its cache,
+        missing the concept created in between - directly breaking the workflow the concepts
+        resource exists for (browsing the vocabulary for cross-lingual/synonym dedup).
+        """
+        _mcp_obj, client = self._server_and_client(tmp_path, monkeypatch)
+        uri = "research://graph/concepts"
+
+        async def scenario():
+            async with client:
+                first_read = await client.read_resource(uri)
+                await client.call_tool(
+                    "research_graph_write", arguments={"op": "create_concept", "label": "bypass test concept"}
+                )
+                second_read = await client.read_resource(uri)
+                return first_read, second_read
+
+        first_read, second_read = asyncio.run(scenario())
+        first_payload = json.loads(first_read[0].text)
+        second_payload = json.loads(second_read[0].text)
+        assert not any(c["label"] == "bypass test concept" for c in first_payload["concepts"])
+        assert any(c["label"] == "bypass test concept" for c in second_payload["concepts"])
+
+    def test_graph_export_resource_is_never_served_from_cache(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
+        """Read export -> create a new concept -> read again must reflect the new concept.
+
+        Without the bypass, ResponseCachingMiddleware would serve the second read from its cache,
+        missing the node created in between.
+        """
+        _mcp_obj, client = self._server_and_client(tmp_path, monkeypatch)
+        uri = "research://graph/export"
+
+        async def scenario():
+            async with client:
+                first_read = await client.read_resource(uri)
+                created = await client.call_tool(
+                    "research_graph_write", arguments={"op": "create_concept", "label": "export bypass test concept"}
+                )
+                second_read = await client.read_resource(uri)
+                return created.structured_content["id"], first_read, second_read  # ty: ignore[not-subscriptable]
+
+        node_id, first_read, second_read = asyncio.run(scenario())
+        first_payload = json.loads(first_read[0].text)
+        second_payload = json.loads(second_read[0].text)
+        assert node_id not in {n["id"] for n in first_payload["nodes"]}
+        assert node_id in {n["id"] for n in second_payload["nodes"]}
 
     def test_an_ordinary_resource_is_still_served_from_cache(self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch"):
         """A companion check that the bypass is scoped, not a blanket cache disable.

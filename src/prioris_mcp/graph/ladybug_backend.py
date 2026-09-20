@@ -145,16 +145,6 @@ class LadybugSearchBackend(GraphSearchBackend):
         )
         return node_id
 
-    # The methods below are declared abstract on GraphSearchBackend but not yet implemented on
-    # this backend - Python's ABC machinery blocks instantiating a subclass that leaves *any*
-    # abstract method unoverridden (not just when all are left abstract), so each needs a stub
-    # override here to keep LadybugSearchBackend instantiable for this task's own tests. Each
-    # `raise NotImplementedError` is excluded from the coverage gate by the pre-existing
-    # `exclude_lines` entry in pyproject.toml's `[tool.coverage.report]`. Filled in incrementally
-    # by later tasks in this same plan: create_concept/update_concept/delete_node (Task 4),
-    # get_node/get_edge (Task 5), create_edge/update_edge/delete_edge (Task 6),
-    # neighbors/subgraph (Task 7), find_concepts/list_concepts/export_graph (Task 8).
-
     async def create_concept(
         self,
         label: str,
@@ -385,12 +375,18 @@ class LadybugSearchBackend(GraphSearchBackend):
         return hops
 
     async def subgraph(self, node_ids: list[NodeId], *, depth: int = 1, relation_type: str | None = None) -> dict:
+        reach_params: dict[str, Any] = {"seed_ids": node_ids}
+        if relation_type is not None:
+            reach_pattern = f"[:Related*0..{int(depth)} {{relation_type: $relation_type}}]"
+            reach_params["relation_type"] = relation_type
+        else:
+            reach_pattern = f"[:Related*0..{int(depth)}]"
         reach_result = await self._conn.execute(
             f"MATCH (seed) WHERE seed.id IN $seed_ids "
-            f"OPTIONAL MATCH (seed)-[:Related*0..{int(depth)}]-(m) "
+            f"OPTIONAL MATCH (seed)-{reach_pattern}-(m) "
             "WITH seed, m WHERE m IS NOT NULL "
             "RETURN DISTINCT m.id AS id",
-            {"seed_ids": node_ids},
+            reach_params,
         )
         assert isinstance(reach_result, QueryResult)  # see the narrowing note on upsert_pointer above
         reached_ids = {row["id"] for row in reach_result.rows_as_dict()}

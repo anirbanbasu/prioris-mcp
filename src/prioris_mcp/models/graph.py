@@ -42,6 +42,14 @@ class ConceptNode(BaseModel):
 GraphNode = Annotated[PointerNode | ConceptNode, Field(discriminator="kind")]
 
 
+class ConceptsResult(BaseModel):
+    """Output of the `research://graph/concepts` resource."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    concepts: Annotated[list[ConceptNode], Field(..., strict=True, description="The matching Concept nodes.")]
+
+
 class GraphEdge(BaseModel):
     """One edge on the generic Related relationship table."""
 

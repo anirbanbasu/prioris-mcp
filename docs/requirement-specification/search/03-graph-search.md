@@ -184,9 +184,11 @@ async def list_concepts(
     offset: int = 0, limit: int = 50,
 ) -> list[dict]:
     """Unfiltered by default - browses every Concept node, paginated, newest first. `match`
-    only takes effect when `text` is given (case-insensitive over label+aliases); `text=None`
-    lists everything regardless of `match`. `limit` is clamped to
-    PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT regardless of what the caller requests.
+    only takes effect when `text` is given, matching case-insensitively against `label` only -
+    alias-matching is a deferred follow-up; `find_concepts`'s fuzzy matching already covers
+    aliases for the caller-driven-dedup use case; `text=None` lists everything regardless of
+    `match`. `limit` is clamped to PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT regardless of what the
+    caller requests.
     """
 ```
 

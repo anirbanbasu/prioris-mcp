@@ -273,7 +273,7 @@ See [Graph search](search/03-graph-search.md) and its ADRs (00032–00041). No u
 | `pagerank` | same as `betweenness_centrality` |
 | `communities` | `node_ids`, `depth`, `relation_type` (same as above), `seed` (integer, optional) |
 | `paths` | `from_id` (string, required), `to_id` (string, required), `max_depth` (integer, required), `max_paths` (integer, optional, default 20), `relation_type` (string, optional) |
-| `reachable` | `node_id` (string, required), `direction` (`"out"`\|`"in"`, default `"out"`), `max_depth` (integer, required), `relation_type` (string, optional) |
+| `reachable` | `node_ids` (list of strings, required — only the first entry is used as the single seed), `direction` (`"out"`\|`"in"`, default `"out"`), `max_depth` (integer, required), `relation_type` (string, optional) |
 | `steiner_tree` | `node_ids` (list of strings, required, one or more), `max_depth` (integer, required), `relation_type` (string, optional) |
 | `predict_links` | `node_ids` (list of strings, required, one or more), `max_depth` (integer, required), `top_k` (integer, optional, default 20), `relation_type` (string, optional) |
 
@@ -296,11 +296,11 @@ See [Graph search](search/03-graph-search.md) and its ADRs (00032–00041). No u
 
 **Input:** `text` (string, optional), `match` (`"starts_with"`\|`"contains"`\|`"ends_with"`, default `"contains"` — only takes effect when `text` is given), `offset` (integer, optional, default 0), `limit` (integer, optional, default 50, clamped to `PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT` regardless of what the caller requests — see [Browsing the concept vocabulary](search/03-graph-search.md#browsing-the-concept-vocabulary-list_concepts)).
 
-**Behaviour:** with no `text`, lists every `Concept` node, newest-`created_at`-first, paginated. With `text`, matches case-insensitively against `label`+`aliases` using `match`'s comparison. This is the fallback for a suspected synonym/cross-lingual duplicate that `find_concepts`' fuzzy matching cannot catch, by letting the caller browse the vocabulary directly instead of searching it.
+**Behaviour:** with no `text`, lists every `Concept` node, newest-`created_at`-first, paginated. With `text`, matches case-insensitively against `label` only using `match`'s comparison — alias-matching is a deferred follow-up; `find_concepts`'s fuzzy matching already covers aliases (see above) for the caller-driven-dedup use case. This is the fallback for a suspected synonym/cross-lingual duplicate that `find_concepts`' fuzzy matching cannot catch, by letting the caller browse the vocabulary directly instead of searching it.
 
 **Output:** `{"concepts": [<ConceptNode>, ...]}`, JSON-serialised (`.model_dump_json()`), same as `research://arxiv/categories`' bare-list-in-one-key convention — no `total`/`has_more`, since the underlying `list_concepts` method returns a plain list with no separate count query, unlike `research_list_fetched`/`research_notes_search`.
 
-**Caching:** covered by the standard `ResponseCachingMiddleware` `read_resource` path, same as `research://arxiv/categories` above.
+**Caching:** bypasses `ResponseCachingMiddleware` and always reads live, the same as `notes://*` resources — `research://arxiv/categories` is a static upstream reference table, but the concept vocabulary is mutated by `research_graph_write` and must never be served stale.
 
 ### `research://graph/export` (resource)
 
@@ -312,7 +312,7 @@ See [Graph search](search/03-graph-search.md) and its ADRs (00032–00041). No u
 
 **Output:** `format="cypher_json"` → `{"nodes": [<GraphNode>, ...], "edges": [<GraphEdge>, ...]}`, JSON-serialised, the raw `export_graph()` dict as-is. `format="graphml"` → GraphML XML as the resource's text content (`text/xml`), not JSON — the one resource template on this page whose content type varies by its own query parameter, directly openable in Gephi/Cytoscape with no client-side conversion step.
 
-**Caching:** covered by the standard `ResponseCachingMiddleware` `read_resource` path, same as the concept-vocabulary resource above — a corpus-wide export is exactly the kind of response this middleware's TTL is meant to absorb repeat reads of.
+**Caching:** bypasses `ResponseCachingMiddleware` and always reads live, the same as `notes://*` resources — `research://arxiv/categories` is a static upstream reference table, but the underlying graph this resource exports is mutated by `research_graph_write` and must never be served stale.
 
 ## Local filesystem
 

@@ -369,6 +369,25 @@ def test_subgraph_relation_type_filter(tmp_path):
     assert edge_types == {"keep"}
 
 
+def test_subgraph_relation_type_also_restricts_traversal(tmp_path):
+    """relation_type must restrict *reachability*, not just which edges are returned.
+
+    A node reachable only via a relation type the caller filtered out must not appear in the
+    node set at all - not even as an isolated node with no edges. Chain a -[r1]-> b -[r2]-> c and
+    filter to r1: only a and b should be reachable within depth=2.
+    """
+    backend = _backend(tmp_path)
+    a = asyncio.run(backend.create_concept("a"))
+    b = asyncio.run(backend.create_concept("b"))
+    c = asyncio.run(backend.create_concept("c"))
+    asyncio.run(backend.create_edge(a, b, "r1"))
+    asyncio.run(backend.create_edge(b, c, "r2"))
+    result = asyncio.run(backend.subgraph([a], depth=2, relation_type="r1"))
+    node_ids = {n["id"] for n in result["nodes"]}
+    assert node_ids == {a, b}
+    assert c not in node_ids
+
+
 def test_subgraph_empty_node_ids_returns_empty_result(tmp_path):
     """subgraph([]) short-circuits to an empty result without querying for edges."""
     backend = _backend(tmp_path)

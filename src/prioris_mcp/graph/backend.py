@@ -134,7 +134,9 @@ class GraphSearchBackend(ABC):
     ) -> list[dict]:
         """Unfiltered by default - browses every Concept node, paginated, newest first.
 
-        `match` only takes effect when `text` is given (case-insensitive over label+aliases).
+        `match` only takes effect when `text` is given, matching case-insensitively against
+        `label` only - alias-matching is a deferred follow-up; `find_concepts`'s fuzzy matching
+        already covers aliases (see above) for the caller-driven-dedup use case.
         """
 
     @abstractmethod

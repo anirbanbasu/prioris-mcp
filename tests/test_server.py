@@ -4496,6 +4496,41 @@ class TestGraphQuery(TestMCPServer):
         with pytest.raises(ToolError):
             asyncio.run(self.call_tool("research_graph_query", mcp_client, op="not_a_real_op"))
 
+    def test_negative_offset_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="neighbors", node_id="x", offset=-1))
+
+    def test_non_positive_limit_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="neighbors", node_id="x", limit=0))
+
+    def test_subgraph_depth_above_max_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="subgraph", node_ids=["x"], depth=31))
+
+    def test_subgraph_negative_depth_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="subgraph", node_ids=["x"], depth=-1))
+
+    def test_find_concepts_non_positive_limit_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(self.call_tool("research_graph_query", mcp_client, op="find_concepts", query="x", limit=0))
+
+    def test_find_concepts_defaults_limit_to_twenty(self, mcp_client):
+        """find_concepts's tool-level `limit` sentinel default (None) resolves to 20, not neighbors' 50."""
+
+        async def scenario():
+            for i in range(25):
+                await self.call_tool(
+                    "research_graph_write", mcp_client, op="create_concept", label=f"fuzzy limit concept {i}"
+                )
+            return await self.call_tool(
+                "research_graph_query", mcp_client, op="find_concepts", query="fuzzy limit concept"
+            )
+
+        result = asyncio.run(scenario())
+        assert len(result.structured_content["result"]["matches"]) <= 20
+
 
 class TestGraphAnalyze(TestMCPServer):
     """research_graph_analyze op-dispatch coverage.
@@ -4736,6 +4771,73 @@ class TestGraphAnalyze(TestMCPServer):
         with pytest.raises(ToolError):
             asyncio.run(self.call_tool("research_graph_analyze", mcp_client, op="not_a_real_op", node_ids=["x"]))
 
+    def test_betweenness_centrality_depth_above_max_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(
+                self.call_tool(
+                    "research_graph_analyze",
+                    mcp_client,
+                    op="betweenness_centrality",
+                    node_ids=["x"],
+                    depth=31,
+                )
+            )
+
+    def test_betweenness_centrality_negative_depth_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(
+                self.call_tool(
+                    "research_graph_analyze",
+                    mcp_client,
+                    op="betweenness_centrality",
+                    node_ids=["x"],
+                    depth=-1,
+                )
+            )
+
+    def test_communities_depth_above_max_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(
+                self.call_tool("research_graph_analyze", mcp_client, op="communities", node_ids=["x"], depth=31)
+            )
+
+    def test_paths_max_depth_above_max_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(
+                self.call_tool(
+                    "research_graph_analyze",
+                    mcp_client,
+                    op="paths",
+                    from_id="x",
+                    to_id="y",
+                    max_depth=31,
+                )
+            )
+
+    def test_steiner_tree_max_depth_above_max_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(
+                self.call_tool("research_graph_analyze", mcp_client, op="steiner_tree", node_ids=["x"], max_depth=31)
+            )
+
+    def test_predict_links_max_depth_above_max_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(
+                self.call_tool("research_graph_analyze", mcp_client, op="predict_links", node_ids=["x"], max_depth=31)
+            )
+
+    def test_reachable_max_depth_above_max_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(
+                self.call_tool("research_graph_analyze", mcp_client, op="reachable", node_ids=["x"], max_depth=31)
+            )
+
+    def test_reachable_negative_max_depth_is_invalid_request(self, mcp_client):
+        with pytest.raises(ToolError):
+            asyncio.run(
+                self.call_tool("research_graph_analyze", mcp_client, op="reachable", node_ids=["x"], max_depth=-1)
+            )
+
 
 class TestGraphConceptsResource(TestMCPServer):
     """research://graph/concepts resource coverage.
@@ -4754,7 +4856,7 @@ class TestGraphConceptsResource(TestMCPServer):
             return payload
 
         payload = asyncio.run(scenario())
-        assert any(c["label"] == "resource test concept" for c in payload)
+        assert any(c["label"] == "resource test concept" for c in payload["concepts"])
 
     def test_limit_is_clamped_to_configured_max(self, mcp_client, monkeypatch: "pytest.MonkeyPatch"):
         monkeypatch.setattr(EnvVars, "PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT", 1)
@@ -4767,7 +4869,15 @@ class TestGraphConceptsResource(TestMCPServer):
             return payload
 
         payload = asyncio.run(scenario())
-        assert len(payload) <= 1
+        assert len(payload["concepts"]) <= 1
+
+    def test_negative_offset_is_invalid_request(self, mcp_client):
+        with pytest.raises(MCPError):
+            asyncio.run(self.read_resource("research://graph/concepts?offset=-1", mcp_client))
+
+    def test_non_positive_limit_is_invalid_request(self, mcp_client):
+        with pytest.raises(MCPError):
+            asyncio.run(self.read_resource("research://graph/concepts?limit=0", mcp_client))
 
 
 class TestGraphExportResource(TestMCPServer):
@@ -4807,7 +4917,9 @@ class TestGraphExportResource(TestMCPServer):
         async def scenario():
             await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="graphml test concept")
             result = await self.read_resource("research://graph/export?format=graphml", mcp_client)
-            return result[0].text
+            return result
 
-        content = asyncio.run(scenario())
+        result = asyncio.run(scenario())
+        content = result[0].text
         assert content.strip().startswith("<?xml") or "<graphml" in content
+        assert result[0].mime_type == "text/xml"
