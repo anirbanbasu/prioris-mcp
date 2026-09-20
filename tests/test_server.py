@@ -4768,3 +4768,46 @@ class TestGraphConceptsResource(TestMCPServer):
 
         payload = asyncio.run(scenario())
         assert len(payload) <= 1
+
+
+class TestGraphExportResource(TestMCPServer):
+    """research://graph/export resource coverage.
+
+    Wraps each scenario in `asyncio.run(...)` rather than declaring `async def test_...` directly:
+    this suite has no pytest-asyncio/anyio-marker plugin installed, so bare coroutine test
+    functions aren't natively collectible - see the rest of this file's `asyncio.run(scenario())`
+    convention (e.g. `TestGraphQuery`).
+    """
+
+    def test_cypher_json_default_format(self, mcp_client):
+        async def scenario():
+            pointer = await self.call_tool(
+                "research_graph_write", mcp_client, op="upsert_pointer", ref_type="chunk", ref_id="export-test"
+            )
+            concept = await self.call_tool(
+                "research_graph_write", mcp_client, op="create_concept", label="export test concept"
+            )
+            await self.call_tool(
+                "research_graph_write",
+                mcp_client,
+                op="create_edge",
+                from_id=pointer.structured_content["id"],
+                to_id=concept.structured_content["id"],
+                relation_type="discussed_in",
+            )
+            result = await self.read_resource("research://graph/export", mcp_client)
+            return pointer, concept, json.loads(result[0].text)
+
+        pointer, concept, payload = asyncio.run(scenario())
+        node_ids = {n["id"] for n in payload["nodes"]}
+        assert {pointer.structured_content["id"], concept.structured_content["id"]}.issubset(node_ids)
+        assert len(payload["edges"]) >= 1
+
+    def test_graphml_format_is_valid_xml(self, mcp_client):
+        async def scenario():
+            await self.call_tool("research_graph_write", mcp_client, op="create_concept", label="graphml test concept")
+            result = await self.read_resource("research://graph/export?format=graphml", mcp_client)
+            return result[0].text
+
+        content = asyncio.run(scenario())
+        assert content.strip().startswith("<?xml") or "<graphml" in content

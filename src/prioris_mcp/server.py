@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import re
@@ -12,6 +13,7 @@ from importlib.metadata import version
 from typing import Annotated, Any, ClassVar, Literal, cast
 
 import httpx
+import networkx
 import uvicorn
 from fastmcp import Context, FastMCP
 from fastmcp.server.middleware.caching import (
@@ -217,6 +219,7 @@ class PriorisMCP(MCPMixin):
         {"fn": "read_notes_export_resource", "uri": "notes://{note_id}/export"},
         {"fn": "read_vector_rebuild_status_resource", "uri": "research://vector-index/rebuild-status"},
         {"fn": "read_graph_concepts_resource", "uri": "research://graph/concepts{?text,match,offset,limit}"},
+        {"fn": "read_graph_export_resource", "uri": "research://graph/export{?format}"},
     ]
 
     def __init__(self) -> None:
@@ -1461,6 +1464,38 @@ class PriorisMCP(MCPMixin):
         effective_limit = min(limit, EnvVars.PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT)
         concepts = await self._graph_backend.list_concepts(text=text, match=match, offset=offset, limit=effective_limit)
         return json.dumps(concepts)
+
+    async def read_graph_export_resource(self, format: Literal["cypher_json", "graphml"] = "cypher_json") -> str:
+        """Export the entire corpus-wide graph, unfiltered - for diagnostic/visualization use.
+
+        Not scoped to a seed set the way subgraph() (research_graph_query) is - see
+        docs/requirement-specification/search/03-graph-search.md#diagnostic-and-visualization-export-export_graph.
+        `cypher_json` returns the same {"nodes", "edges"} shape every other JSON-returning read in
+        this chapter uses; `graphml` serialises via NetworkX for direct use in Gephi/Cytoscape -
+        GraphML only supports scalar attribute types, so dict/list-valued attributes (`metadata`,
+        `aliases`) are JSON-stringified first, and attributes with a `None` value (e.g. `weight` on
+        an edge without one, or a concept without a `description`) are dropped entirely, since
+        GraphML has no representation for a null scalar.
+        """
+        raw = await self._graph_backend.export_graph()
+        if format == "cypher_json":
+            return json.dumps(raw)
+        graph = self._graph_algorithms.materialize(raw["nodes"], raw["edges"])
+        for _, data in graph.nodes(data=True):
+            for key, value in list(data.items()):
+                if isinstance(value, dict | list):
+                    data[key] = json.dumps(value)
+                elif value is None:
+                    del data[key]
+        for _, _, data in graph.edges(data=True):
+            for key, value in list(data.items()):
+                if isinstance(value, dict | list):
+                    data[key] = json.dumps(value)
+                elif value is None:
+                    del data[key]
+        buffer = io.BytesIO()
+        networkx.write_graphml(graph, buffer)
+        return buffer.getvalue().decode("utf-8")
 
 
 def _vector_reconciliation_lifespan(

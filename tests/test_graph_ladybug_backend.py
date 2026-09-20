@@ -1,6 +1,6 @@
 import asyncio
 
-from prioris_mcp.errors import NotFoundError
+from prioris_mcp.errors import MetadataConflictError, NotFoundError
 from prioris_mcp.graph.ladybug_backend import LadybugSearchBackend
 
 
@@ -21,6 +21,27 @@ def test_upsert_pointer_is_idempotent_on_same_ref(tmp_path):
     first = asyncio.run(backend.upsert_pointer("chunk", "abc123"))
     second = asyncio.run(backend.upsert_pointer("chunk", "abc123"))
     assert first == second
+
+
+def test_upsert_pointer_merges_metadata_on_existing_node(tmp_path):
+    """A second upsert_pointer call with new, non-conflicting metadata merges it into the existing node."""
+    backend = _backend(tmp_path)
+    node_id = asyncio.run(backend.upsert_pointer("chunk", "abc123", metadata={"source": "human"}))
+    second_id = asyncio.run(backend.upsert_pointer("chunk", "abc123", metadata={"page": "1"}))
+    assert second_id == node_id
+    node = asyncio.run(backend.get_node(node_id))
+    assert node["metadata"] == {"source": "human", "page": "1"}
+
+
+def test_upsert_pointer_raises_metadata_conflict_on_differing_value(tmp_path):
+    """A second upsert_pointer call with a differing value for an already-set metadata key raises."""
+    backend = _backend(tmp_path)
+    asyncio.run(backend.upsert_pointer("chunk", "abc123", metadata={"source": "human"}))
+    try:
+        asyncio.run(backend.upsert_pointer("chunk", "abc123", metadata={"source": "machine"}))
+        raise AssertionError("expected MetadataConflictError")
+    except MetadataConflictError:
+        pass
 
 
 def test_reopening_same_path_does_not_recreate_schema(tmp_path):
@@ -59,6 +80,15 @@ def test_update_concept_partial_update_leaves_unset_fields_unchanged(tmp_path):
     assert node["label"] == "renamed"
     assert node["aliases"] == ["activation checkpointing"]
     assert node["description"] == "d"
+
+
+def test_update_concept_merges_metadata_into_existing(tmp_path):
+    """update_concept with a `metadata` kwarg merges it into the concept's existing metadata."""
+    backend = _backend(tmp_path)
+    node_id = asyncio.run(backend.create_concept("gradient checkpointing", metadata={"source": "human"}))
+    asyncio.run(backend.update_concept(node_id, metadata={"page": "1"}))
+    node = asyncio.run(backend.get_node(node_id))
+    assert node["metadata"] == {"source": "human", "page": "1"}
 
 
 def test_update_concept_raises_not_found_for_missing_node(tmp_path):
