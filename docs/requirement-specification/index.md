@@ -89,6 +89,7 @@ The first capability built on top of v1's storage redesign rather than a v1 amen
 - [Search](search/index.md) — the retrieval mechanisms over content already fetched into storage, split into:
     - [Full-text search](search/01-full-text-search.md) — `SearchIndex`, literal/lexical keyword matching (v1).
     - [Vector search](search/02-vector-search.md) — `VectorSearchBackend`, embedding-based semantic search (v3).
+    - [Graph search](search/03-graph-search.md) — `GraphSearchBackend`, a single-layer knowledge graph over `Pointer`/`Concept` nodes, plus a NetworkX algorithm layer.
 - [Functional requirements](03-functional-requirements.md) — the concrete tools/resources exposed for arXiv and Europe PMC in v1, and notes tools/the export resource in v2, in behavioural terms.
 - [Non-functional requirements](04-non-functional-requirements.md) — cross-cutting qualities, currently concurrency.
 - [Security](05-security.md) — untrusted-identifier and untrusted-content requirements.
