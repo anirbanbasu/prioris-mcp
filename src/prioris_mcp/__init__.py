@@ -160,6 +160,22 @@ class EnvVars:
         default=_default_data_home / "prioris-mcp" / "vectors",
     )
 
+    PRIORIS_MCP_GRAPH_DIR = env.path(
+        "PRIORIS_MCP_GRAPH_DIR",
+        # Sibling of PRIORIS_MCP_VECTOR_DIR, its own root - see
+        # docs/requirement-specification/search/03-graph-search.md#storage-layout-one-corpus-wide-graph-not-per-document-or-per-note.
+        default=_default_data_home / "prioris-mcp" / "graph",
+    )
+
+    PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT: int = env.int(
+        "PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT",
+        # Safety ceiling against a pathological unfiltered list_concepts call, not the expected
+        # per-page size (that default stays 50) - see
+        # docs/requirement-specification/search/03-graph-search.md#browsing-the-concept-vocabulary-list_concepts.
+        default=500,
+        validate=Range(min=1, max=1000),
+    )
+
     PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY: int = env.int(
         "PRIORIS_MCP_EMBEDDING_MAX_CONCURRENCY",
         # Bounds concurrently-running background embedding tasks - both a live per-document

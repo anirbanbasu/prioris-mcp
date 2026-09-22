@@ -97,10 +97,16 @@ class LiveResourceCacheBypassMiddleware(Middleware):
     static reference table (arXiv categories), so a blanket read-resource cache is safe for them.
     `notes://*` resources are mutable (create/update/delete), and
     `research://vector-index/rebuild-status` is live in-process progress that callers poll while
-    reconciliation runs - both need every read to reach the real handler. `ReadResourceSettings`
-    has no per-URI included_/excluded_ option (unlike `CallToolSettings`), so this bypasses the
-    cache directly: dispatching with `run_middleware=False` invokes the resource's handler without
-    going through any middleware, including `ResponseCachingMiddleware`. Must be registered before
+    reconciliation runs - both need every read to reach the real handler. `research://graph/concepts`
+    and `research://graph/export` are also mutable - both are written by `research_graph_write` -
+    and bypass the cache by the same `research://graph/` URI-prefix mechanism as `notes://*`, not
+    via `_EXACT_URIS`: both are templated with query strings (e.g.
+    `research://graph/concepts?limit=10`), so exact-string membership in `_EXACT_URIS` would not
+    match most real reads. `_EXACT_URIS` stays reserved for the one exact, paramless URI
+    `research://vector-index/rebuild-status`. `ReadResourceSettings` has no per-URI
+    included_/excluded_ option (unlike `CallToolSettings`), so this bypasses the cache directly:
+    dispatching with `run_middleware=False` invokes the resource's handler without going through
+    any middleware, including `ResponseCachingMiddleware`. Must be registered before
     `ResponseCachingMiddleware` in `server.py`'s `app()` chain.
     """
 
@@ -109,7 +115,7 @@ class LiveResourceCacheBypassMiddleware(Middleware):
     async def on_read_resource(self, context, call_next):
         """Read bypassed URIs fresh every time; everything else passes through unchanged."""
         uri = str(context.message.uri)
-        if not uri.startswith("notes://") and uri not in self._EXACT_URIS:
+        if not uri.startswith(("notes://", "research://graph/")) and uri not in self._EXACT_URIS:
             return await call_next(context)
         if context.fastmcp_context is None:  # pragma: no cover - a live resource read always carries a context
             return await call_next(context)

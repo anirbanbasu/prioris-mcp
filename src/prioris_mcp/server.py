@@ -1,5 +1,7 @@
 import asyncio
 import contextlib
+import io
+import json
 import logging
 import re
 import sqlite3
@@ -8,11 +10,13 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from importlib.metadata import version
-from typing import Annotated, ClassVar, Literal, cast
+from typing import Annotated, Any, ClassVar, Final, Literal, cast
 
 import httpx
+import networkx
 import uvicorn
 from fastmcp import Context, FastMCP
+from fastmcp.resources import ResourceContent, ResourceResult
 from fastmcp.server.middleware.caching import (
     CallToolSettings,
     GetPromptSettings,
@@ -29,6 +33,8 @@ from starlette.middleware.cors import CORSMiddleware
 from prioris_mcp import PACKAGE_NAME, EnvVars
 from prioris_mcp.discovery.openalex import OPENALEX_MAX_RESULTS, OpenAlexClient
 from prioris_mcp.errors import InvalidRequestError, NotFoundError
+from prioris_mcp.graph.algorithms import GraphAlgorithms
+from prioris_mcp.graph.ladybug_backend import LadybugSearchBackend
 from prioris_mcp.middleware import (
     DecodeBinaryResourceContentMiddleware,
     EncodeBinaryResourceContentMiddleware,
@@ -54,6 +60,24 @@ from prioris_mcp.models.common import (
 )
 from prioris_mcp.models.discovery import DiscoveryHit, DiscoveryResult
 from prioris_mcp.models.europepmc import EuropePmcFetchMetadataResult, EuropePmcSearchResult
+from prioris_mcp.models.graph import (
+    CentralityResult,
+    CommunitiesResult,
+    ConceptMatchesResult,
+    ConceptNode,
+    ConceptsResult,
+    EdgeResult,
+    GraphAnalyzeResult,
+    GraphQueryResult,
+    GraphWriteResult,
+    NeighborsResult,
+    NodeResult,
+    PathsResult,
+    PredictedLinksResult,
+    ReachableResult,
+    SteinerTreeResult,
+    SubgraphResult,
+)
 from prioris_mcp.models.localfile import LocalFileBeginUploadResult, LocalFileFetchResult, LocalFileUploadChunkResult
 from prioris_mcp.models.notes import Anchor, AuthorFilter, Note, NotesSearchResult, PagedNotes
 from prioris_mcp.models.vector import (
@@ -92,6 +116,8 @@ from prioris_mcp.vector.sqlite_vec_backend import SqliteVecDocumentBackend, Sqli
 
 package_version = version(PACKAGE_NAME)
 logger = logging.getLogger(__name__)
+
+_MAX_GRAPH_DEPTH: Final[int] = 30  # hard engine limit on variable-length relationship patterns
 
 
 class PriorisMCP(MCPMixin):
@@ -174,6 +200,13 @@ class PriorisMCP(MCPMixin):
             "annotations": {"readOnlyHint": False, "destructiveHint": True},
         },
         {"fn": "research_notes_search", "tags": ["research", "notes"], "annotations": {"readOnlyHint": True}},
+        {
+            "fn": "research_graph_write",
+            "tags": ["research", "graph"],
+            "annotations": {"readOnlyHint": False, "destructiveHint": True},
+        },
+        {"fn": "research_graph_query", "tags": ["research", "graph"], "annotations": {"readOnlyHint": True}},
+        {"fn": "research_graph_analyze", "tags": ["research", "graph"], "annotations": {"readOnlyHint": True}},
     ]
 
     resources: ClassVar[list[dict]] = [
@@ -190,6 +223,8 @@ class PriorisMCP(MCPMixin):
         {"fn": "read_openalex_work_types_resource", "uri": "research://openalex/work-types"},
         {"fn": "read_notes_export_resource", "uri": "notes://{note_id}/export"},
         {"fn": "read_vector_rebuild_status_resource", "uri": "research://vector-index/rebuild-status"},
+        {"fn": "read_graph_concepts_resource", "uri": "research://graph/concepts{?text,match,offset,limit}"},
+        {"fn": "read_graph_export_resource", "uri": "research://graph/export{?format}"},
     ]
 
     def __init__(self) -> None:
@@ -277,6 +312,9 @@ class PriorisMCP(MCPMixin):
             "fts": NotesFtsMechanism(self._notes_search_index),
             "vector": NotesVectorMechanism(self._note_vector_backend, self._embedding_backend),
         }
+        graph_dir = grouping_dir(EnvVars.PRIORIS_MCP_GRAPH_DIR, DEFAULT_GROUPING)
+        self._graph_backend = LadybugSearchBackend(graph_dir / "graph.ladybug")
+        self._graph_algorithms = GraphAlgorithms(self._graph_backend)
         self._rebuild_progress = VectorRebuildProgress()
         self._reconciliation_task: asyncio.Task | None = None
 
@@ -941,6 +979,218 @@ class PriorisMCP(MCPMixin):
 
         return NotesSearchResult(fts=fts_result, vector=vector_result, index_status=index_status)
 
+    async def research_graph_write(
+        self,
+        ctx: Context,
+        op: Annotated[
+            Literal[
+                "upsert_pointer",
+                "create_concept",
+                "update_concept",
+                "delete_node",
+                "create_edge",
+                "update_edge",
+                "delete_edge",
+            ],
+            Field(description="Which graph write operation to perform"),
+        ],
+        ref_type: Annotated[Literal["chunk", "document", "note"] | None, Field(default=None)] = None,
+        ref_id: Annotated[str | None, Field(default=None)] = None,
+        node_id: Annotated[str | None, Field(default=None, description="Target node id for update/delete ops")] = None,
+        label: Annotated[str | None, Field(default=None)] = None,
+        aliases: Annotated[list[str] | None, Field(default=None)] = None,
+        description: Annotated[str | None, Field(default=None)] = None,
+        from_id: Annotated[str | None, Field(default=None)] = None,
+        to_id: Annotated[str | None, Field(default=None)] = None,
+        relation_type: Annotated[str | None, Field(default=None)] = None,
+        weight: Annotated[float | None, Field(default=None)] = None,
+        edge_id: Annotated[str | None, Field(default=None, description="Target edge id for update/delete ops")] = None,
+        metadata: Annotated[dict[str, Any] | None, Field(default=None)] = None,
+    ) -> GraphWriteResult:
+        """Create/update/delete a graph node or edge - see op for which fields apply."""
+        backend = self._graph_backend
+        if op == "upsert_pointer":
+            if ref_type is None or ref_id is None:
+                raise InvalidRequestError("upsert_pointer requires ref_type and ref_id")
+            result_id = await backend.upsert_pointer(ref_type, ref_id, metadata=metadata)
+        elif op == "create_concept":
+            if label is None:
+                raise InvalidRequestError("create_concept requires label")
+            result_id = await backend.create_concept(label, aliases=aliases, description=description, metadata=metadata)
+        elif op == "update_concept":
+            if node_id is None:
+                raise InvalidRequestError("update_concept requires node_id")
+            await backend.update_concept(
+                node_id, label=label, aliases=aliases, description=description, metadata=metadata
+            )
+            result_id = node_id
+        elif op == "delete_node":
+            if node_id is None:
+                raise InvalidRequestError("delete_node requires node_id")
+            await backend.delete_node(node_id)
+            result_id = node_id
+        elif op == "create_edge":
+            if from_id is None or to_id is None or relation_type is None:
+                raise InvalidRequestError("create_edge requires from_id, to_id, and relation_type")
+            result_id = await backend.create_edge(from_id, to_id, relation_type, weight=weight, metadata=metadata)
+        elif op == "update_edge":
+            if edge_id is None:
+                raise InvalidRequestError("update_edge requires edge_id")
+            await backend.update_edge(edge_id, relation_type=relation_type, weight=weight, metadata=metadata)
+            result_id = edge_id
+        else:  # op == "delete_edge"
+            if edge_id is None:
+                raise InvalidRequestError("delete_edge requires edge_id")
+            await backend.delete_edge(edge_id)
+            result_id = edge_id
+        return GraphWriteResult(op=op, id=result_id)
+
+    @staticmethod
+    def _validate_graph_depth(value: int, name: str) -> None:
+        """Shared `depth`/`max_depth` bound check for research_graph_query/research_graph_analyze.
+
+        Split out to a helper (mirroring `_validate_notes_search_params`'s rationale) purely to
+        keep each caller's own cyclomatic complexity under the ruff-enforced ceiling - every
+        op-branch needs this same check, and inlining it repeatedly pushes both dispatcher methods
+        over the limit.
+
+        Raises:
+            InvalidRequestError: value outside [0, _MAX_GRAPH_DEPTH].
+        """
+        if not 0 <= value <= _MAX_GRAPH_DEPTH:
+            raise InvalidRequestError(f"{name} must be between 0 and {_MAX_GRAPH_DEPTH}, got {value}")
+
+    async def research_graph_query(
+        self,
+        ctx: Context,
+        op: Annotated[
+            Literal["get_node", "get_edge", "neighbors", "find_concepts", "subgraph"],
+            Field(description="Which graph read operation to perform"),
+        ],
+        node_id: Annotated[str | None, Field(default=None)] = None,
+        edge_id: Annotated[str | None, Field(default=None)] = None,
+        direction: Annotated[Literal["out", "in", "both"], Field(default="both")] = "both",
+        relation_type: Annotated[str | None, Field(default=None)] = None,
+        query: Annotated[str | None, Field(default=None, description="Required for find_concepts")] = None,
+        node_ids: Annotated[list[str] | None, Field(default=None, description="Required for subgraph")] = None,
+        depth: Annotated[int, Field(default=1)] = 1,
+        offset: Annotated[int, Field(default=0)] = 0,
+        limit: Annotated[
+            int | None,
+            Field(default=None, description="Defaults to 50 for neighbors, 20 for find_concepts"),
+        ] = None,
+    ) -> GraphQueryResult:
+        """Read a single node/edge, a node's neighbors, fuzzy concept candidates, or a subgraph."""
+        backend = self._graph_backend
+        if offset < 0:
+            raise InvalidRequestError(f"offset must be >= 0, got {offset}")
+        if op == "get_node":
+            if node_id is None:
+                raise InvalidRequestError("get_node requires node_id")
+            return NodeResult(op="get_node", node=await backend.get_node(node_id))
+        if op == "get_edge":
+            if edge_id is None:
+                raise InvalidRequestError("get_edge requires edge_id")
+            return EdgeResult(op="get_edge", edge=await backend.get_edge(edge_id))
+        if op == "neighbors":
+            if node_id is None:
+                raise InvalidRequestError("neighbors requires node_id")
+            effective_limit = 50 if limit is None else limit
+            if limit is not None and limit <= 0:
+                raise InvalidRequestError(f"limit must be > 0, got {limit}")
+            hops = await backend.neighbors(
+                node_id, direction=direction, relation_type=relation_type, offset=offset, limit=effective_limit
+            )
+            return NeighborsResult(op="neighbors", matches=hops)
+        if op == "find_concepts":
+            if query is None:
+                raise InvalidRequestError("find_concepts requires query")
+            effective_limit = 20 if limit is None else limit
+            if limit is not None and limit <= 0:
+                raise InvalidRequestError(f"limit must be > 0, got {limit}")
+            matches = await backend.find_concepts(query, limit=effective_limit)
+            return ConceptMatchesResult(op="find_concepts", matches=matches)
+        # op == "subgraph"
+        if not node_ids:
+            raise InvalidRequestError("subgraph requires node_ids")
+        self._validate_graph_depth(depth, "depth")
+        raw = await backend.subgraph(node_ids, depth=depth, relation_type=relation_type)
+        return SubgraphResult(op="subgraph", nodes=raw["nodes"], edges=raw["edges"])
+
+    async def research_graph_analyze(
+        self,
+        ctx: Context,
+        op: Annotated[
+            Literal[
+                "betweenness_centrality",
+                "pagerank",
+                "communities",
+                "paths",
+                "reachable",
+                "steiner_tree",
+                "predict_links",
+            ],
+            Field(description="Which graph algorithm to run"),
+        ],
+        node_ids: Annotated[list[str] | None, Field(default=None)] = None,
+        from_id: Annotated[str | None, Field(default=None, description="Required for paths")] = None,
+        to_id: Annotated[str | None, Field(default=None, description="Required for paths")] = None,
+        depth: Annotated[int, Field(default=1)] = 1,
+        max_depth: Annotated[
+            int | None, Field(default=None, description="Required for paths/reachable/steiner_tree/predict_links")
+        ] = None,
+        max_paths: Annotated[int, Field(default=20)] = 20,
+        top_k: Annotated[int, Field(default=20)] = 20,
+        direction: Annotated[Literal["out", "in"], Field(default="out")] = "out",
+        relation_type: Annotated[str | None, Field(default=None)] = None,
+        seed: Annotated[int | None, Field(default=None)] = None,
+    ) -> GraphAnalyzeResult:
+        """Run one of the seven fixed graph algorithms over a depth-bounded neighborhood of node_ids."""
+        algorithms = self._graph_algorithms
+        if op in ("betweenness_centrality", "pagerank"):
+            if not node_ids:
+                raise InvalidRequestError(f"{op} requires node_ids")
+            self._validate_graph_depth(depth, "depth")
+            fn = algorithms.betweenness_centrality if op == "betweenness_centrality" else algorithms.pagerank
+            scores = await fn(node_ids, depth=depth, relation_type=relation_type)
+            return CentralityResult(op=op, scores=scores)
+        if op == "communities":
+            if not node_ids:
+                raise InvalidRequestError("communities requires node_ids")
+            self._validate_graph_depth(depth, "depth")
+            communities = await algorithms.communities(node_ids, depth=depth, relation_type=relation_type, seed=seed)
+            return CommunitiesResult(op="communities", communities=communities)
+        if op == "paths":
+            if from_id is None or to_id is None or max_depth is None:
+                raise InvalidRequestError("paths requires from_id, to_id, and max_depth")
+            self._validate_graph_depth(max_depth, "max_depth")
+            paths = await algorithms.paths(
+                from_id, to_id, max_depth=max_depth, max_paths=max_paths, relation_type=relation_type
+            )
+            return PathsResult(op="paths", paths=paths)
+        if op == "reachable":
+            if not node_ids or max_depth is None:
+                raise InvalidRequestError("reachable requires node_ids (one seed) and max_depth")
+            self._validate_graph_depth(max_depth, "max_depth")
+            reached = await algorithms.reachable(
+                node_ids[0], direction=direction, max_depth=max_depth, relation_type=relation_type
+            )
+            return ReachableResult(op="reachable", node_ids=reached)
+        if op == "steiner_tree":
+            if not node_ids or max_depth is None:
+                raise InvalidRequestError("steiner_tree requires node_ids and max_depth")
+            self._validate_graph_depth(max_depth, "max_depth")
+            raw = await algorithms.steiner_tree(node_ids, max_depth=max_depth, relation_type=relation_type)
+            return SteinerTreeResult(op="steiner_tree", nodes=raw["nodes"], edges=raw["edges"])
+        # op == "predict_links"
+        if not node_ids or max_depth is None:
+            raise InvalidRequestError("predict_links requires node_ids and max_depth")
+        self._validate_graph_depth(max_depth, "max_depth")
+        predictions = await algorithms.predict_links(
+            node_ids, max_depth=max_depth, top_k=top_k, relation_type=relation_type
+        )
+        return PredictedLinksResult(op="predict_links", predictions=predictions)
+
     async def _force_vector_reconnect(self) -> None:
         """Force both vector backends' `_connect()` to run now, so any model-mismatch drop happens here.
 
@@ -1235,6 +1485,61 @@ class PriorisMCP(MCPMixin):
                 active=progress.notes.active,
             ),
         ).model_dump_json()
+
+    async def read_graph_concepts_resource(
+        self,
+        text: str | None = None,
+        match: Literal["starts_with", "contains", "ends_with"] = "contains",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> str:
+        """Browse the entire Concept vocabulary, paginated - the fallback for cross-lingual/synonym dedup.
+
+        `limit` is clamped to PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT regardless of what the caller
+        requests. Returns the `ConceptsResult` serialised to JSON - see `read_markdown_resource`
+        for why resources here return pre-serialised JSON strings.
+        """
+        if offset < 0:
+            raise InvalidRequestError(f"offset must be >= 0, got {offset}")
+        if limit <= 0:
+            raise InvalidRequestError(f"limit must be > 0, got {limit}")
+        effective_limit = min(limit, EnvVars.PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT)
+        concepts = await self._graph_backend.list_concepts(text=text, match=match, offset=offset, limit=effective_limit)
+        return ConceptsResult(concepts=[ConceptNode(**concept) for concept in concepts]).model_dump_json()
+
+    async def read_graph_export_resource(
+        self, format: Literal["cypher_json", "graphml"] = "cypher_json"
+    ) -> str | ResourceResult:
+        """Export the entire corpus-wide graph, unfiltered - for diagnostic/visualization use.
+
+        Not scoped to a seed set the way subgraph() (research_graph_query) is - see
+        docs/requirement-specification/search/03-graph-search.md#diagnostic-and-visualization-export-export_graph.
+        `cypher_json` returns the same {"nodes", "edges"} shape every other JSON-returning read in
+        this chapter uses; `graphml` serialises via NetworkX for direct use in Gephi/Cytoscape -
+        GraphML only supports scalar attribute types, so dict/list-valued attributes (`metadata`,
+        `aliases`) are JSON-stringified first, and attributes with a `None` value (e.g. `weight` on
+        an edge without one, or a concept without a `description`) are dropped entirely, since
+        GraphML has no representation for a null scalar.
+        """
+        raw = await self._graph_backend.export_graph()
+        if format == "cypher_json":
+            return json.dumps(raw)
+        graph = self._graph_algorithms.materialize(raw["nodes"], raw["edges"])
+        for _, data in graph.nodes(data=True):
+            for key, value in list(data.items()):
+                if isinstance(value, dict | list):
+                    data[key] = json.dumps(value)
+                elif value is None:
+                    del data[key]
+        for _, _, data in graph.edges(data=True):
+            for key, value in list(data.items()):
+                if isinstance(value, dict | list):
+                    data[key] = json.dumps(value)
+                elif value is None:
+                    del data[key]
+        buffer = io.BytesIO()
+        networkx.write_graphml(graph, buffer)
+        return ResourceResult([ResourceContent(buffer.getvalue().decode("utf-8"), mime_type="text/xml")])
 
 
 def _vector_reconciliation_lifespan(
