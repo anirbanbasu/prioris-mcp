@@ -75,11 +75,18 @@ rectangle "PriorisMCP server" as PriorisMCP {
         database "SqliteVecNoteBackend\nnotes-vectors.sqlite3" as VecNotes
     }
 
+    rectangle "Graph search" as Graph {
+        component "LadybugSearchBackend\n(GraphSearchBackend, embedded Cypher)" as GraphBackend
+        component "GraphAlgorithms\n(NetworkX: centrality, pagerank,\ncommunities, paths, reachable,\nsteiner tree, link prediction)" as GraphAlgo
+        database "graph.ladybug\nPointer / Concept nodes,\ntyped edges" as GraphDb
+    }
+
     MW --> Core
     Core --> Router
     Core --> NotesDb : research_notes_* /\nnotes://{note_id}/export
     Core --> OpenAlexClient : research_discovery
     Core --> Sched : reconcile_vector_index()\nat startup, and on every\nparse / note write
+    Core --> GraphBackend : research_graph_write /\nresearch_graph_query /\nresearch_graph_analyze,\nresearch://graph/concepts,\nresearch://graph/export
     Router --> Arxiv
     Router --> EuropePmc
     Router --> LocalFile
@@ -101,6 +108,8 @@ rectangle "PriorisMCP server" as PriorisMCP {
     Sched --> VecNotes : index_entries\n(notes)
     Catalogue ..> Sched : chunk text
     NotesDb ..> Sched : note text
+    GraphAlgo --> GraphBackend : subgraph() materialized into\na NetworkX MultiDiGraph
+    GraphBackend --> GraphDb
 }
 
 database "arXiv API" as ArxivApi

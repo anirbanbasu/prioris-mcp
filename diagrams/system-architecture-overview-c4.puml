@@ -16,10 +16,12 @@ System_Boundary(c1, "PriorisMCP") {
     ContainerDb(search, "Search index", "SQLite FTS5", "Full-text search over persisted content")
     ContainerDb(notes, "Notes storage", "SQLite (notes.sqlite + FTS5 notes-search.sqlite3)", "Persists user-authored notes, independent of fetched content")
     ContainerDb(vectors, "Vector index", "SQLite (sqlite-vec), fastembed", "Embedding-based similarity search over document chunks and notes")
+    ContainerDb(graph, "Graph index", "LadybugDB, embedded Cypher", "Corpus-wide knowledge graph of Pointer/Concept nodes and typed edges, plus NetworkX algorithms")
     Lay_D(server, storage)
     Lay_D(storage, search)
     Lay_D(search, notes)
     Lay_D(notes, vectors)
+    Lay_D(vectors, graph)
 }
 
 System_Ext(arxiv, "arXiv", "Research publication API")
@@ -39,13 +41,17 @@ Rel(server, storage, "Persists and reads")
 Rel(server, search, "Indexes and queries")
 Rel(server, notes, "Persists and reads")
 Rel(server, vectors, "Embeds, indexes and queries")
+Rel(server, graph, "Writes and queries nodes/edges,\nruns algorithms")
 
 note right of server
   PDF OCR defaults to local, air-gapped
   Tesseract (tessdata_path) - the external
   OCR server is opt-in only. Vector-index
   reconciliation runs automatically at
-  startup as a background task.
+  startup as a background task. The graph
+  index is written only through explicit
+  MCP tool calls - nothing is auto-derived
+  from a fetch or parse.
 end note
 
 SHOW_LEGEND()

@@ -8,7 +8,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server to faci
 
 PriorisMCP gives an MCP client a single, uniform way to search, fetch, and parse prior art from research-publication sources — arXiv and Europe PMC in v1, with patents and other prior-art domains anticipated as future work. See the [Software Requirements Specification](requirement-specification/index.md) for the full design.
 
-As explained in the C4 container diagram below, a researcher's MCP client (e.g., Claude Code) talks to the PriorisMCP server over MCP; the server fetches metadata and full text from arXiv and Europe PMC, optionally delegates PDF OCR to an external server, and persists what it fetches to a local SQLite catalogue and full-text search index.
+As explained in the C4 container diagram below, a researcher's MCP client (e.g., Claude Code) talks to the PriorisMCP server over MCP; the server fetches metadata and full text from arXiv and Europe PMC, optionally delegates PDF OCR to an external server, and persists what it fetches to a local SQLite catalogue, full-text and vector search indices, and a corpus-wide knowledge graph.
 
 ![Container diagram for PriorisMCP](images/system-architecture-overview-c4.svg)
 

@@ -12,7 +12,7 @@ Each provider hands full text off to a `ParserBackend` for that format: `LitePar
 
 Parsed Markdown, and the document bytes it was parsed from, are persisted through `FilesystemStorageBackend` into the SQLite catalogue/manifest and indexed into `SqliteFts5SearchIndex` for full-text search — see [Storage](storage/01-document-storage.md) for both. Only `ArxivProvider` and `EuropePmcProvider` make outbound calls to their respective external APIs; `LocalFileProvider` has no external dependency of its own, since the caller supplies the document's bytes directly (see [Local filesystem source](#local-filesystem-source) below).
 
-The diagram also shows two capabilities designed in their own chapters, not repeated here: `OpenAlexClient` and the fetch ladder that back `research_discovery` — see [Discovery](02-discovery.md) — and the `EmbeddingScheduler`/`SqliteVecDocumentBackend`/`SqliteVecNoteBackend` that back embedding-based vector search over document chunks and notes — see [Search → Vector search](search/02-vector-search.md).
+The diagram also shows three capabilities designed in their own chapters, not repeated here: `OpenAlexClient` and the fetch ladder that back `research_discovery` — see [Discovery](02-discovery.md) — the `EmbeddingScheduler`/`SqliteVecDocumentBackend`/`SqliteVecNoteBackend` that back embedding-based vector search over document chunks and notes — see [Search → Vector search](search/02-vector-search.md) — and `LadybugSearchBackend`/`GraphAlgorithms` that back the corpus-wide knowledge graph and its NetworkX algorithm layer — see [Search → Graph search](search/03-graph-search.md).
 
 ## Provider groupings
 
@@ -145,7 +145,7 @@ Unlike `list_fetched`/`search_fetched` above — genuinely separate `StorageBack
 
 ## `GraphSearchBackend`
 
-Covered in full in [Search → Graph search](search/03-graph-search.md) and [ADR-00032](ADR/00032-graph-engine-ladybugdb.md) through [ADR-00041](ADR/00041-graph-tools-not-search-fetched-mode.md); this section only establishes where it sits in the architecture. Not yet reflected in the [architecture diagram](#architecture) above — the diagram update is deferred to alongside implementation, not done speculatively ahead of it.
+Covered in full in [Search → Graph search](search/03-graph-search.md) and [ADR-00032](ADR/00032-graph-engine-ladybugdb.md) through [ADR-00041](ADR/00041-graph-tools-not-search-fetched-mode.md); this section only establishes where it sits in the architecture.
 
 `GraphSearchBackend` is a fourth pluggable-backend abstraction, a sibling to `StorageBackend`/`SearchIndex`/`VectorSearchBackend`, persisting a single corpus-wide property graph over `Pointer` nodes (linking something that already has a home elsewhere — a chunk, document, or note) and `Concept` nodes (owning their own label/aliases/description), plus free-text-typed edges between them — see [Node shape](search/03-graph-search.md#node-shape-two-typed-tables-pointer-and-concept) and [Edge shape](search/03-graph-search.md#edge-shape-one-generic-relationship-table). Where `StorageBackend`/`SearchIndex`/`VectorSearchBackend` all exist to retrieve or index content already fetched, `GraphSearchBackend` records relationships between that content instead — a structurally different question neither full-text nor vector search answers (see [Search → Graph search](search/03-graph-search.md)'s own opening paragraph).
 
