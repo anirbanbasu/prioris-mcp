@@ -30,14 +30,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - None documented yet.
 
+## [0.3.0] - 2026-09-22
+
+### Added
+
+- `research_graph_write`: op-dispatched tool for creating, updating, and deleting graph nodes (a `pointer`, referencing an already-fetched document or note, or a freestanding `concept`) and edges between them, backed by a pluggable `GraphSearchBackend` (`LadybugSearchBackend`, an embedded Cypher-queryable graph database).
+- `research_graph_query`: op-dispatched tool for reading the graph — `neighbors`, `subgraph`, `find_concepts`, `list_concepts` — with `relation_type` filtering and offset/limit paging.
+- `research_graph_analyze`: op-dispatched tool exposing graph algorithms over the corpus (`GraphAlgorithms`, built on NetworkX): `betweenness_centrality`, `pagerank`, `communities`, `paths`, `reachable`, `steiner_tree`, `predict_links`.
+- `research://graph/concepts`: a read-only resource listing the concept vocabulary, paged and bounded by the new `PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT`; never served from the response cache, since `research_graph_write` mutates the vocabulary it reads from.
+- `research://graph/export{?format}`: a read-only resource exporting the whole graph, as `cypher_json` (the backend's native node/edge dict) or `graphml` (via NetworkX); likewise excluded from the response cache.
+- `MetadataConflictError`: raised when a graph node/edge write's per-key metadata merge would overwrite an existing key with a differing value, rather than silently overwriting or merging it.
+- New environment variables: `PRIORIS_MCP_GRAPH_DIR`, `PRIORIS_MCP_GRAPH_CONCEPTS_MAX_LIMIT`.
+- Ten new Architecture Decision Records (ADR-00032 through ADR-00041) and a new SRS chapter, `docs/requirement-specification/search/03-graph-search.md`, documenting the graph-search design.
+
+### Changed
+
+- Now requires FastMCP 4.0.5 or above (previously 3.4.4 or above).
+
 ## [0.2.0] - 2026-08-16
 
 ### Added
 
-- `research_notes_create`/`research_notes_read`/`research_notes_update`/`research_notes_delete`: CRUD for user-authored notes against a document, or against a bare identifier predating any fetch, backed by a pluggable `NotesBackend` (SQLite in v1).
+- `research_notes_create`/`research_notes_read`/`research_notes_update`/`research_notes_delete`: CRUD for user-authored notes against a document, or against a bare identifier predating any fetch, backed by a pluggable `NotesBackend` (SQLite).
 - `research_notes_search`: structured filtering (provider, canonical identifier, format, date range, author, tags) plus optional full-text or semantic-vector search over note text (`mode`: `fts`\|`vector`\|`hybrid`), paged and returned newest first.
 - `notes://{note_id}/export`: a read-only resource returning a note's file representation (`suggested_filename`, `frontmatter`, `markdown_body`) for the caller to write to disk itself; never served from the response cache, since notes are mutable.
-- Semantic-vector search over previously-persisted documents and notes, alongside the existing FTS5 keyword search: `research_search_fetched` and `research_notes_search` both gain a `mode` parameter (`"fts"` (default) \| `"vector"` \| `"hybrid"`), backed by a pluggable `EmbeddingBackend`/`VectorSearchBackend` (fastembed + sqlite-vec in v1). Every response carries `index_status`, reporting each mechanism's `"ready"`/`"stale"`/`"not_built"`/`"building"` state.
+- Semantic-vector search over previously-persisted documents and notes, alongside the existing FTS5 keyword search: `research_search_fetched` and `research_notes_search` both gain a `mode` parameter (`"fts"` (default) \| `"vector"` \| `"hybrid"`), backed by a pluggable `EmbeddingBackend`/`VectorSearchBackend` (fastembed + sqlite-vec). Every response carries `index_status`, reporting each mechanism's `"ready"`/`"stale"`/`"not_built"`/`"building"` state.
 - Corpus-wide vector-index reconciliation: an embedding-model change (`PRIORIS_MCP_EMBEDDING_MODEL`) triggers an automatic background rebuild of every stale document/note vector at server startup, with live progress readable via the new `research://vector-index/rebuild-status` resource.
 - `research_discovery`: discover external research candidates not already in the local corpus, ranked by OpenAlex's embedding-based semantic search, with pagination and `from_year`/`to_year`/`open_access_only` filters. Each hit includes a `fetch_route` describing how to actually retrieve full text for it.
 - `research://openalex/work-types`: a read-only resource listing OpenAlex's work `type` vocabulary, for interpreting a `research_discovery` hit's own metadata.
@@ -60,7 +77,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `src/prioris_mcp/models/` (`arxiv`, `europepmc`, `localfile`, `common`): typed, per-shape Pydantic output models for every `research_*` tool and resource, replacing the previous ad hoc `dict` returns across the arXiv/Europe PMC/local filesystem providers and identifier routing.
 - Explicit, airgapped-friendly OCR configuration for `LiteParsePdfBackend`: `PRIORIS_MCP_PDF_OCR_ENABLED`, `PRIORIS_MCP_PDF_OCR_TESSDATA_PATH` (falls back to `TESSDATA_PREFIX`), `PRIORIS_MCP_PDF_OCR_SERVER_URL`, and `PRIORIS_MCP_PDF_OCR_SERVER_HEADERS`, instead of relying on liteparse's own defaults (which lazily download Tesseract language data over the network) — see [Configuration](docs/02-configuration.md) and [Security](docs/requirement-specification/05-security.md#ocr-language-data-is-a-network-dependency-of-parse_full_text) (fix [issue #11](https://github.com/anirbanbasu/prioris-mcp/issues/11)).
 - A SQLite-backed storage catalogue and per-document manifest (`storage/catalogue.py`, `storage/manifest.py`), replacing the previous flat JSONL manifest, with automatic migration of existing storage directories on first use (`storage/migration.py`) (fix [issue #18](https://github.com/anirbanbasu/prioris-mcp/issues/18)).
-- `research_search_fetched`: full-text search over previously-persisted document/markdown chunks, backed by a pluggable `SearchIndex` (SQLite FTS5 in v1), optionally scoped by provider/identifier/format (fix [issue #18](https://github.com/anirbanbasu/prioris-mcp/issues/18)).
+- `research_search_fetched`: full-text search over previously-persisted document/markdown chunks, backed by a pluggable `SearchIndex` (SQLite FTS5), optionally scoped by provider/identifier/format (fix [issue #18](https://github.com/anirbanbasu/prioris-mcp/issues/18)).
 - A `page` parameter on `research_arxiv_parse_full_text` and `research_localfile_parse_full_text` (and the corresponding `.../markdown` resource template), resolved against the per-document manifest so a specific PDF page's Markdown can be retrieved directly instead of paging by character offset alone (fix [issue #12](https://github.com/anirbanbasu/prioris-mcp/issues/12)).
 
 ### Changed
@@ -149,7 +166,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Concurrently *executing* (not just concurrently *awaited*) JATS-to-HTML transforms are capped by `PRIORIS_MCP_JATS_MAX_CONCURRENT_TRANSFORMS` (default `min(4, os.cpu_count())`), closing an unbounded-thread-accumulation risk under sustained malicious input.
 - The Europe PMC provider only ever follows its own same-domain `fullTextXML` endpoint for full-text retrieval, never the publisher- or third-party-hosted full-text URLs surfaced in search results.
 
-[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.2.0...HEAD
+[unreleased]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/anirbanbasu/prioris-mcp/compare/v0.1.0.post2...v0.1.1
 [0.1.0.post2]: https://github.com/anirbanbasu/prioris-mcp/compare/v.0.1.0...v0.1.0.post2
